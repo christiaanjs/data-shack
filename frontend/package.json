@@ -10,10 +10,15 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "preact": "^10.25.4"
+    "@duckdb/duckdb-wasm": "^1.32.0",
+    "@tailwindcss/vite": "^4.3.0",
+    "daisyui": "^5.5.20",
+    "preact": "^10.25.4",
+    "tailwindcss": "^4.3.0"
   },
   "devDependencies": {
     "@preact/preset-vite": "^2.9.4",
+    "@types/emscripten": "^1.41.5",
     "typescript": "^5.8.3",
     "vite": "^6.3.5"
   }

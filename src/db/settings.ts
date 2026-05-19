@@ -1,0 +1,90 @@
+export interface CredentialRow {
+  id: string;
+  name: string;
+  type: string;
+  created_at: number;
+}
+
+export interface StorageBackendRow {
+  id: string;
+  name: string;
+  type: string;
+  created_at: number;
+}
+
+export async function listCredentials(db: D1Database, userId: string): Promise<CredentialRow[]> {
+  const result = await db
+    .prepare(
+      "SELECT id, name, type, created_at FROM credentials WHERE user_id = ? ORDER BY created_at ASC",
+    )
+    .bind(userId)
+    .all<CredentialRow>();
+  return result.results;
+}
+
+export async function insertCredential(
+  db: D1Database,
+  opts: { userId: string; name: string; type: string; encryptedConfig: string },
+): Promise<{ id: string }> {
+  const id = `cred_${crypto.randomUUID().replace(/-/g, "")}`;
+  const now = Date.now();
+  await db
+    .prepare(
+      "INSERT INTO credentials (id, user_id, name, type, encrypted_config, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(id, opts.userId, opts.name, opts.type, opts.encryptedConfig, now, now)
+    .run();
+  return { id };
+}
+
+export async function deleteCredential(
+  db: D1Database,
+  id: string,
+  userId: string,
+): Promise<boolean> {
+  const result = await db
+    .prepare("DELETE FROM credentials WHERE id = ? AND user_id = ?")
+    .bind(id, userId)
+    .run();
+  return (result.meta.changes ?? 0) > 0;
+}
+
+export async function listStorageBackends(
+  db: D1Database,
+  userId: string,
+): Promise<StorageBackendRow[]> {
+  const result = await db
+    .prepare(
+      "SELECT id, name, type, created_at FROM storage_backends WHERE user_id = ? ORDER BY created_at ASC",
+    )
+    .bind(userId)
+    .all<StorageBackendRow>();
+  return result.results;
+}
+
+export async function insertStorageBackend(
+  db: D1Database,
+  opts: { userId: string; name: string; type: string; encryptedConfig: string },
+): Promise<{ id: string }> {
+  const id = `sb_${crypto.randomUUID().replace(/-/g, "")}`;
+  const now = Date.now();
+  await db
+    .prepare(
+      "INSERT INTO storage_backends (id, user_id, name, type, encrypted_config, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(id, opts.userId, opts.name, opts.type, opts.encryptedConfig, now, now)
+    .run();
+  return { id };
+}
+
+export async function deleteStorageBackend(
+  db: D1Database,
+  id: string,
+  userId: string,
+): Promise<boolean> {
+  const result = await db
+    .prepare("DELETE FROM storage_backends WHERE id = ? AND user_id = ?")
+    .bind(id, userId)
+    .run();
+  return (result.meta.changes ?? 0) > 0;
+}
