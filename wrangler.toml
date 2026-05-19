@@ -26,7 +26,7 @@ name = "data-shack-staging"
 [[env.staging.d1_databases]]
 binding = "DB"
 database_name = "data-shack-db-staging"
-database_id = "REPLACE_WITH_YOUR_STAGING_DB_ID"
+database_id = "1910faa5-f94e-4e15-aedd-648e604a6915"
 
 [env.staging.vars]
 ENABLE_OAUTH = "true"
