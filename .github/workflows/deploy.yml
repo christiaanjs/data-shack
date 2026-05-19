@@ -28,6 +28,17 @@ jobs:
       - run: npm ci --prefix frontend
       - run: npm run build --prefix frontend
 
+      - name: Run D1 migrations
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          if [[ "${{ inputs.environment }}" == "production" ]]; then
+            npx wrangler d1 migrations apply data-shack-db
+          else
+            npx wrangler d1 migrations apply data-shack-db-staging --env staging
+          fi
+
       - name: Deploy worker
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
