@@ -199,7 +199,7 @@ fi
 
 # Apply migrations
 info "Applying migrations…"
-$W d1 migrations apply "$DB_NAME" "${CF_ENV_ARGS[@]}"
+$W d1 migrations apply "$DB_NAME" "${CF_ENV_ARGS[@]+${CF_ENV_ARGS[@]}}"
 ok "Migrations applied"
 
 # ── Step 2: Google OAuth 2.0 client ───────────────────────────────────────────
@@ -245,7 +245,7 @@ step "Pushing secrets to Cloudflare (env: $ENV)"
 
 push_secret() {
   local name="$1" value="$2"
-  printf '%s' "$value" | $W secret put "$name" "${CF_ENV_ARGS[@]}"
+  printf '%s' "$value" | $W secret put "$name" "${CF_ENV_ARGS[@]+${CF_ENV_ARGS[@]}}"
   ok "$name"
 }
 
@@ -257,23 +257,23 @@ push_secret JWT_SECRET           "$JWT_SECRET"
 
 if $DEPLOY; then
   step "Deploying worker ($ENV)"
-  $W deploy "${CF_ENV_ARGS[@]}"
+  $W deploy "${CF_ENV_ARGS[@]+${CF_ENV_ARGS[@]}}"
   ok "Worker deployed"
 else
   echo
   warn "Worker not deployed. Run when ready:"
-  info "  $W deploy ${CF_ENV_ARGS[*]-}"
+  info "  $W deploy ${CF_ENV_ARGS[*]+${CF_ENV_ARGS[*]}}"
 fi
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 step "Next steps"
-info "1. Deploy the worker (if not done):  $W deploy ${CF_ENV_ARGS[*]-}"
+info "1. Deploy the worker (if not done):  $W deploy ${CF_ENV_ARGS[*]+${CF_ENV_ARGS[*]}}"
 info "2. Note your worker URL and set it as VITE_WORKER_URL in Cloudflare Pages settings"
 info "3. Set ALLOWED_ORIGIN in wrangler.toml to match your Pages domain, then redeploy"
 info "4. If you want ENABLE_DEV_AUTH for this env, run:"
-info "   printf 'true' | $W secret put ENABLE_DEV_AUTH ${CF_ENV_ARGS[*]-}"
-info "   printf '<token>' | $W secret put DEV_TOKEN ${CF_ENV_ARGS[*]-}"
-info "   printf '<userId>' | $W secret put DEV_USER_ID ${CF_ENV_ARGS[*]-}"
+info "   printf 'true' | $W secret put ENABLE_DEV_AUTH ${CF_ENV_ARGS[*]+${CF_ENV_ARGS[*]}}"
+info "   printf '<token>' | $W secret put DEV_TOKEN ${CF_ENV_ARGS[*]+${CF_ENV_ARGS[*]}}"
+info "   printf '<userId>' | $W secret put DEV_USER_ID ${CF_ENV_ARGS[*]+${CF_ENV_ARGS[*]}}"
 echo
 ok "Bootstrap complete for [$ENV]"

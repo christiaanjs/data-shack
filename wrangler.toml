@@ -5,7 +5,7 @@ compatibility_date = "2025-05-06"
 [[d1_databases]]
 binding = "DB"
 database_name = "data-shack-db"
-database_id = "REPLACE_WITH_YOUR_DB_ID"
+database_id = "b5f7796d-323f-49d0-aca1-e39a64bdb55b"
 
 [vars]
 ENABLE_OAUTH = "true"
