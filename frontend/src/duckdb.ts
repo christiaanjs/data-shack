@@ -1,17 +1,25 @@
 import * as duckdb from "@duckdb/duckdb-wasm";
+import ehWorkerUrl from "@duckdb/duckdb-wasm/dist/duckdb-browser-eh.worker.js?url";
+import ehWasmUrl from "@duckdb/duckdb-wasm/dist/duckdb-eh.wasm?url";
+import mvpWorkerUrl from "@duckdb/duckdb-wasm/dist/duckdb-browser-mvp.worker.js?url";
+import mvpWasmUrl from "@duckdb/duckdb-wasm/dist/duckdb-mvp.wasm?url";
+
+const LOCAL_BUNDLES: duckdb.DuckDBBundles = {
+  mvp: { mainModule: mvpWasmUrl, mainWorker: mvpWorkerUrl },
+  eh: { mainModule: ehWasmUrl, mainWorker: ehWorkerUrl },
+};
 
 let dbInstance: duckdb.AsyncDuckDB | null = null;
 
 export async function initDuckDB(): Promise<duckdb.AsyncDuckDB> {
   if (dbInstance) return dbInstance;
 
-  const bundles = duckdb.getJsDelivrBundles();
-  const bundle = await duckdb.selectBundle(bundles);
+  const bundle = await duckdb.selectBundle(LOCAL_BUNDLES);
 
   const workerUrl = bundle.mainWorker;
   if (!workerUrl) throw new Error("No DuckDB worker URL available for this platform");
 
-  const worker = new Worker(workerUrl, { type: "module" });
+  const worker = new Worker(workerUrl);
   const logger = new duckdb.ConsoleLogger(duckdb.LogLevel.WARNING);
   const db = new duckdb.AsyncDuckDB(logger, worker);
   await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
