@@ -3,16 +3,23 @@ import { createMiddleware } from "hono/factory";
 import { Hono } from "hono/tiny";
 import { authenticate } from "./auth/middleware.ts";
 import { oauthRouter } from "./auth/oauth.ts";
-import { encryptConfig } from "./crypto.ts";
+import { decryptConfig, encryptConfig } from "./crypto.ts";
 import {
   deleteCredential,
   deleteStorageBackend,
+  getCredentialConfig,
   insertCredential,
   insertStorageBackend,
   listCredentials,
   listStorageBackends,
 } from "./db/settings.ts";
-import { resolveUri, verifyStorageToken } from "./storage/resolve.ts";
+import {
+  parseHttpDsUri,
+  resolveUri,
+  signDataSourceToken,
+  verifyDataSourceToken,
+  verifyStorageToken,
+} from "./storage/resolve.ts";
 import type { Env } from "./types.ts";
 
 function isAllowedOrigin(origin: string, allowedOrigin: string, allowSubdomains: boolean): boolean {
@@ -69,10 +76,20 @@ app.post("/api/storage/resolve", requireAuth, async (c) => {
   const body = await c.req.json<{ uris?: unknown }>();
   if (!Array.isArray(body.uris)) return c.json({ error: "uris must be an array" }, 400);
   const workerOrigin = new URL(c.req.url).origin;
+  const userId = c.get("userId");
   const urls: Record<string, string> = {};
   for (const uri of body.uris) {
     if (typeof uri !== "string") continue;
-    urls[uri] = await resolveUri(uri, c.env, workerOrigin);
+    try {
+      if (uri.startsWith("http-ds://")) {
+        urls[uri] = await resolveHttpDsUri(uri, c.env, userId, workerOrigin);
+      } else {
+        urls[uri] = await resolveUri(uri, c.env, workerOrigin);
+      }
+    } catch (err) {
+      console.error(err);
+      // Leave this URI out of the result rather than failing the whole request
+    }
   }
   return c.json({ urls });
 });
@@ -123,6 +140,149 @@ app.on(["GET", "HEAD"], "/api/storage/obj/:token", async (c) => {
     return new Response(obj.body, { status: 206, headers });
   }
   return new Response(obj.body, { headers });
+});
+
+// ── HTTP data source helpers ──────────────────────────────────────────────
+
+async function resolveHttpDsUri(
+  uri: string,
+  env: Env,
+  userId: string,
+  workerOrigin: string,
+): Promise<string> {
+  const parsed = parseHttpDsUri(uri);
+  if (!parsed) throw new Error(`Invalid http-ds URI: ${uri}`);
+
+  const row = await getCredentialConfig(env.DB, parsed.credentialId, userId);
+  if (!row || row.type !== "http")
+    throw new Error(`HTTP credential not found: ${parsed.credentialId}`);
+
+  const now = Math.floor(Date.now() / 1000);
+  const token = await signDataSourceToken(
+    {
+      sub: "data-source",
+      aud: "data-source",
+      iat: now,
+      exp: now + 3600,
+      jti: crypto.randomUUID(),
+      c: parsed.credentialId,
+      p: parsed.path,
+      u: userId,
+    },
+    env.JWT_SECRET,
+  );
+
+  return `${workerOrigin}/api/data-sources/obj/${token}`;
+}
+
+function resolveHeaderTemplates(
+  headers: Record<string, string>,
+  variables: Record<string, string>,
+): Record<string, string> {
+  const resolved: Record<string, string> = {};
+  for (const [key, value] of Object.entries(headers)) {
+    resolved[key] = value.replace(/\{\{(\w+)\}\}/g, (_, name) => variables[name] ?? "");
+  }
+  return resolved;
+}
+
+async function decryptHttpConfig(
+  encryptedConfig: string,
+  jwtSecret: string,
+): Promise<{
+  baseUrl: string;
+  headers: Record<string, string>;
+  variables: Record<string, string>;
+} | null> {
+  try {
+    const raw = JSON.parse(await decryptConfig(encryptedConfig, jwtSecret)) as Record<
+      string,
+      unknown
+    >;
+    const baseUrl = raw.baseUrl;
+    if (typeof baseUrl !== "string" || !baseUrl.startsWith("http")) return null;
+    const headers =
+      typeof raw.headers === "object" && raw.headers !== null
+        ? (raw.headers as Record<string, string>)
+        : {};
+    const variables =
+      typeof raw.variables === "object" && raw.variables !== null
+        ? (raw.variables as Record<string, string>)
+        : {};
+    return { baseUrl, headers, variables };
+  } catch {
+    return null;
+  }
+}
+
+// Serves HTTP data source responses for DuckDB httpfs — token is the auth mechanism.
+app.on(["GET", "HEAD"], "/api/data-sources/obj/:token", async (c) => {
+  const token = c.req.param("token");
+  const payload = await verifyDataSourceToken(token, c.env.JWT_SECRET);
+  if (!payload) return new Response("Unauthorized", { status: 401 });
+
+  const row = await getCredentialConfig(c.env.DB, payload.c, payload.u);
+  if (!row || row.type !== "http") return new Response("Not Found", { status: 404 });
+
+  const config = await decryptHttpConfig(row.encrypted_config, c.env.JWT_SECRET);
+  if (!config) return new Response("Bad Gateway", { status: 502 });
+
+  const url = config.baseUrl.replace(/\/$/, "") + payload.p;
+  const resolvedHeaders = resolveHeaderTemplates(config.headers, config.variables);
+
+  const method = c.req.method === "HEAD" ? "HEAD" : "GET";
+  let upstream: Response;
+  try {
+    upstream = await fetch(url, { method, headers: resolvedHeaders });
+  } catch {
+    return new Response("Bad Gateway", { status: 502 });
+  }
+
+  return new Response(upstream.body, {
+    status: upstream.status,
+    headers: {
+      "Content-Type": upstream.headers.get("Content-Type") ?? "application/octet-stream",
+    },
+  });
+});
+
+// Direct proxy for the test UI — requires Bearer JWT auth.
+app.post("/api/data-sources/:id/fetch", requireAuth, async (c) => {
+  const credentialId = c.req.param("id");
+  const body = await c.req.json<{ path?: unknown; method?: unknown }>();
+
+  const row = await getCredentialConfig(c.env.DB, credentialId, c.get("userId"));
+  if (!row) return c.json({ error: "not_found", error_description: "Credential not found" }, 404);
+  if (row.type !== "http") {
+    return c.json(
+      { error: "invalid_type", error_description: "Credential is not an http data source" },
+      400,
+    );
+  }
+
+  const config = await decryptHttpConfig(row.encrypted_config, c.env.JWT_SECRET);
+  if (!config) {
+    return c.json({ error: "config_error", error_description: "Invalid credential config" }, 502);
+  }
+
+  const path = typeof body.path === "string" ? body.path : "/";
+  const method = typeof body.method === "string" ? body.method.toUpperCase() : "GET";
+  const url = config.baseUrl.replace(/\/$/, "") + (path.startsWith("/") ? path : `/${path}`);
+  const resolvedHeaders = resolveHeaderTemplates(config.headers, config.variables);
+
+  let upstream: Response;
+  try {
+    upstream = await fetch(url, { method, headers: resolvedHeaders });
+  } catch {
+    return c.json({ error: "bad_gateway", error_description: "Upstream request failed" }, 502);
+  }
+
+  return new Response(upstream.body, {
+    status: upstream.status,
+    headers: {
+      "Content-Type": upstream.headers.get("Content-Type") ?? "application/octet-stream",
+    },
+  });
 });
 
 // ── Credentials endpoints ─────────────────────────────────────────────────

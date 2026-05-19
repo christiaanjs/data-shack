@@ -19,7 +19,7 @@ interface StorageBackendRow {
   created_at: number;
 }
 
-const CREDENTIAL_TYPES = ["akahu", "google_oauth", "generic_token"];
+const CREDENTIAL_TYPES = ["http", "google_oauth", "generic_token"];
 const BACKEND_TYPES = ["r2-bound", "s3", "r2-s3compat", "gcs", "azure", "https"];
 
 function AddForm({

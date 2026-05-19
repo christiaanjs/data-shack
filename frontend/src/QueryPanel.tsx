@@ -1,5 +1,5 @@
 import type { AsyncDuckDB } from "@duckdb/duckdb-wasm";
-import { useEffect, useRef, useState } from "preact/hooks";
+import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import { initDuckDB, runQuery } from "./duckdb.ts";
 
 interface QueryPanelProps {
@@ -17,7 +17,13 @@ interface QueryResult {
   rows: unknown[][];
 }
 
-const R2_URI_REGEX = /r2:\/\/[^\s'"]+/g;
+interface CredentialRow {
+  id: string;
+  name: string;
+  type: string;
+}
+
+const STORAGE_URI_REGEX = /(?:r2|http-ds):\/\/[^\s'"]+/g;
 const PLACEHOLDER_SQL = "SELECT * FROM read_json('r2://data-shack-storage/sample.ndjson') LIMIT 10";
 
 export function QueryPanel({ workerBase, getAuthHeaders }: QueryPanelProps) {
@@ -35,6 +41,27 @@ export function QueryPanel({ workerBase, getAuthHeaders }: QueryPanelProps) {
   const [queryError, setQueryError] = useState<string | null>(null);
   const [querying, setQuerying] = useState(false);
 
+  const [httpCredentials, setHttpCredentials] = useState<CredentialRow[]>([]);
+  const [selectedCredId, setSelectedCredId] = useState("");
+  const [dsPath, setDsPath] = useState("/");
+  const [dsFetching, setDsFetching] = useState(false);
+  const [dsResponse, setDsResponse] = useState<{ status: number; body: string } | null>(null);
+  const [dsError, setDsError] = useState<string | null>(null);
+
+  const fetchHttpCredentials = useCallback(async () => {
+    try {
+      const headers = await getAuthHeaders();
+      const res = await fetch(`${workerBase}/api/credentials`, { headers });
+      if (!res.ok) return;
+      const data = (await res.json()) as { credentials: CredentialRow[] };
+      const http = data.credentials.filter((c) => c.type === "http");
+      setHttpCredentials(http);
+      if (http.length > 0 && !selectedCredId) setSelectedCredId(http[0]?.id ?? "");
+    } catch {
+      // non-fatal
+    }
+  }, [workerBase, getAuthHeaders, selectedCredId]);
+
   useEffect(() => {
     initDuckDB()
       .then((db) => {
@@ -45,6 +72,31 @@ export function QueryPanel({ workerBase, getAuthHeaders }: QueryPanelProps) {
         setDbError(err instanceof Error ? err.message : "DuckDB failed to initialize");
       });
   }, []);
+
+  useEffect(() => {
+    fetchHttpCredentials().catch(() => {});
+  }, [fetchHttpCredentials]);
+
+  async function handleDsFetch() {
+    if (!selectedCredId) return;
+    setDsFetching(true);
+    setDsError(null);
+    setDsResponse(null);
+    try {
+      const headers = await getAuthHeaders();
+      const res = await fetch(`${workerBase}/api/data-sources/${selectedCredId}/fetch`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...headers },
+        body: JSON.stringify({ path: dsPath }),
+      });
+      const text = await res.text();
+      setDsResponse({ status: res.status, body: text.slice(0, 3000) });
+    } catch (err) {
+      setDsError(err instanceof Error ? err.message : "Fetch failed");
+    } finally {
+      setDsFetching(false);
+    }
+  }
 
   async function handleResolve() {
     const uris = uriInput
@@ -80,7 +132,7 @@ export function QueryPanel({ workerBase, getAuthHeaders }: QueryPanelProps) {
     setQueryResult(null);
 
     try {
-      const uris = Array.from(new Set(rawSql.match(R2_URI_REGEX) ?? []));
+      const uris = Array.from(new Set(rawSql.match(STORAGE_URI_REGEX) ?? []));
       let resolvedSql = rawSql;
 
       if (uris.length > 0) {
@@ -172,6 +224,74 @@ export function QueryPanel({ workerBase, getAuthHeaders }: QueryPanelProps) {
           )}
         </div>
       </div>
+
+      {/* HTTP data source tester */}
+      {httpCredentials.length > 0 && (
+        <div class="card bg-base-200">
+          <div class="card-body gap-3">
+            <h2 class="card-title text-base">Test HTTP Data Source</h2>
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <fieldset class="fieldset sm:col-span-1">
+                <legend class="fieldset-legend">Credential</legend>
+                <select
+                  class="select select-bordered select-sm w-full"
+                  value={selectedCredId}
+                  onChange={(e) => setSelectedCredId((e.target as HTMLSelectElement).value)}
+                >
+                  {httpCredentials.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}
+                    </option>
+                  ))}
+                </select>
+              </fieldset>
+              <fieldset class="fieldset sm:col-span-2">
+                <legend class="fieldset-legend">Path</legend>
+                <input
+                  type="text"
+                  class="input input-bordered input-sm w-full font-mono"
+                  value={dsPath}
+                  onInput={(e) => setDsPath((e.target as HTMLInputElement).value)}
+                  placeholder="/accounts"
+                />
+              </fieldset>
+            </div>
+            {selectedCredId && (
+              <p class="text-xs text-base-content/50 font-mono">
+                DuckDB URI:{" "}
+                <span class="select-all">
+                  http-ds://{selectedCredId}
+                  {dsPath.startsWith("/") ? dsPath : `/${dsPath}`}
+                </span>
+              </p>
+            )}
+            <div>
+              <button
+                type="button"
+                class="btn btn-sm btn-outline"
+                onClick={() => handleDsFetch().catch(() => {})}
+                disabled={dsFetching || !selectedCredId}
+              >
+                {dsFetching && <span class="loading loading-spinner loading-xs" />}
+                {dsFetching ? "Fetching…" : "Fetch"}
+              </button>
+            </div>
+            {dsError && (
+              <div role="alert" class="alert alert-error py-2 text-sm">
+                <span>{dsError}</span>
+              </div>
+            )}
+            {dsResponse && (
+              <div class="space-y-1">
+                <p class="text-xs text-base-content/50">Status: {dsResponse.status}</p>
+                <pre class="bg-base-300 rounded p-3 text-xs overflow-x-auto max-h-64 whitespace-pre-wrap break-all">
+                  {dsResponse.body}
+                </pre>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* SQL editor */}
       <div class="card bg-base-200">
