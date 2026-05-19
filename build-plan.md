@@ -2,6 +2,17 @@
 
 Each stage produces something functional and testable independently. Stages 1–3 are the foundation; 4–6 can be parallelised; 7 and 8 depend on 5 and 6 but not each other; 9 onward builds on the complete stack.
 
+## Implementation status
+
+| Stage | Description | Status |
+|---|---|---|
+| Auth (from Stage 2) | OAuth 2.0 + JWT worker, D1 schema | ✅ Done |
+| Stage 1 | Skeleton with one working data path | Not started |
+| Stage 2 (remainder) | Credential storage, storage backends, settings UI | Not started |
+| Stage 3–10 | See below | Not started |
+
+Auth was built first to establish the security boundary before any data flows through the system. All subsequent stages build on top of this foundation — see [Stage 2](#stage-2--auth-and-credential-storage) for what's done and what remains.
+
 ---
 
 ## Stage 1 — Skeleton with one working data path
@@ -24,14 +35,27 @@ Each stage produces something functional and testable independently. Stages 1–
 
 **Goal:** The warehouse is yours, not anyone's.
 
-- OAuth setup - Google provider
-- D1 with two tables:
+### ✅ Auth layer — done
+
+Implemented as a standalone Cloudflare Worker with D1, ahead of Stage 1, to establish the security boundary before any data paths are built.
+
+- Google OAuth 2.0 provider with PKCE (RFC 7636)
+- Dynamic Client Registration (RFC 7591) — Claude.ai registers itself as a public client
+- Protected-resource metadata (RFC 9728)
+- D1 schema: `users`, `oauth_identities`, `oauth_states`, `oauth_clients`, `oauth_codes`, `oauth_refresh_tokens`
+- HMAC-HS256 JWTs (1 h access tokens), rotating refresh tokens (30 d), stored as SHA-256 hashes
+- Bearer JWT middleware on all protected routes
+- 43 vitest tests via `@cloudflare/vitest-pool-workers`
+
+### Remaining
+
+- D1 tables for credential and storage backend storage:
   - `credentials` — encrypted source API credentials (Akahu token, OAuth tokens, etc.)
   - `storage_backends` — encrypted storage config and credentials (bucket, region, endpoint, access keys); one row per backend
-- Worker proxy validates the Access JWT on every request before resolving storage URIs or decrypting credentials
+- Worker proxy validates the Bearer JWT on every request before resolving storage URIs or decrypting credentials
 - Minimal settings UI to add a credential or storage backend by name and type
 
-**Test:** Unauthenticated requests are rejected. Credentials and storage backend config survive a round-trip through D1 encrypted and decrypted correctly. Access JWT validation is correct.
+**Test:** Credentials and storage backend config survive a round-trip through D1 encrypted and decrypted correctly.
 
 ---
 

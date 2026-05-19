@@ -1,0 +1,62 @@
+name: Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+
+jobs:
+  deploy:
+    name: Deploy to ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - run: npm ci
+      - run: npm ci --prefix frontend
+      - run: npm run build --prefix frontend
+
+      - name: Run D1 migrations
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          if [[ "${{ inputs.environment }}" == "production" ]]; then
+            npx wrangler d1 migrations apply data-shack-db
+          else
+            npx wrangler d1 migrations apply data-shack-db-staging --env staging
+          fi
+
+      - name: Deploy worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          if [[ "${{ inputs.environment }}" == "production" ]]; then
+            npx wrangler deploy
+          else
+            npx wrangler deploy --env staging
+          fi
+
+      - name: Deploy frontend (Pages)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          if [[ "${{ inputs.environment }}" == "production" ]]; then
+            npx wrangler pages deploy frontend/dist --project-name data-shack
+          else
+            npx wrangler pages deploy frontend/dist --project-name data-shack-staging
+          fi
