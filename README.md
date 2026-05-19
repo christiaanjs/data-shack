@@ -2,9 +2,26 @@
 
 A personal data integration platform built on Cloudflare that brings your data together for querying, analysis, and dashboarding — with a privacy-preserving twist: the compute engine runs in your own browser.
 
+## What's built
+
+The auth layer was implemented first to establish the security boundary before any data paths are built.
+
+| Component | Status |
+|---|---|
+| OAuth 2.0 worker (Google, PKCE, DCR, JWT, refresh rotation) | ✅ Done |
+| D1 schema (users, oauth_identities, oauth tables) | ✅ Done |
+| Browser compute engine (DuckDB-WASM + WebSocket) | Not started |
+| Worker proxy (storage resolver, credential vault) | Not started |
+| Catalog Durable Object | Not started |
+| Session Durable Object + MCP server | Not started |
+| ETL workers (Akahu, Google Sheets) | Not started |
+| Dashboarding platform | Not started |
+
+See [`build-plan.md`](./build-plan.md) for the full sequenced plan.
+
 ## Architecture Overview
 
-The system is built on Cloudflare's stack (Workers, D1, R2, Durable Objects, Pages) with Cloudflare Access for authentication. SQL execution happens in a **browser-local DuckDB-WASM instance** rather than on the server. The server orchestrates; your browser computes.
+The system is built on Cloudflare's stack (Workers, D1, R2, Durable Objects, Pages) with OAuth 2.0 (Google) and JWT-based authentication. SQL execution happens in a **browser-local DuckDB-WASM instance** rather than on the server. The server orchestrates; your browser computes.
 
 The key structural insight is a clean split between the **control plane** (all traffic through the Worker proxy) and the **data plane** (browser reads and writes object storage directly via Worker-resolved URLs). Large Parquet files never pass through a Worker. Storage backends are pluggable — the catalog records URIs, the Worker proxy resolves them to HTTPS URLs at access time, and DuckDB's `httpfs` is unaware of which backend it's talking to.
 
@@ -25,7 +42,7 @@ For data access, the browser requests a resolved HTTPS URL from the Worker proxy
 
 Cloudflare Workers sit between all clients (browser, ETL Workers, MCP server) and the backend. The Worker proxy is responsible for:
 
-- Validating Cloudflare Access JWTs on every request
+- Validating Bearer JWTs on every request
 - Decrypting source credentials and storage backend config from D1 at request time
 - Resolving storage URIs to readable or writable HTTPS URLs — signed URLs for R2/S3/GCS, SAS tokens for Azure, passthrough for public HTTPS endpoints — with URI prefix validation before any writable URL is issued
 - Forwarding catalog and job queue operations to the catalog Durable Object
