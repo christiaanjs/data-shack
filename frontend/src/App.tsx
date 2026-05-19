@@ -36,8 +36,7 @@ export function App() {
           setAuthed(true);
         })
         .catch((err: unknown) => {
-          const msg = err instanceof Error ? err.message : "Auth failed";
-          setCallbackError(msg);
+          setCallbackError(err instanceof Error ? err.message : "Auth failed");
           setAuthed(false);
         });
       return;
@@ -48,7 +47,6 @@ export function App() {
 
   useEffect(() => {
     if (!authed) return;
-
     const fetchUserId = async () => {
       const headers = await getAuthHeaders();
       if (!DEV_TOKEN && !headers.Authorization) {
@@ -56,7 +54,6 @@ export function App() {
         setAuthed(false);
         return;
       }
-
       const res = await fetch(`${WORKER_BASE}/me`, { headers });
       if (res.status === 401) {
         clearTokens();
@@ -68,62 +65,83 @@ export function App() {
         setUserId(data.userId);
       }
     };
-
     fetchUserId().catch(() => {});
   }, [authed]);
 
-  if (authed === null) return <div class="loading">Loading…</div>;
+  if (authed === null) {
+    return (
+      <div class="flex items-center justify-center min-h-dvh">
+        <span class="loading loading-spinner loading-lg" />
+      </div>
+    );
+  }
 
   if (!authed) {
     return (
-      <div class="login-screen">
-        <h1>Data Shack</h1>
-        <p class="tagline">Your personal data warehouse</p>
-        {callbackError && <p class="error-banner">{callbackError}</p>}
-        <button type="button" class="login-btn" onClick={() => startLogin()}>
-          Sign in with Google
-        </button>
+      <div class="hero min-h-dvh bg-base-200">
+        <div class="hero-content text-center flex-col gap-2">
+          <h1 class="text-5xl font-bold">Data Shack</h1>
+          <p class="text-base-content/60 text-lg">Your personal data warehouse</p>
+          {callbackError && (
+            <div class="alert alert-error max-w-sm">
+              <span>{callbackError}</span>
+            </div>
+          )}
+          <button type="button" class="btn btn-primary mt-2" onClick={() => startLogin()}>
+            Sign in with Google
+          </button>
+        </div>
       </div>
     );
   }
 
   return (
-    <>
-      <header class="app-header">
-        <h1>Data Shack</h1>
-        <nav class="tab-nav">
-          <button
-            type="button"
-            class={`tab-btn${activeTab === "query" ? " active" : ""}`}
-            onClick={() => setActiveTab("query")}
-          >
-            Query
-          </button>
-          <button
-            type="button"
-            class={`tab-btn${activeTab === "settings" ? " active" : ""}`}
-            onClick={() => setActiveTab("settings")}
-          >
-            Settings
-          </button>
-        </nav>
-        <div class="spacer" />
-        {userId && <span class="user-id">{userId}</span>}
-        {!DEV_TOKEN && (
-          <button
-            type="button"
-            class="sign-out-btn"
-            onClick={() => {
-              clearTokens();
-              setAuthed(false);
-              setUserId(null);
-            }}
-          >
-            Sign out
-          </button>
-        )}
-      </header>
-      <main class="app-main">
+    <div class="min-h-dvh flex flex-col">
+      <div class="navbar bg-base-200 border-b border-base-300 sticky top-0 z-10">
+        <div class="navbar-start">
+          <span class="text-lg font-bold px-2">Data Shack</span>
+        </div>
+        <div class="navbar-center">
+          <div role="tablist" class="tabs tabs-border">
+            <button
+              type="button"
+              role="tab"
+              class={`tab${activeTab === "query" ? " tab-active" : ""}`}
+              onClick={() => setActiveTab("query")}
+            >
+              Query
+            </button>
+            <button
+              type="button"
+              role="tab"
+              class={`tab${activeTab === "settings" ? " tab-active" : ""}`}
+              onClick={() => setActiveTab("settings")}
+            >
+              Settings
+            </button>
+          </div>
+        </div>
+        <div class="navbar-end gap-3 pr-2">
+          {userId && (
+            <span class="text-xs text-base-content/50 font-mono hidden sm:block">{userId}</span>
+          )}
+          {!DEV_TOKEN && (
+            <button
+              type="button"
+              class="btn btn-ghost btn-sm"
+              onClick={() => {
+                clearTokens();
+                setAuthed(false);
+                setUserId(null);
+              }}
+            >
+              Sign out
+            </button>
+          )}
+        </div>
+      </div>
+
+      <main class="flex-1">
         {activeTab === "query" && (
           <QueryPanel workerBase={WORKER_BASE} getAuthHeaders={getAuthHeaders} />
         )}
@@ -131,6 +149,6 @@ export function App() {
           <SettingsPanel workerBase={WORKER_BASE} getAuthHeaders={getAuthHeaders} />
         )}
       </main>
-    </>
+    </div>
   );
 }

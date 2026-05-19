@@ -94,9 +94,7 @@ export function QueryPanel({ workerBase, getAuthHeaders }: QueryPanelProps) {
         const data = (await res.json()) as { urls: Record<string, string> };
         for (const uri of uris) {
           const url = data.urls[uri];
-          if (url) {
-            resolvedSql = resolvedSql.replaceAll(uri, url);
-          }
+          if (url) resolvedSql = resolvedSql.replaceAll(uri, url);
         }
       }
 
@@ -110,84 +108,131 @@ export function QueryPanel({ workerBase, getAuthHeaders }: QueryPanelProps) {
   }
 
   return (
-    <div class="query-panel">
-      {dbError && <div class="error-banner">DuckDB error: {dbError}</div>}
-      {!dbReady && !dbError && <div class="loading">Initializing DuckDB…</div>}
+    <div class="max-w-4xl mx-auto p-6 space-y-4">
+      {dbError && (
+        <div role="alert" class="alert alert-error">
+          <span>DuckDB error: {dbError}</span>
+        </div>
+      )}
+      {!dbReady && !dbError && (
+        <div class="flex items-center gap-3 text-base-content/60 py-2">
+          <span class="loading loading-spinner loading-sm" />
+          <span>Initialising DuckDB…</span>
+        </div>
+      )}
 
-      <section class="panel-section">
-        <h3>Resolve Storage URIs</h3>
-        <textarea
-          class="uri-input"
-          placeholder="Storage URIs (one per line, e.g. r2://data-shack-storage/sample.ndjson)"
-          rows={3}
-          value={uriInput}
-          onInput={(e) => setUriInput((e.target as HTMLTextAreaElement).value)}
-        />
-        <button type="button" onClick={handleResolve} disabled={resolving || !uriInput.trim()}>
-          {resolving ? "Resolving…" : "Resolve"}
-        </button>
-        {resolveError && <div class="error-banner">{resolveError}</div>}
-        {resolvedUris.length > 0 && (
-          <table class="resolved-table">
-            <thead>
-              <tr>
-                <th>URI</th>
-                <th>Resolved URL</th>
-              </tr>
-            </thead>
-            <tbody>
-              {resolvedUris.map(({ uri, url }) => (
-                <tr key={uri}>
-                  <td class="mono">{uri}</td>
-                  <td class="mono url-cell">{url}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </section>
-
-      <section class="panel-section">
-        <h3>SQL Query</h3>
-        <textarea
-          class="sql-input"
-          placeholder={PLACEHOLDER_SQL}
-          rows={6}
-          value={sql}
-          onInput={(e) => setSql((e.target as HTMLTextAreaElement).value)}
-        />
-        <button type="button" onClick={handleRunQuery} disabled={querying || !dbReady}>
-          {querying ? "Running…" : "Run Query"}
-        </button>
-        {queryError && <div class="error-banner">{queryError}</div>}
-        {queryResult && (
-          <div class="results-container">
-            <p class="row-count">{queryResult.rows.length} rows</p>
-            <div class="results-scroll">
-              <table class="results-table">
+      {/* URI resolver */}
+      <div class="card bg-base-200">
+        <div class="card-body gap-3">
+          <h2 class="card-title text-base">Resolve Storage URIs</h2>
+          <textarea
+            class="textarea textarea-bordered font-mono text-sm w-full"
+            placeholder={"Storage URIs (one per line)\ne.g. r2://data-shack-storage/sample.ndjson"}
+            rows={3}
+            value={uriInput}
+            onInput={(e) => setUriInput((e.target as HTMLTextAreaElement).value)}
+          />
+          <div>
+            <button
+              type="button"
+              class="btn btn-sm btn-outline"
+              onClick={handleResolve}
+              disabled={resolving || !uriInput.trim()}
+            >
+              {resolving && <span class="loading loading-spinner loading-xs" />}
+              {resolving ? "Resolving…" : "Resolve"}
+            </button>
+          </div>
+          {resolveError && (
+            <div role="alert" class="alert alert-error py-2 text-sm">
+              <span>{resolveError}</span>
+            </div>
+          )}
+          {resolvedUris.length > 0 && (
+            <div class="overflow-x-auto">
+              <table class="table table-xs">
                 <thead>
                   <tr>
-                    {queryResult.columns.map((col) => (
-                      <th key={col}>{col}</th>
-                    ))}
+                    <th>URI</th>
+                    <th>Resolved URL</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {queryResult.rows.map((row, i) => (
-                    // biome-ignore lint/suspicious/noArrayIndexKey: result rows have no stable key
-                    <tr key={i}>
-                      {row.map((cell, j) => (
-                        // biome-ignore lint/suspicious/noArrayIndexKey: column cells keyed by position
-                        <td key={j}>{cell === null ? <em>null</em> : String(cell)}</td>
-                      ))}
+                  {resolvedUris.map(({ uri, url }) => (
+                    <tr key={uri}>
+                      <td class="font-mono">{uri}</td>
+                      <td class="font-mono text-base-content/60 max-w-xs truncate">{url}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
+          )}
+        </div>
+      </div>
+
+      {/* SQL editor */}
+      <div class="card bg-base-200">
+        <div class="card-body gap-3">
+          <h2 class="card-title text-base">SQL Query</h2>
+          <textarea
+            class="textarea textarea-bordered font-mono text-sm w-full"
+            placeholder={PLACEHOLDER_SQL}
+            rows={6}
+            value={sql}
+            onInput={(e) => setSql((e.target as HTMLTextAreaElement).value)}
+          />
+          <div>
+            <button
+              type="button"
+              class="btn btn-primary btn-sm"
+              onClick={handleRunQuery}
+              disabled={querying || !dbReady}
+            >
+              {querying && <span class="loading loading-spinner loading-xs" />}
+              {querying ? "Running…" : "Run Query"}
+            </button>
           </div>
-        )}
-      </section>
+          {queryError && (
+            <div role="alert" class="alert alert-error py-2 text-sm">
+              <span>{queryError}</span>
+            </div>
+          )}
+          {queryResult && (
+            <div class="space-y-1">
+              <p class="text-xs text-base-content/50">{queryResult.rows.length} rows</p>
+              <div class="overflow-x-auto">
+                <table class="table table-zebra table-sm">
+                  <thead>
+                    <tr>
+                      {queryResult.columns.map((col) => (
+                        <th key={col}>{col}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {queryResult.rows.map((row, i) => (
+                      // biome-ignore lint/suspicious/noArrayIndexKey: result rows have no stable key
+                      <tr key={i}>
+                        {row.map((cell, j) => (
+                          // biome-ignore lint/suspicious/noArrayIndexKey: column cells keyed by position
+                          <td key={j} class="font-mono text-sm">
+                            {cell === null ? (
+                              <em class="text-base-content/40">null</em>
+                            ) : (
+                              String(cell)
+                            )}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
