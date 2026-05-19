@@ -27,6 +27,8 @@ jobs:
       - run: npm ci
       - run: npm ci --prefix frontend
       - run: npm run build --prefix frontend
+        env:
+          VITE_WORKER_URL: ${{ vars.VITE_WORKER_URL }}
 
       - name: Run D1 migrations
         env:
