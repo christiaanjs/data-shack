@@ -4,20 +4,37 @@ A personal data integration platform built on Cloudflare that brings your data t
 
 ## What's built
 
-The auth layer was implemented first to establish the security boundary before any data paths are built.
-
 | Component | Status |
 |---|---|
 | OAuth 2.0 worker (Google, PKCE, DCR, JWT, refresh rotation) | ✅ Done |
-| D1 schema (users, oauth_identities, oauth tables) | ✅ Done |
-| Browser compute engine (DuckDB-WASM + WebSocket) | Not started |
-| Worker proxy (storage resolver, credential vault) | Not started |
+| D1 schema: users, oauth tables, credentials, storage_backends | ✅ Done |
+| Credential + storage backend vault (AES-GCM encrypted in D1) | ✅ Done |
+| R2 storage proxy: URI resolution, signed tokens, Range streaming | ✅ Done |
+| DuckDB-WASM query engine in the browser | ✅ Done |
+| Query UI: URI resolver + SQL editor + results table | ✅ Done |
+| Settings UI: manage credentials and storage backends | ✅ Done |
 | Catalog Durable Object | Not started |
 | Session Durable Object + MCP server | Not started |
 | ETL workers (Akahu, Google Sheets) | Not started |
 | Dashboarding platform | Not started |
 
 See [`build-plan.md`](./build-plan.md) for the full sequenced plan.
+
+## Current capability
+
+A signed-in user can write files to the R2 bucket and query them with SQL directly in the browser:
+
+1. Upload a file to R2:
+   ```
+   wrangler r2 object put data-shack-storage/sample.ndjson --file sample.ndjson
+   ```
+2. Open the **Query** tab and run:
+   ```sql
+   SELECT * FROM read_json('r2://data-shack-storage/sample.ndjson') LIMIT 100
+   ```
+   The worker resolves the `r2://` URI to a short-lived signed URL and DuckDB reads the file directly.
+
+The **Settings** tab stores credentials and storage backend configs (encrypted in D1 with an AES-GCM key derived from `JWT_SECRET`). These are persisted but not yet used during URI resolution — that wiring happens in Stage 3 when the catalog DO ties snapshot URIs to specific backend rows.
 
 ## Architecture Overview
 

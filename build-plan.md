@@ -7,9 +7,12 @@ Each stage produces something functional and testable independently. Stages 1–
 | Stage | Description | Status |
 |---|---|---|
 | Auth (from Stage 2) | OAuth 2.0 + JWT worker, D1 schema | ✅ Done |
-| Stage 1 | Skeleton with one working data path | Not started |
-| Stage 2 (remainder) | Credential storage, storage backends, settings UI | Not started |
-| Stage 3–10 | See below | Not started |
+| Stage 1 | Skeleton with one working data path | ✅ Done |
+| Stage 2 (remainder) | Credential storage, storage backends, settings UI | ✅ Done |
+| Stage 3 | Catalog DO | Not started |
+| Stage 4–10 | See below | Not started |
+
+**Note on Stage 1 + Stage 2 storage resolution:** The `POST /api/storage/resolve` endpoint and the `GET /api/storage/obj/:token` proxy are working end-to-end for `r2://` URIs against the bound R2 bucket. However, URI resolution does not yet look up the `storage_backends` table — the bucket name in the URI is validated syntactically but not matched against a configured backend row. Full backend dispatch (choosing between `r2-bound`, `s3`, `gcs`, etc. based on D1 config) will be wired in Stage 3 when the catalog DO's snapshot records tie URIs to specific backend IDs.
 
 Auth was built first to establish the security boundary before any data flows through the system. All subsequent stages build on top of this foundation — see [Stage 2](#stage-2--auth-and-credential-storage) for what's done and what remains.
 
@@ -35,7 +38,7 @@ Auth was built first to establish the security boundary before any data flows th
 
 **Goal:** The warehouse is yours, not anyone's.
 
-### ✅ Auth layer — done
+### ✅ Auth layer — done (built ahead of Stage 1)
 
 Implemented as a standalone Cloudflare Worker with D1, ahead of Stage 1, to establish the security boundary before any data paths are built.
 
