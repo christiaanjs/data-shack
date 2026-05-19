@@ -22,6 +22,7 @@ export default defineConfig(async () => {
             DEFAULT_OAUTH_PROVIDER: "google",
             TEST_MIGRATIONS: migrations,
           },
+          r2Buckets: ["R2"],
         },
       }),
     ],

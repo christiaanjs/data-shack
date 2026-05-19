@@ -1,13 +1,25 @@
 import { useEffect, useState } from "preact/hooks";
+import { QueryPanel } from "./QueryPanel.tsx";
+import { SettingsPanel } from "./SettingsPanel.tsx";
 import { clearTokens, getAccessToken, getValidToken, handleCallback, startLogin } from "./auth.ts";
 
 const WORKER_BASE = import.meta.env.VITE_WORKER_URL ?? "";
 const DEV_TOKEN = import.meta.env.VITE_DEV_TOKEN as string | undefined;
 
+type Tab = "query" | "settings";
+
+async function getAuthHeaders(): Promise<Record<string, string>> {
+  if (DEV_TOKEN) return { "X-Dev-Token": DEV_TOKEN };
+  const token = await getValidToken();
+  if (!token) return {};
+  return { Authorization: `Bearer ${token}` };
+}
+
 export function App() {
-  const [authed, setAuthed] = useState<boolean | null>(null); // null = loading
+  const [authed, setAuthed] = useState<boolean | null>(null);
   const [callbackError, setCallbackError] = useState<string | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<Tab>("query");
 
   useEffect(() => {
     if (DEV_TOKEN) {
@@ -37,17 +49,12 @@ export function App() {
   useEffect(() => {
     if (!authed) return;
 
-    const headers: Record<string, string> = DEV_TOKEN ? { "X-Dev-Token": DEV_TOKEN } : {};
-
     const fetchUserId = async () => {
-      if (!DEV_TOKEN) {
-        const token = await getValidToken();
-        if (!token) {
-          clearTokens();
-          setAuthed(false);
-          return;
-        }
-        headers.Authorization = `Bearer ${token}`;
+      const headers = await getAuthHeaders();
+      if (!DEV_TOKEN && !headers.Authorization) {
+        clearTokens();
+        setAuthed(false);
+        return;
       }
 
       const res = await fetch(`${WORKER_BASE}/me`, { headers });
@@ -84,7 +91,24 @@ export function App() {
     <>
       <header class="app-header">
         <h1>Data Shack</h1>
+        <nav class="tab-nav">
+          <button
+            type="button"
+            class={`tab-btn${activeTab === "query" ? " active" : ""}`}
+            onClick={() => setActiveTab("query")}
+          >
+            Query
+          </button>
+          <button
+            type="button"
+            class={`tab-btn${activeTab === "settings" ? " active" : ""}`}
+            onClick={() => setActiveTab("settings")}
+          >
+            Settings
+          </button>
+        </nav>
         <div class="spacer" />
+        {userId && <span class="user-id">{userId}</span>}
         {!DEV_TOKEN && (
           <button
             type="button"
@@ -100,11 +124,12 @@ export function App() {
         )}
       </header>
       <main class="app-main">
-        <div class="home">
-          <h2>Welcome to your data warehouse</h2>
-          {userId && <p class="user-id">Signed in as {userId}</p>}
-          <p class="placeholder-note">The warehouse is being built. Check back soon.</p>
-        </div>
+        {activeTab === "query" && (
+          <QueryPanel workerBase={WORKER_BASE} getAuthHeaders={getAuthHeaders} />
+        )}
+        {activeTab === "settings" && (
+          <SettingsPanel workerBase={WORKER_BASE} getAuthHeaders={getAuthHeaders} />
+        )}
       </main>
     </>
   );

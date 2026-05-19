@@ -6,6 +6,7 @@ export interface User {
 
 export interface Env {
   DB: D1Database;
+  R2: R2Bucket;
   DEV_TOKEN: string;
   DEV_USER_ID: string;
   ENABLE_OAUTH: string;
