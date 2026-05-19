@@ -2,6 +2,24 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Bootstrap a new environment
+
+```bash
+./scripts/bootstrap.sh                   # production (default)
+./scripts/bootstrap.sh --env staging     # staging
+./scripts/bootstrap.sh --env local       # local dev (.dev.vars)
+./scripts/bootstrap.sh --env production --deploy  # bootstrap + deploy in one step
+```
+
+The script:
+1. Creates the D1 database (idempotent — skips if already exists) and patches `wrangler.toml`
+2. Applies all D1 migrations
+3. Walks you through creating a Google OAuth 2.0 Web Application credential (console link + prompt)
+4. Generates a `JWT_SECRET` via `openssl`
+5. Pushes all secrets to Cloudflare via `wrangler secret put` (or writes `.dev.vars` for local)
+
+Requires: `wrangler` (or npx), `openssl`, `jq`.
+
 ## Pre-commit checklist
 
 Before every commit, run all three checks from the repo root:
