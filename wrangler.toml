@@ -1,0 +1,42 @@
+name = "data-shack"
+main = "src/index.ts"
+compatibility_date = "2025-05-06"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "data-shack-db"
+database_id = "REPLACE_WITH_YOUR_DB_ID"
+
+[vars]
+ENABLE_OAUTH = "true"
+ALLOWED_ORIGIN = "https://data-shack.pages.dev"
+DEFAULT_OAUTH_PROVIDER = "google"
+
+# Secrets (never put values here — set via: wrangler secret put <NAME>)
+# GOOGLE_CLIENT_ID
+# GOOGLE_CLIENT_SECRET
+# JWT_SECRET
+# DEV_TOKEN
+# DEV_USER_ID
+
+# ── Staging environment ───────────────────────────────────────────────────
+[env.staging]
+name = "data-shack-staging"
+
+[[env.staging.d1_databases]]
+binding = "DB"
+database_name = "data-shack-db-staging"
+database_id = "REPLACE_WITH_YOUR_STAGING_DB_ID"
+
+[env.staging.vars]
+ENABLE_OAUTH = "true"
+ALLOWED_ORIGIN = "https://data-shack-staging.pages.dev"
+ALLOW_ORIGIN_SUBDOMAINS = "true"
+DEFAULT_OAUTH_PROVIDER = "google"
+
+# Secrets for staging (set via: wrangler secret put <NAME> --env staging)
+# GOOGLE_CLIENT_ID
+# GOOGLE_CLIENT_SECRET
+# JWT_SECRET
+# DEV_TOKEN
+# DEV_USER_ID
