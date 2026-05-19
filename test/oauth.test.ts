@@ -25,7 +25,7 @@ async function register(redirectUri = TEST_REDIRECT_URI): Promise<{ clientId: st
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ redirect_uris: [redirectUri] }),
   });
-  expect(res.status).toBe(201);
+  expect([200, 201]).toContain(res.status);
   const data = (await res.json()) as { client_id: string };
   return { clientId: data.client_id };
 }

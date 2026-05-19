@@ -44,6 +44,18 @@ export async function getOAuthClient(
     .first<OAuthClientRow>();
 }
 
+export async function getOAuthClientByRedirectUris(
+  db: D1Database,
+  redirectUris: string[],
+): Promise<OAuthClientRow | null> {
+  return db
+    .prepare(
+      "SELECT client_id, redirect_uris, created_at FROM oauth_clients WHERE redirect_uris = ? LIMIT 1",
+    )
+    .bind(JSON.stringify(redirectUris))
+    .first<OAuthClientRow>();
+}
+
 export async function insertOAuthClient(
   db: D1Database,
   clientId: string,

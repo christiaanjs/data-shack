@@ -4,6 +4,7 @@ const STORAGE_KEY_ACCESS = "oauth_access_token";
 const STORAGE_KEY_REFRESH = "oauth_refresh_token";
 const STORAGE_KEY_EXP = "oauth_exp";
 const SESSION_KEY_VERIFIER = "oauth_code_verifier";
+const SESSION_KEY_STATE = "oauth_state";
 
 // ── PKCE helpers ──────────────────────────────────────────────────────────
 
@@ -62,6 +63,7 @@ export function clearTokens() {
   localStorage.removeItem(STORAGE_KEY_REFRESH);
   localStorage.removeItem(STORAGE_KEY_EXP);
   sessionStorage.removeItem(SESSION_KEY_VERIFIER);
+  sessionStorage.removeItem(SESSION_KEY_STATE);
 }
 
 function isExpiringSoon(): boolean {
@@ -112,19 +114,29 @@ export async function startLogin() {
   const challenge = await codeChallenge(verifier);
   sessionStorage.setItem(SESSION_KEY_VERIFIER, verifier);
 
+  const state = crypto.randomUUID();
+  sessionStorage.setItem(SESSION_KEY_STATE, state);
+
   const params = new URLSearchParams({
     response_type: "code",
     client_id: clientId,
     redirect_uri: `${location.origin}/callback`,
     code_challenge: challenge,
     code_challenge_method: "S256",
-    state: crypto.randomUUID(),
+    state,
   });
 
   location.href = `${WORKER_BASE}/authorize/google?${params}`;
 }
 
 export async function handleCallback(searchParams: URLSearchParams): Promise<void> {
+  const returnedState = searchParams.get("state");
+  const storedState = sessionStorage.getItem(SESSION_KEY_STATE);
+  sessionStorage.removeItem(SESSION_KEY_STATE);
+  if (!storedState || returnedState !== storedState) {
+    throw new Error("State mismatch — possible CSRF");
+  }
+
   const code = searchParams.get("code");
   if (!code) throw new Error("No code in callback URL");
 

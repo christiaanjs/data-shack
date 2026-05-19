@@ -4,6 +4,7 @@ import {
   claimRefreshToken,
   getAndDeleteOAuthState,
   getOAuthClient,
+  getOAuthClientByRedirectUris,
   insertOAuthClient,
   insertOAuthCode,
   insertOAuthState,
@@ -109,14 +110,25 @@ export async function handleRegister(request: Request, env: Env): Promise<Respon
     );
   }
 
+  const uris = redirectUris as string[];
+  const existing = await getOAuthClientByRedirectUris(env.DB, uris);
+  if (existing) {
+    return jsonResponse({
+      client_id: existing.client_id,
+      redirect_uris: JSON.parse(existing.redirect_uris) as string[],
+      grant_types: ["authorization_code", "refresh_token"],
+      response_types: ["code"],
+      token_endpoint_auth_method: "none",
+    });
+  }
+
   const clientId = crypto.randomUUID();
-  const now = Date.now();
-  await insertOAuthClient(env.DB, clientId, redirectUris as string[], now);
+  await insertOAuthClient(env.DB, clientId, uris, Date.now());
 
   return jsonResponse(
     {
       client_id: clientId,
-      redirect_uris: redirectUris,
+      redirect_uris: uris,
       grant_types: ["authorization_code", "refresh_token"],
       response_types: ["code"],
       token_endpoint_auth_method: "none",
