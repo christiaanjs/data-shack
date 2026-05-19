@@ -65,16 +65,14 @@ export async function verifyJwt(token: string, secret: string): Promise<JwtPaylo
     );
     if (!valid) return null;
 
-    const payload = JSON.parse(
-      new TextDecoder().decode(base64urlDecode(payloadB64)),
-    ) as unknown;
+    const payload = JSON.parse(new TextDecoder().decode(base64urlDecode(payloadB64))) as unknown;
 
     if (
       typeof payload !== "object" ||
       payload === null ||
-      typeof (payload as Record<string, unknown>)["sub"] !== "string" ||
-      typeof (payload as Record<string, unknown>)["exp"] !== "number" ||
-      (payload as Record<string, unknown>)["aud"] !== "mcp"
+      typeof (payload as Record<string, unknown>).sub !== "string" ||
+      typeof (payload as Record<string, unknown>).exp !== "number" ||
+      (payload as Record<string, unknown>).aud !== "mcp"
     ) {
       return null;
     }
@@ -87,7 +85,11 @@ export async function verifyJwt(token: string, secret: string): Promise<JwtPaylo
   }
 }
 
-export async function verifyPkce(verifier: string, challenge: string, method: string): Promise<boolean> {
+export async function verifyPkce(
+  verifier: string,
+  challenge: string,
+  method: string,
+): Promise<boolean> {
   if (method !== "S256") return false;
   const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
   return base64urlEncode(hash) === challenge;

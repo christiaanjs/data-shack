@@ -51,9 +51,7 @@ export async function insertOAuthClient(
   createdAt: number,
 ): Promise<void> {
   await db
-    .prepare(
-      "INSERT INTO oauth_clients (client_id, redirect_uris, created_at) VALUES (?, ?, ?)",
-    )
+    .prepare("INSERT INTO oauth_clients (client_id, redirect_uris, created_at) VALUES (?, ?, ?)")
     .bind(clientId, JSON.stringify(redirectUris), createdAt)
     .run();
 }
@@ -120,10 +118,7 @@ export async function claimOAuthCode(
     .first<OAuthCodeRow>();
 }
 
-export async function insertRefreshToken(
-  db: D1Database,
-  row: OAuthRefreshTokenRow,
-): Promise<void> {
+export async function insertRefreshToken(db: D1Database, row: OAuthRefreshTokenRow): Promise<void> {
   await db
     .prepare(
       "INSERT INTO oauth_refresh_tokens (token_hash, user_id, client_id, expires_at) VALUES (?, ?, ?, ?)",

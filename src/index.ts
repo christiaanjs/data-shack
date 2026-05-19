@@ -1,9 +1,9 @@
-import { Hono } from "hono/tiny";
 import { cors } from "hono/cors";
 import { createMiddleware } from "hono/factory";
-import type { Env } from "./types.ts";
+import { Hono } from "hono/tiny";
 import { authenticate } from "./auth/middleware.ts";
 import { oauthRouter } from "./auth/oauth.ts";
+import type { Env } from "./types.ts";
 
 function isAllowedOrigin(origin: string, allowedOrigin: string, allowSubdomains: boolean): boolean {
   if (!allowedOrigin || !origin) return false;
@@ -12,8 +12,9 @@ function isAllowedOrigin(origin: string, allowedOrigin: string, allowSubdomains:
   try {
     const allowed = new URL(allowedOrigin);
     const incoming = new URL(origin);
-    return incoming.protocol === allowed.protocol &&
-      incoming.hostname.endsWith("." + allowed.hostname);
+    return (
+      incoming.protocol === allowed.protocol && incoming.hostname.endsWith(`.${allowed.hostname}`)
+    );
   } catch {
     return false;
   }
@@ -46,6 +47,10 @@ const requireAuth = createMiddleware<{ Bindings: Env; Variables: Variables }>(as
 // ── OAuth endpoints ───────────────────────────────────────────────────────
 
 app.route("/", oauthRouter);
+
+// ── Authenticated endpoints ───────────────────────────────────────────────
+
+app.get("/me", requireAuth, (c) => c.json({ userId: c.get("userId") }));
 
 // ── Root ─────────────────────────────────────────────────────────────────
 

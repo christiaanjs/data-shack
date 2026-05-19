@@ -1,24 +1,31 @@
-import type { Env } from "../types.ts";
-import { signJwt, verifyPkce, hashToken, ACCESS_TOKEN_TTL, REFRESH_TOKEN_TTL, type JwtPayload } from "./jwt.ts";
 import {
-  getUser,
-  getUserByEmail,
-  updateUserEmail,
-  getIdentity,
-  linkIdentity,
-  createUserWithIdentity,
-} from "../db/queries.ts";
-import {
+  type OAuthCodeRow,
+  claimOAuthCode,
+  claimRefreshToken,
+  getAndDeleteOAuthState,
   getOAuthClient,
   insertOAuthClient,
-  insertOAuthState,
-  getAndDeleteOAuthState,
   insertOAuthCode,
-  claimOAuthCode,
+  insertOAuthState,
   insertRefreshToken,
-  claimRefreshToken,
-  type OAuthCodeRow,
 } from "../db/oauth.ts";
+import {
+  createUserWithIdentity,
+  getIdentity,
+  getUser,
+  getUserByEmail,
+  linkIdentity,
+  updateUserEmail,
+} from "../db/queries.ts";
+import type { Env } from "../types.ts";
+import {
+  ACCESS_TOKEN_TTL,
+  type JwtPayload,
+  REFRESH_TOKEN_TTL,
+  hashToken,
+  signJwt,
+  verifyPkce,
+} from "./jwt.ts";
 
 interface GoogleUserInfo {
   sub: string;
@@ -91,7 +98,7 @@ export async function handleRegister(request: Request, env: Env): Promise<Respon
     return oauthError("invalid_request", "Invalid JSON body");
   }
 
-  const redirectUris = body["redirect_uris"];
+  const redirectUris = body.redirect_uris;
   if (!Array.isArray(redirectUris) || redirectUris.length === 0) {
     return oauthError("invalid_redirect_uri", "redirect_uris is required and must be non-empty");
   }
@@ -119,7 +126,11 @@ export async function handleRegister(request: Request, env: Env): Promise<Respon
 }
 
 // GET /authorize and GET /authorize/:provider
-export async function handleAuthorize(request: Request, env: Env, provider: string): Promise<Response> {
+export async function handleAuthorize(
+  request: Request,
+  env: Env,
+  provider: string,
+): Promise<Response> {
   const params = new URL(request.url).searchParams;
   const clientId = params.get("client_id");
   const redirectUri = params.get("redirect_uri");
@@ -238,7 +249,12 @@ export async function handleCallback(request: Request, env: Env): Promise<Respon
     return new Response("Invalid or expired state", { status: 400 });
   }
 
-  const result = await fetchProviderIdentity(pending.provider, code, issuerFromRequest(request), env);
+  const result = await fetchProviderIdentity(
+    pending.provider,
+    code,
+    issuerFromRequest(request),
+    env,
+  );
   if (result instanceof Response) return result;
 
   const { provider, providerId, verifiedEmail } = result;
@@ -389,11 +405,7 @@ async function handleAuthCodeGrant(
   return issueTokens(request, env, authCode.user_id, clientId);
 }
 
-async function handleRefreshGrant(
-  request: Request,
-  params: FormData,
-  env: Env,
-): Promise<Response> {
+async function handleRefreshGrant(request: Request, params: FormData, env: Env): Promise<Response> {
   if (!env.JWT_SECRET || env.JWT_SECRET.length < 32) {
     return new Response("Server misconfiguration: JWT_SECRET too short", { status: 500 });
   }
@@ -466,8 +478,8 @@ function makeAccessPayload(userId: string, issuer: string): { payload: JwtPayloa
   };
 }
 
-import { Hono } from "hono/tiny";
 import type { MiddlewareHandler } from "hono";
+import { Hono } from "hono/tiny";
 
 const requireOAuth: MiddlewareHandler<{ Bindings: Env }> = async (c, next) => {
   if (c.env.ENABLE_OAUTH !== "true") return c.notFound();
@@ -476,10 +488,18 @@ const requireOAuth: MiddlewareHandler<{ Bindings: Env }> = async (c, next) => {
 
 export const oauthRouter = new Hono<{ Bindings: Env }>();
 
-oauthRouter.get("/.well-known/oauth-protected-resource", requireOAuth, (c) => handleProtectedResource(c.req.raw));
-oauthRouter.get("/.well-known/oauth-authorization-server", requireOAuth, (c) => handleMetadata(c.req.raw));
+oauthRouter.get("/.well-known/oauth-protected-resource", requireOAuth, (c) =>
+  handleProtectedResource(c.req.raw),
+);
+oauthRouter.get("/.well-known/oauth-authorization-server", requireOAuth, (c) =>
+  handleMetadata(c.req.raw),
+);
 oauthRouter.post("/register", requireOAuth, (c) => handleRegister(c.req.raw, c.env));
-oauthRouter.get("/authorize", requireOAuth, (c) => handleAuthorize(c.req.raw, c.env, c.env.DEFAULT_OAUTH_PROVIDER ?? "google"));
-oauthRouter.get("/authorize/:provider{[a-z][a-z0-9]*}", requireOAuth, (c) => handleAuthorize(c.req.raw, c.env, c.req.param("provider")));
+oauthRouter.get("/authorize", requireOAuth, (c) =>
+  handleAuthorize(c.req.raw, c.env, c.env.DEFAULT_OAUTH_PROVIDER ?? "google"),
+);
+oauthRouter.get("/authorize/:provider{[a-z][a-z0-9]*}", requireOAuth, (c) =>
+  handleAuthorize(c.req.raw, c.env, c.req.param("provider")),
+);
 oauthRouter.get("/oauth/callback", requireOAuth, (c) => handleCallback(c.req.raw, c.env));
 oauthRouter.post("/token", requireOAuth, (c) => handleToken(c.req.raw, c.env));

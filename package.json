@@ -9,14 +9,22 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p test/tsconfig.json",
+    "lint": "biome check .",
+    "format": "biome format --write .",
     "migrate:local": "wrangler d1 migrations apply data-shack-db --local",
     "migration:new": "wrangler d1 migrations create data-shack-db",
     "logs": "wrangler tail"
   },
   "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
+    "@cloudflare/vitest-pool-workers": "^0.16.0",
     "@cloudflare/workers-types": "^4.0.0",
+    "@types/node": "^25.6.0",
     "typescript": "^5.0.0",
+    "vitest": "^4.1.0",
     "wrangler": "^4.0.0"
   },
   "dependencies": {

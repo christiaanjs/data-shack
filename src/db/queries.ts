@@ -8,7 +8,11 @@ export async function getUserByEmail(db: D1Database, email: string): Promise<Use
   return db.prepare("SELECT * FROM users WHERE email = ?").bind(email.toLowerCase()).first<User>();
 }
 
-export async function updateUserEmail(db: D1Database, userId: string, email: string): Promise<void> {
+export async function updateUserEmail(
+  db: D1Database,
+  userId: string,
+  email: string,
+): Promise<void> {
   await db
     .prepare("UPDATE users SET email = ? WHERE id = ? AND email IS NULL")
     .bind(email.toLowerCase(), userId)
