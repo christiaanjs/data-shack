@@ -92,7 +92,9 @@ export function QueryPanel({ workerBase, getAuthHeaders }: QueryPanelProps) {
         });
         if (!res.ok) throw new Error(`URI resolution failed: ${res.status}`);
         const data = (await res.json()) as { urls: Record<string, string> };
-        for (const uri of uris) {
+        // Sort longest-first so a URI that is a prefix of another doesn't
+        // corrupt the longer one during substitution.
+        for (const uri of [...uris].sort((a, b) => b.length - a.length)) {
           const url = data.urls[uri];
           if (url) resolvedSql = resolvedSql.replaceAll(uri, url);
         }

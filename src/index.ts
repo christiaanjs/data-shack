@@ -3,7 +3,7 @@ import { createMiddleware } from "hono/factory";
 import { Hono } from "hono/tiny";
 import { authenticate } from "./auth/middleware.ts";
 import { oauthRouter } from "./auth/oauth.ts";
-import { decryptConfig, encryptConfig } from "./crypto.ts";
+import { encryptConfig } from "./crypto.ts";
 import {
   deleteCredential,
   deleteStorageBackend,
@@ -42,7 +42,8 @@ app.use("*", (c, next) => {
         ? origin
         : null,
     allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allowHeaders: ["Content-Type", "Authorization", "X-Dev-Token"],
+    allowHeaders: ["Content-Type", "Authorization", "X-Dev-Token", "Range"],
+    exposeHeaders: ["Content-Length", "Content-Range", "Accept-Ranges"],
     maxAge: 86400,
   })(c, next);
 });
@@ -76,10 +77,22 @@ app.post("/api/storage/resolve", requireAuth, async (c) => {
   return c.json({ urls });
 });
 
-app.get("/api/storage/obj/:token", async (c) => {
+app.on(["GET", "HEAD"], "/api/storage/obj/:token", async (c) => {
   const token = c.req.param("token");
   const payload = await verifyStorageToken(token, c.env.JWT_SECRET);
   if (!payload) return new Response("Unauthorized", { status: 401 });
+
+  const isHead = c.req.method === "HEAD";
+
+  if (isHead) {
+    const meta = await c.env.R2.head(payload.k);
+    if (!meta) return new Response("Not Found", { status: 404 });
+    const headers = new Headers();
+    headers.set("Content-Length", String(meta.size));
+    headers.set("Accept-Ranges", "bytes");
+    if (meta.httpMetadata?.contentType) headers.set("Content-Type", meta.httpMetadata.contentType);
+    return new Response(null, { headers });
+  }
 
   const rangeHeader = c.req.header("Range");
   let r2Options: R2GetOptions | undefined;
@@ -97,9 +110,10 @@ app.get("/api/storage/obj/:token", async (c) => {
   if (!obj) return new Response("Not Found", { status: 404 });
 
   const headers = new Headers();
-  if (obj.httpMetadata?.contentType) {
-    headers.set("Content-Type", obj.httpMetadata.contentType);
-  }
+  headers.set("Content-Length", String(obj.size));
+  headers.set("Accept-Ranges", "bytes");
+  if (obj.httpMetadata?.contentType) headers.set("Content-Type", obj.httpMetadata.contentType);
+
   if (rangeHeader && obj.range) {
     const range = obj.range as { offset: number; length: number };
     headers.set(

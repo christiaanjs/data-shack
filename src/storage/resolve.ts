@@ -7,7 +7,8 @@ interface StorageTokenPayload {
   exp: number;
   iat: number;
   jti: string;
-  k: string;
+  b: string; // bucket
+  k: string; // key
 }
 
 function base64urlEncode(buf: ArrayBuffer): string {
@@ -72,6 +73,7 @@ export async function verifyStorageToken(
       typeof payload !== "object" ||
       payload === null ||
       (payload as Record<string, unknown>).aud !== "storage" ||
+      typeof (payload as Record<string, unknown>).b !== "string" ||
       typeof (payload as Record<string, unknown>).k !== "string" ||
       typeof (payload as Record<string, unknown>).exp !== "number"
     ) {
@@ -110,6 +112,7 @@ export async function resolveUri(uri: string, env: Env, workerOrigin: string): P
       iat: now,
       exp: now + 3600,
       jti: crypto.randomUUID(),
+      b: parsed.bucket,
       k: parsed.key,
     },
     env.JWT_SECRET,

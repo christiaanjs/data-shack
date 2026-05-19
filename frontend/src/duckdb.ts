@@ -44,8 +44,8 @@ export async function runQuery(
     for (const batch of result.batches) {
       for (let i = 0; i < batch.numRows; i++) {
         const row: unknown[] = [];
-        for (const col of columns) {
-          const vector = batch.getChildAt(result.schema.fields.findIndex((f) => f.name === col));
+        for (let j = 0; j < columns.length; j++) {
+          const vector = batch.getChildAt(j);
           row.push(vector ? vector.get(i) : null);
         }
         rows.push(row);
