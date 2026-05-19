@@ -1,5 +1,5 @@
-import { useState, useEffect } from "preact/hooks";
-import { getAccessToken, getValidToken, startLogin, handleCallback, clearTokens } from "./auth.ts";
+import { useEffect, useState } from "preact/hooks";
+import { clearTokens, getAccessToken, getValidToken, handleCallback, startLogin } from "./auth.ts";
 
 const WORKER_BASE = import.meta.env.VITE_WORKER_URL ?? "";
 const DEV_TOKEN = import.meta.env.VITE_DEV_TOKEN as string | undefined;
@@ -37,9 +37,7 @@ export function App() {
   useEffect(() => {
     if (!authed) return;
 
-    const headers: Record<string, string> = DEV_TOKEN
-      ? { "X-Dev-Token": DEV_TOKEN }
-      : {};
+    const headers: Record<string, string> = DEV_TOKEN ? { "X-Dev-Token": DEV_TOKEN } : {};
 
     const fetchUserId = async () => {
       if (!DEV_TOKEN) {
@@ -49,7 +47,7 @@ export function App() {
           setAuthed(false);
           return;
         }
-        headers["Authorization"] = `Bearer ${token}`;
+        headers.Authorization = `Bearer ${token}`;
       }
 
       const res = await fetch(`${WORKER_BASE}/me`, { headers });
@@ -75,7 +73,7 @@ export function App() {
         <h1>Data Shack</h1>
         <p class="tagline">Your personal data warehouse</p>
         {callbackError && <p class="error-banner">{callbackError}</p>}
-        <button class="login-btn" onClick={() => startLogin()}>
+        <button type="button" class="login-btn" onClick={() => startLogin()}>
           Sign in with Google
         </button>
       </div>
@@ -89,6 +87,7 @@ export function App() {
         <div class="spacer" />
         {!DEV_TOKEN && (
           <button
+            type="button"
             class="sign-out-btn"
             onClick={() => {
               clearTokens();
@@ -104,9 +103,7 @@ export function App() {
         <div class="home">
           <h2>Welcome to your data warehouse</h2>
           {userId && <p class="user-id">Signed in as {userId}</p>}
-          <p class="placeholder-note">
-            The warehouse is being built. Check back soon.
-          </p>
+          <p class="placeholder-note">The warehouse is being built. Check back soon.</p>
         </div>
       </main>
     </>

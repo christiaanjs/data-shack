@@ -130,9 +130,7 @@ export async function handleCallback(searchParams: URLSearchParams): Promise<voi
 
   const verifier = sessionStorage.getItem(SESSION_KEY_VERIFIER);
   if (!verifier)
-    throw new Error(
-      "No code_verifier in session — callback arrived without a prior login attempt",
-    );
+    throw new Error("No code_verifier in session — callback arrived without a prior login attempt");
 
   const clientId = localStorage.getItem(STORAGE_KEY_CLIENT);
   if (!clientId) throw new Error("No client_id stored");
