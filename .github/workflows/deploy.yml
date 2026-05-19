@@ -67,5 +67,5 @@ jobs:
           if [[ "${{ inputs.environment }}" == "production" ]]; then
             npx wrangler pages deploy frontend/dist --project-name data-shack
           else
-            npx wrangler pages deploy frontend/dist --project-name data-shack-staging
+            npx wrangler pages deploy frontend/dist --project-name data-shack-staging --branch main
           fi
