@@ -127,7 +127,7 @@ describe("POST /api/storage/resolve with http-ds:// URIs", () => {
     const res = await SELF.fetch("http://localhost/api/storage/resolve", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...DEV_HEADERS },
-      body: JSON.stringify({ uris: [uri] }),
+      body: JSON.stringify({ uris: [{ uri, method: "GET" }] }),
     });
     expect(res.status).toBe(200);
     const data = (await res.json()) as { urls: Record<string, string> };
@@ -141,7 +141,7 @@ describe("POST /api/storage/resolve with http-ds:// URIs", () => {
     const res = await SELF.fetch("http://localhost/api/storage/resolve", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...DEV_HEADERS },
-      body: JSON.stringify({ uris: [uri] }),
+      body: JSON.stringify({ uris: [{ uri, method: "GET" }] }),
     });
     // Resolve endpoint now catches per-URI errors; overall response is 200
     expect(res.status).toBe(200);
@@ -158,7 +158,12 @@ describe("POST /api/storage/resolve with http-ds:// URIs", () => {
     const res = await SELF.fetch("http://localhost/api/storage/resolve", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...DEV_HEADERS },
-      body: JSON.stringify({ uris: [r2Uri, dsUri] }),
+      body: JSON.stringify({
+        uris: [
+          { uri: r2Uri, method: "GET" },
+          { uri: dsUri, method: "GET" },
+        ],
+      }),
     });
     expect(res.status).toBe(200);
     const data = (await res.json()) as { urls: Record<string, string> };
@@ -184,7 +189,7 @@ describe("GET /api/data-sources/obj/:token", () => {
     const resolveRes = await SELF.fetch("http://localhost/api/storage/resolve", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...DEV_HEADERS },
-      body: JSON.stringify({ uris: [uri] }),
+      body: JSON.stringify({ uris: [{ uri, method: "GET" }] }),
     });
     const resolveData = (await resolveRes.json()) as { urls: Record<string, string> };
     const tokenUrl = resolveData.urls[uri] ?? "";

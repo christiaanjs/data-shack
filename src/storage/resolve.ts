@@ -9,6 +9,7 @@ interface StorageTokenPayload {
   jti: string;
   b: string; // bucket
   k: string; // key
+  method: "GET" | "PUT";
 }
 
 function base64urlEncode(buf: ArrayBuffer): string {
@@ -68,21 +69,23 @@ export async function verifyStorageToken(
     if (!valid) return null;
 
     const payload = JSON.parse(new TextDecoder().decode(base64urlDecode(payloadB64))) as unknown;
+    const p = payload as Record<string, unknown>;
 
     if (
       typeof payload !== "object" ||
       payload === null ||
-      (payload as Record<string, unknown>).aud !== "storage" ||
-      typeof (payload as Record<string, unknown>).b !== "string" ||
-      typeof (payload as Record<string, unknown>).k !== "string" ||
-      typeof (payload as Record<string, unknown>).exp !== "number"
+      p.aud !== "storage" ||
+      typeof p.b !== "string" ||
+      typeof p.k !== "string" ||
+      typeof p.exp !== "number" ||
+      (p.method !== "GET" && p.method !== "PUT")
     ) {
       return null;
     }
 
-    const p = payload as StorageTokenPayload;
-    if (p.exp < Math.floor(Date.now() / 1000)) return null;
-    return p;
+    const typed = payload as StorageTokenPayload;
+    if (typed.exp < Math.floor(Date.now() / 1000)) return null;
+    return typed;
   } catch {
     return null;
   }
@@ -176,6 +179,7 @@ export async function resolveUri(
   env: Env,
   userId: string,
   workerOrigin: string,
+  method: "GET" | "PUT" = "GET",
 ): Promise<string> {
   const parsed = parseR2Uri(uri);
   if (!parsed) throw new Error(`Unsupported URI: ${uri}`);
@@ -187,10 +191,11 @@ export async function resolveUri(
       iss: workerOrigin,
       aud: "storage",
       iat: now,
-      exp: now + 3600,
+      exp: now + (method === "PUT" ? 900 : 3600),
       jti: crypto.randomUUID(),
       b: parsed.bucket,
       k: `users/${userId}/${parsed.key}`,
+      method,
     },
     env.JWT_SECRET,
   );
@@ -289,6 +294,7 @@ interface R2S3CompatTokenPayload {
   d: string; // storage backend ID
   k: string; // object key
   u: string; // user ID
+  method: "GET" | "PUT";
 }
 
 export async function signR2S3CompatToken(
@@ -321,22 +327,24 @@ export async function verifyR2S3CompatToken(
     if (!valid) return null;
 
     const payload = JSON.parse(new TextDecoder().decode(base64urlDecode(payloadB64))) as unknown;
+    const p = payload as Record<string, unknown>;
 
     if (
       typeof payload !== "object" ||
       payload === null ||
-      (payload as Record<string, unknown>).aud !== "r2-s3compat" ||
-      typeof (payload as Record<string, unknown>).d !== "string" ||
-      typeof (payload as Record<string, unknown>).k !== "string" ||
-      typeof (payload as Record<string, unknown>).u !== "string" ||
-      typeof (payload as Record<string, unknown>).exp !== "number"
+      p.aud !== "r2-s3compat" ||
+      typeof p.d !== "string" ||
+      typeof p.k !== "string" ||
+      typeof p.u !== "string" ||
+      typeof p.exp !== "number" ||
+      (p.method !== "GET" && p.method !== "PUT")
     ) {
       return null;
     }
 
-    const p = payload as R2S3CompatTokenPayload;
-    if (p.exp < Math.floor(Date.now() / 1000)) return null;
-    return p;
+    const typed = payload as R2S3CompatTokenPayload;
+    if (typed.exp < Math.floor(Date.now() / 1000)) return null;
+    return typed;
   } catch {
     return null;
   }
@@ -351,156 +359,4 @@ export function parseR2S3CompatUri(uri: string): { backendId: string; key: strin
   const key = rest.slice(slash + 1);
   if (!backendId || !key) return null;
   return { backendId, key };
-}
-
-// ── Write tokens ──────────────────────────────────────────────────────────
-
-interface StorageWriteTokenPayload {
-  sub: string;
-  iss: string;
-  aud: "storage-write";
-  exp: number;
-  iat: number;
-  jti: string;
-  b: string; // bucket
-  k: string; // object key — user-scoped: "users/{userId}/{key}"
-}
-
-interface R2S3CompatWriteTokenPayload {
-  sub: string;
-  aud: "r2-s3compat-write";
-  exp: number;
-  iat: number;
-  jti: string;
-  d: string; // storage backend ID
-  k: string; // object key — user-scoped
-  u: string; // user ID
-}
-
-export async function signStorageWriteToken(
-  payload: StorageWriteTokenPayload,
-  secret: string,
-): Promise<string> {
-  const header = base64urlEncodeStr(JSON.stringify({ alg: "HS256", typ: "JWT" }));
-  const body = base64urlEncodeStr(JSON.stringify(payload));
-  const signingInput = `${header}.${body}`;
-  const key = await hmacKey(secret);
-  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(signingInput));
-  return `${signingInput}.${base64urlEncode(sig)}`;
-}
-
-export async function verifyStorageWriteToken(
-  token: string,
-  secret: string,
-): Promise<StorageWriteTokenPayload | null> {
-  const parts = token.split(".");
-  if (parts.length !== 3) return null;
-  const [headerB64, payloadB64, sigB64] = parts as [string, string, string];
-  try {
-    const key = await hmacKey(secret);
-    const valid = await crypto.subtle.verify(
-      "HMAC",
-      key,
-      base64urlDecode(sigB64),
-      new TextEncoder().encode(`${headerB64}.${payloadB64}`),
-    );
-    if (!valid) return null;
-
-    const payload = JSON.parse(new TextDecoder().decode(base64urlDecode(payloadB64))) as unknown;
-
-    if (
-      typeof payload !== "object" ||
-      payload === null ||
-      (payload as Record<string, unknown>).aud !== "storage-write" ||
-      typeof (payload as Record<string, unknown>).b !== "string" ||
-      typeof (payload as Record<string, unknown>).k !== "string" ||
-      typeof (payload as Record<string, unknown>).exp !== "number"
-    ) {
-      return null;
-    }
-
-    const p = payload as StorageWriteTokenPayload;
-    if (p.exp < Math.floor(Date.now() / 1000)) return null;
-    return p;
-  } catch {
-    return null;
-  }
-}
-
-export async function signR2S3CompatWriteToken(
-  payload: R2S3CompatWriteTokenPayload,
-  secret: string,
-): Promise<string> {
-  const header = base64urlEncodeStr(JSON.stringify({ alg: "HS256", typ: "JWT" }));
-  const body = base64urlEncodeStr(JSON.stringify(payload));
-  const signingInput = `${header}.${body}`;
-  const key = await hmacKey(secret);
-  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(signingInput));
-  return `${signingInput}.${base64urlEncode(sig)}`;
-}
-
-export async function verifyR2S3CompatWriteToken(
-  token: string,
-  secret: string,
-): Promise<R2S3CompatWriteTokenPayload | null> {
-  const parts = token.split(".");
-  if (parts.length !== 3) return null;
-  const [headerB64, payloadB64, sigB64] = parts as [string, string, string];
-  try {
-    const key = await hmacKey(secret);
-    const valid = await crypto.subtle.verify(
-      "HMAC",
-      key,
-      base64urlDecode(sigB64),
-      new TextEncoder().encode(`${headerB64}.${payloadB64}`),
-    );
-    if (!valid) return null;
-
-    const payload = JSON.parse(new TextDecoder().decode(base64urlDecode(payloadB64))) as unknown;
-
-    if (
-      typeof payload !== "object" ||
-      payload === null ||
-      (payload as Record<string, unknown>).aud !== "r2-s3compat-write" ||
-      typeof (payload as Record<string, unknown>).d !== "string" ||
-      typeof (payload as Record<string, unknown>).k !== "string" ||
-      typeof (payload as Record<string, unknown>).u !== "string" ||
-      typeof (payload as Record<string, unknown>).exp !== "number"
-    ) {
-      return null;
-    }
-
-    const p = payload as R2S3CompatWriteTokenPayload;
-    if (p.exp < Math.floor(Date.now() / 1000)) return null;
-    return p;
-  } catch {
-    return null;
-  }
-}
-
-export async function resolveWriteUri(
-  uri: string,
-  env: Env,
-  userId: string,
-  workerOrigin: string,
-): Promise<string> {
-  const parsed = parseR2Uri(uri);
-  if (!parsed) throw new Error(`Unsupported URI: ${uri}`);
-
-  const now = Math.floor(Date.now() / 1000);
-  const token = await signStorageWriteToken(
-    {
-      sub: "storage-write",
-      iss: workerOrigin,
-      aud: "storage-write",
-      iat: now,
-      exp: now + 900,
-      jti: crypto.randomUUID(),
-      b: parsed.bucket,
-      k: `users/${userId}/${parsed.key}`,
-    },
-    env.JWT_SECRET,
-  );
-
-  return `${workerOrigin}/api/storage/obj/${token}`;
 }

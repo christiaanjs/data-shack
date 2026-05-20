@@ -113,7 +113,7 @@ export function QueryPanel({ workerBase, getAuthHeaders }: QueryPanelProps) {
       const res = await fetch(`${workerBase}/api/storage/resolve`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...headers },
-        body: JSON.stringify({ uris }),
+        body: JSON.stringify({ uris: uris.map((uri) => ({ uri, method: "GET" })) }),
       });
       if (!res.ok) throw new Error(`Resolve failed: ${res.status}`);
       const data = (await res.json()) as { urls: Record<string, string> };
@@ -134,7 +134,6 @@ export function QueryPanel({ workerBase, getAuthHeaders }: QueryPanelProps) {
     setQueryResult(null);
 
     try {
-      // Separate write URIs (after TO keyword) from read URIs
       const writeUris = [
         ...new Set([...rawSql.matchAll(WRITE_URI_REGEX)].map((m) => m[1] as string)),
       ];
@@ -143,33 +142,22 @@ export function QueryPanel({ workerBase, getAuthHeaders }: QueryPanelProps) {
 
       let resolvedSql = rawSql;
 
-      if (readUris.length > 0) {
+      if (allUris.length > 0) {
+        const uriRequests = [
+          ...readUris.map((uri) => ({ uri, method: "GET" as const })),
+          ...writeUris.map((uri) => ({ uri, method: "PUT" as const })),
+        ];
         const headers = await getAuthHeaders();
         const res = await fetch(`${workerBase}/api/storage/resolve`, {
           method: "POST",
           headers: { "Content-Type": "application/json", ...headers },
-          body: JSON.stringify({ uris: readUris }),
+          body: JSON.stringify({ uris: uriRequests }),
         });
         if (!res.ok) throw new Error(`URI resolution failed: ${res.status}`);
         const data = (await res.json()) as { urls: Record<string, string> };
         // Sort longest-first so a URI that is a prefix of another doesn't
         // corrupt the longer one during substitution.
-        for (const uri of [...readUris].sort((a, b) => b.length - a.length)) {
-          const url = data.urls[uri];
-          if (url) resolvedSql = resolvedSql.replaceAll(uri, url);
-        }
-      }
-
-      if (writeUris.length > 0) {
-        const headers = await getAuthHeaders();
-        const res = await fetch(`${workerBase}/api/storage/resolve-write`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", ...headers },
-          body: JSON.stringify({ uris: writeUris }),
-        });
-        if (!res.ok) throw new Error(`Write URI resolution failed: ${res.status}`);
-        const data = (await res.json()) as { urls: Record<string, string> };
-        for (const uri of [...writeUris].sort((a, b) => b.length - a.length)) {
+        for (const uri of [...allUris].sort((a, b) => b.length - a.length)) {
           const url = data.urls[uri];
           if (url) resolvedSql = resolvedSql.replaceAll(uri, url);
         }
