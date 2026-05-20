@@ -35,9 +35,13 @@ export async function initDuckDB(): Promise<duckdb.AsyncDuckDB> {
 export async function runQuery(
   db: duckdb.AsyncDuckDB,
   sql: string,
+  preamble?: string[],
 ): Promise<{ columns: string[]; rows: unknown[][] }> {
   const conn = await db.connect();
   try {
+    if (preamble) {
+      for (const stmt of preamble) await conn.query(stmt);
+    }
     const result = await conn.query(sql);
     const columns = result.schema.fields.map((f) => f.name);
     const rows: unknown[][] = [];

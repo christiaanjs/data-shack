@@ -10,10 +10,11 @@ Each stage produces something functional and testable independently. Stages 1–
 | Stage 1 | Skeleton with one working data path | ✅ Done |
 | Stage 2 (remainder) | Credential storage, storage backends, settings UI | ✅ Done |
 | HTTP data source | `http` credential type + `http-ds://` URI scheme + test UI | ✅ Done |
+| Storage write path | `COPY TO 'r2://…'` and `COPY TO 'r2-s3compat://…'` from DuckDB WASM | ✅ Done |
 | Stage 3 | Catalog DO | Not started |
 | Stage 4–10 | See below | Not started |
 
-**Note on Stage 1 + Stage 2 storage resolution:** The `POST /api/storage/resolve` endpoint and the `GET /api/storage/obj/:token` proxy are working end-to-end for `r2://` URIs against the bound R2 bucket. However, URI resolution does not yet look up the `storage_backends` table — the bucket name in the URI is validated syntactically but not matched against a configured backend row. Full backend dispatch (choosing between `r2-bound`, `s3`, `gcs`, etc. based on D1 config) will be wired in Stage 3 when the catalog DO's snapshot records tie URIs to specific backend IDs.
+**Note on Stage 1 + Stage 2 storage resolution:** The `POST /api/storage/resolve` endpoint handles both read (`method: "GET"`) and write (`method: "PUT"`) URI resolution in a single call. `r2://` read/write is fully working against the bound R2 bucket. `r2-s3compat://` read/write is fully working — resolution looks up backend config from D1 and signs requests with SigV4; for writes the worker returns S3 credentials so DuckDB can write natively via its S3 httpfs (requires a CORS policy on the R2 bucket — see `r2-cors.json`). For `r2://` URIs the bucket name is validated syntactically but not matched against a configured backend row — full dispatch for `s3`, `gcs`, and `azure` backends will be wired in Stage 3 when catalog snapshot records tie URIs to specific backend IDs.
 
 **Note on HTTP data source (direct query alternative to Stage 4 ETL):** Rather than building the Akahu ETL worker first (Stage 4), a direct-query path was implemented that allows DuckDB to read from HTTP APIs in real time. A generic `http` credential type stores a base URL, configurable headers (with `{{variable}}` template interpolation), and variables in D1. The `http-ds://credentialId/path` URI scheme plugs into the existing `POST /api/storage/resolve` pipeline — DuckDB queries like `SELECT * FROM read_json('http-ds://cred_xxx/accounts') LIMIT 10` work transparently. The Worker signs a short-lived token that DuckDB uses to fetch through the proxy, which decrypts credentials and injects auth headers at request time. A test dialog in the Settings UI lets you call any HTTP data source path and see the raw response. This replaces the separate `akahu` credential type and covers the Akahu use case without requiring a cron-triggered ETL worker or catalog DO.
 
@@ -139,9 +140,9 @@ Implemented as a standalone Cloudflare Worker with D1, ahead of Stage 1, to esta
   1. Receives job spec including input URIs and output URI
   2. Resolves each input URI to a readable HTTPS URL via the Worker proxy storage resolver
   3. Registers DuckDB views per input table using the resolved URLs
-  4. Runs `COPY … TO … (FORMAT PARQUET)` query
-  5. Requests a writable URL for the output URI from the Worker proxy (signed PUT URL for R2/S3, SAS token for Azure, etc.) — see [Storage access pattern](#storage-access-pattern)
-  6. Writes Parquet directly to the storage backend
+  4. Runs `COPY … TO … (FORMAT PARQUET)` query — ✅ write URL resolution and DuckDB WASM write path already implemented (steps 5–6 below are done)
+  5. Requests a writable URL for the output URI from the Worker proxy (`method: "PUT"` in `POST /api/storage/resolve`) — ✅ Done for `r2://` and `r2-s3compat://`
+  6. Writes Parquet directly to the storage backend — ✅ Done (`r2://` via virtual FS + fetch, `r2-s3compat://` via DuckDB native S3 httpfs)
   7. Commits result URI to catalog DO
 - Re-claim logic: if session drops mid-job, session DO resets job to `pending`
 - Compaction trigger added for the `transactions` table

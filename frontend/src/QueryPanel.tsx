@@ -23,7 +23,9 @@ interface CredentialRow {
   type: string;
 }
 
-const STORAGE_URI_REGEX = /(?:r2|http-ds):\/\/[^\s'"]+/g;
+const STORAGE_URI_REGEX = /(?:r2-s3compat|r2|http-ds):\/\/[^\s'"]+/g;
+// Matches storage URIs that appear after a SQL TO keyword (COPY TO write destinations)
+const WRITE_URI_REGEX = /\bTO\s+['"]?((?:r2-s3compat|r2):\/\/[^\s'"]+)/gi;
 const PLACEHOLDER_SQL = "SELECT * FROM read_json('r2://data-shack-storage/sample.ndjson') LIMIT 10";
 
 export function QueryPanel({ workerBase, getAuthHeaders }: QueryPanelProps) {
@@ -111,7 +113,7 @@ export function QueryPanel({ workerBase, getAuthHeaders }: QueryPanelProps) {
       const res = await fetch(`${workerBase}/api/storage/resolve`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...headers },
-        body: JSON.stringify({ uris }),
+        body: JSON.stringify({ uris: uris.map((uri) => ({ uri, method: "GET" })) }),
       });
       if (!res.ok) throw new Error(`Resolve failed: ${res.status}`);
       const data = (await res.json()) as { urls: Record<string, string> };
@@ -132,28 +134,80 @@ export function QueryPanel({ workerBase, getAuthHeaders }: QueryPanelProps) {
     setQueryResult(null);
 
     try {
-      const uris = Array.from(new Set(rawSql.match(STORAGE_URI_REGEX) ?? []));
+      const writeUris = [
+        ...new Set([...rawSql.matchAll(WRITE_URI_REGEX)].map((m) => m[1] as string)),
+      ];
+      const allUris = Array.from(new Set(rawSql.match(STORAGE_URI_REGEX) ?? []));
+      const readUris = allUris.filter((u) => !writeUris.includes(u));
+
+      // DuckDB WASM httpfs doesn't support HTTP PUT, so write URIs are redirected
+      // to a virtual FS temp path; we upload the buffer ourselves after the query.
+      const writeTempMap: Record<string, { tempPath: string; resolvedUrl: string }> = {};
+
       let resolvedSql = rawSql;
 
-      if (uris.length > 0) {
+      if (allUris.length > 0) {
+        const uriRequests = [
+          ...readUris.map((uri) => ({ uri, method: "GET" as const })),
+          ...writeUris.map((uri) => ({ uri, method: "PUT" as const })),
+        ];
         const headers = await getAuthHeaders();
         const res = await fetch(`${workerBase}/api/storage/resolve`, {
           method: "POST",
           headers: { "Content-Type": "application/json", ...headers },
-          body: JSON.stringify({ uris }),
+          body: JSON.stringify({ uris: uriRequests }),
         });
         if (!res.ok) throw new Error(`URI resolution failed: ${res.status}`);
         const data = (await res.json()) as { urls: Record<string, string> };
+
+        writeUris.forEach((uri, i) => {
+          const ext = uri.split(".").pop() ?? "parquet";
+          writeTempMap[uri] = {
+            tempPath: `/tmp/ds_write_${i}.${ext}`,
+            resolvedUrl: data.urls[uri] ?? "",
+          };
+        });
+
         // Sort longest-first so a URI that is a prefix of another doesn't
         // corrupt the longer one during substitution.
-        for (const uri of [...uris].sort((a, b) => b.length - a.length)) {
-          const url = data.urls[uri];
-          if (url) resolvedSql = resolvedSql.replaceAll(uri, url);
+        for (const uri of [...allUris].sort((a, b) => b.length - a.length)) {
+          const write = writeTempMap[uri];
+          if (write) {
+            resolvedSql = resolvedSql.replaceAll(uri, write.tempPath);
+          } else {
+            const url = data.urls[uri];
+            if (url) resolvedSql = resolvedSql.replaceAll(uri, url);
+          }
         }
-      }
 
-      const result = await runQuery(db, resolvedSql);
-      setQueryResult(result);
+        const result = await runQuery(db, resolvedSql);
+        setQueryResult(result);
+
+        // Upload files DuckDB wrote to virtual FS (r2-bound writes), then clean up
+        for (const { tempPath, resolvedUrl } of Object.values(writeTempMap)) {
+          if (!resolvedUrl) continue;
+          const ext = tempPath.split(".").pop() ?? "";
+          const contentType =
+            ext === "parquet"
+              ? "application/vnd.apache.parquet"
+              : ext === "csv"
+                ? "text/csv"
+                : ext === "json" || ext === "ndjson"
+                  ? "application/json"
+                  : "application/octet-stream";
+          const buffer = await db.copyFileToBuffer(tempPath);
+          const uploadRes = await fetch(resolvedUrl, {
+            method: "PUT",
+            headers: { "Content-Type": contentType },
+            body: buffer.buffer as ArrayBuffer,
+          });
+          if (!uploadRes.ok) throw new Error(`Storage upload failed: ${uploadRes.status}`);
+          await db.dropFile(tempPath);
+        }
+      } else {
+        const result = await runQuery(db, resolvedSql);
+        setQueryResult(result);
+      }
     } catch (err) {
       setQueryError(err instanceof Error ? err.message : "Query failed");
     } finally {

@@ -10,6 +10,7 @@ A personal data integration platform built on Cloudflare that brings your data t
 | D1 schema: users, oauth tables, credentials, storage_backends | ✅ Done |
 | Credential + storage backend vault (AES-GCM encrypted in D1) | ✅ Done |
 | R2 storage proxy: URI resolution, signed tokens, Range streaming | ✅ Done |
+| Storage write path: `COPY TO 'r2://…'` and `COPY TO 'r2-s3compat://…'` from DuckDB WASM | ✅ Done |
 | DuckDB-WASM query engine in the browser | ✅ Done |
 | Query UI: URI resolver + SQL editor + results table | ✅ Done |
 | Settings UI: manage credentials and storage backends | ✅ Done |
@@ -39,6 +40,26 @@ A signed-in user can write files to the R2 bucket and query them with SQL direct
    ```
    The worker resolves the `r2://` URI to a short-lived signed URL and DuckDB reads the file directly.
 
+### Writing query results to storage
+
+DuckDB can write query results directly to the R2 bucket or an r2-s3compat backend using `COPY TO`:
+
+```sql
+-- Write to the bound R2 bucket
+COPY (SELECT * FROM read_json('r2://data-shack-storage/raw.ndjson')) TO 'r2://data-shack-storage/output.parquet' (FORMAT PARQUET)
+
+-- Write to an r2-s3compat backend (storage backend ID from Settings)
+COPY (SELECT 1 AS id, 'hello' AS msg) TO 'r2-s3compat://sb_abc123/output.parquet' (FORMAT PARQUET)
+```
+
+For `r2://` writes, the frontend resolves a short-lived PUT token, DuckDB writes to its virtual FS, and JS uploads the buffer via `fetch`. For `r2-s3compat://` writes, the worker returns S3 credentials directly and DuckDB writes natively via its built-in S3 httpfs — to enable this, apply the included CORS policy to your R2 bucket:
+
+```bash
+wrangler r2 bucket cors set <bucket-name> --file r2-cors.json
+```
+
+The `POST /api/storage/resolve` endpoint handles both read and write URI resolution via a `method: "GET" | "PUT"` field per URI — no separate endpoint needed.
+
 ### Querying HTTP APIs (Akahu, etc.)
 
 External HTTP APIs can be queried directly from DuckDB using the `http` credential type and the `http-ds://` URI scheme:
@@ -64,7 +85,7 @@ External HTTP APIs can be queried directly from DuckDB using the `http` credenti
    ```
    The worker resolves the URI to a short-lived signed proxy URL. DuckDB fetches through the Worker, which injects the configured auth headers before forwarding to the API.
 
-The **Settings** tab also stores storage backend configs (encrypted in D1). These are persisted but not yet dispatched during URI resolution for non-R2 backends — full backend dispatch is wired in Stage 3 when the catalog DO ties snapshot URIs to specific backend rows.
+The **Settings** tab also stores storage backend configs (encrypted in D1). The `r2-s3compat` backend type is now fully dispatched — both read and write URI resolution looks up config from D1 and signs requests with SigV4 accordingly. The `r2://` backend uses the Worker's bound R2 binding directly (no D1 lookup needed at resolve time). Full dispatch for other backend types (`s3`, `gcs`, `azure`) will be wired in Stage 3 when the catalog DO ties snapshot URIs to specific backend IDs.
 
 ## Architecture Overview
 
