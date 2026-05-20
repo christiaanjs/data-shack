@@ -13,6 +13,9 @@ A personal data integration platform built on Cloudflare that brings your data t
 | DuckDB-WASM query engine in the browser | ✅ Done |
 | Query UI: URI resolver + SQL editor + results table | ✅ Done |
 | Settings UI: manage credentials and storage backends | ✅ Done |
+| `http` credential type: configurable headers with `{{variable}}` templates | ✅ Done |
+| HTTP data source proxy: `http-ds://` URI scheme + token endpoint for DuckDB | ✅ Done |
+| Settings test dialog: call any HTTP data source path and see the raw response | ✅ Done |
 | Catalog Durable Object | Not started |
 | Session Durable Object + MCP server | Not started |
 | ETL workers (Akahu, Google Sheets) | Not started |
@@ -21,6 +24,8 @@ A personal data integration platform built on Cloudflare that brings your data t
 See [`build-plan.md`](./build-plan.md) for the full sequenced plan.
 
 ## Current capability
+
+### Querying object storage (R2)
 
 A signed-in user can write files to the R2 bucket and query them with SQL directly in the browser:
 
@@ -34,7 +39,32 @@ A signed-in user can write files to the R2 bucket and query them with SQL direct
    ```
    The worker resolves the `r2://` URI to a short-lived signed URL and DuckDB reads the file directly.
 
-The **Settings** tab stores credentials and storage backend configs (encrypted in D1 with an AES-GCM key derived from `JWT_SECRET`). These are persisted but not yet used during URI resolution — that wiring happens in Stage 3 when the catalog DO ties snapshot URIs to specific backend rows.
+### Querying HTTP APIs (Akahu, etc.)
+
+External HTTP APIs can be queried directly from DuckDB using the `http` credential type and the `http-ds://` URI scheme:
+
+1. Go to **Settings → Credentials** and add a credential with type `http`. The form pre-fills a template — fill in your `baseUrl`, headers (using `{{variableName}}` for secrets), and `variables`. For Akahu:
+   ```json
+   {
+     "baseUrl": "https://api.akahu.io/v1",
+     "headers": {
+       "Authorization": "Bearer {{userToken}}",
+       "X-Akahu-Id": "{{appToken}}"
+     },
+     "variables": {
+       "userToken": "user_token_...",
+       "appToken": "app_..."
+     }
+   }
+   ```
+2. Use the **Test** button on the credential row to verify it works against a specific path.
+3. In the **Query** tab, use the credential ID in an `http-ds://` URI:
+   ```sql
+   SELECT * FROM read_json('http-ds://cred_abc123/accounts') LIMIT 10
+   ```
+   The worker resolves the URI to a short-lived signed proxy URL. DuckDB fetches through the Worker, which injects the configured auth headers before forwarding to the API.
+
+The **Settings** tab also stores storage backend configs (encrypted in D1). These are persisted but not yet dispatched during URI resolution for non-R2 backends — full backend dispatch is wired in Stage 3 when the catalog DO ties snapshot URIs to specific backend rows.
 
 ## Architecture Overview
 

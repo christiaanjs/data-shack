@@ -19,8 +19,129 @@ interface StorageBackendRow {
   created_at: number;
 }
 
-const CREDENTIAL_TYPES = ["akahu", "google_oauth", "generic_token"];
+const CREDENTIAL_TYPES = ["http", "google_oauth", "generic_token"];
 const BACKEND_TYPES = ["r2-bound", "s3", "r2-s3compat", "gcs", "azure", "https"];
+
+const HTTP_CONFIG_TEMPLATE = JSON.stringify(
+  {
+    baseUrl: "https://api.example.com",
+    headers: {
+      Authorization: "Bearer {{apiKey}}",
+      "X-App-Id": "{{appId}}",
+    },
+    variables: {
+      apiKey: "your-token-here",
+      appId: "your-app-id-here",
+    },
+  },
+  null,
+  2,
+);
+
+// ── TestDialog ────────────────────────────────────────────────────────────
+
+function TestDialog({
+  credentialId,
+  credentialName,
+  workerBase,
+  getAuthHeaders,
+  onClose,
+}: {
+  credentialId: string;
+  credentialName: string;
+  workerBase: string;
+  getAuthHeaders: () => Promise<Record<string, string>>;
+  onClose: () => void;
+}) {
+  const [path, setPath] = useState("/");
+  const [fetching, setFetching] = useState(false);
+  const [result, setResult] = useState<{ status: number; body: string } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleFetch() {
+    setFetching(true);
+    setError(null);
+    setResult(null);
+    try {
+      const headers = await getAuthHeaders();
+      const res = await fetch(`${workerBase}/api/data-sources/${credentialId}/fetch`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...headers },
+        body: JSON.stringify({ path }),
+      });
+      const text = await res.text();
+      setResult({ status: res.status, body: text.slice(0, 4000) });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Request failed");
+    } finally {
+      setFetching(false);
+    }
+  }
+
+  return (
+    <div
+      class="modal modal-open"
+      onKeyDown={(e) => {
+        if (e.key === "Escape") onClose();
+      }}
+    >
+      <div class="modal-box max-w-2xl space-y-4">
+        <h3 class="font-bold text-lg">Test: {credentialName}</h3>
+
+        <div class="flex gap-2 items-end">
+          <fieldset class="fieldset flex-1">
+            <legend class="fieldset-legend">Path</legend>
+            <input
+              type="text"
+              class="input input-bordered input-sm w-full font-mono"
+              value={path}
+              onInput={(e) => setPath((e.target as HTMLInputElement).value)}
+              placeholder="/accounts"
+            />
+          </fieldset>
+          <button
+            type="button"
+            class="btn btn-sm btn-outline mb-[1px]"
+            onClick={() => handleFetch().catch(() => {})}
+            disabled={fetching}
+          >
+            {fetching && <span class="loading loading-spinner loading-xs" />}
+            {fetching ? "Fetching…" : "Fetch"}
+          </button>
+        </div>
+
+        {error && (
+          <div role="alert" class="alert alert-error py-2 text-sm">
+            <span>{error}</span>
+          </div>
+        )}
+
+        {result && (
+          <div class="space-y-1">
+            <p class="text-xs text-base-content/50">
+              Status:{" "}
+              <span class={result.status < 300 ? "text-success" : "text-error"}>
+                {result.status}
+              </span>
+            </p>
+            <pre class="bg-base-300 rounded p-3 text-xs overflow-auto max-h-80 whitespace-pre-wrap break-all">
+              {result.body}
+            </pre>
+          </div>
+        )}
+
+        <div class="modal-action">
+          <button type="button" class="btn btn-sm" onClick={onClose}>
+            Close
+          </button>
+        </div>
+      </div>
+      <button type="button" class="modal-backdrop" onClick={onClose} aria-label="Close dialog" />
+    </div>
+  );
+}
+
+// ── AddForm ───────────────────────────────────────────────────────────────
 
 function AddForm({
   title,
@@ -33,9 +154,19 @@ function AddForm({
 }) {
   const [name, setName] = useState("");
   const [type, setType] = useState(typeOptions[0] ?? "");
-  const [config, setConfig] = useState("{}");
+  const [config, setConfig] = useState(typeOptions[0] === "http" ? HTTP_CONFIG_TEMPLATE : "{}");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  function handleTypeChange(newType: string) {
+    setType(newType);
+    // Pre-fill config template when switching to http; reset otherwise
+    if (newType === "http") {
+      setConfig(HTTP_CONFIG_TEMPLATE);
+    } else if (config === HTTP_CONFIG_TEMPLATE) {
+      setConfig("{}");
+    }
+  }
 
   async function handleSubmit(e: Event) {
     e.preventDefault();
@@ -44,7 +175,7 @@ function AddForm({
     try {
       await onAdd(name, type, config);
       setName("");
-      setConfig("{}");
+      setConfig(type === "http" ? HTTP_CONFIG_TEMPLATE : "{}");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed");
     } finally {
@@ -76,7 +207,7 @@ function AddForm({
           <select
             class="select select-bordered select-sm w-full"
             value={type}
-            onChange={(e) => setType((e.target as HTMLSelectElement).value)}
+            onChange={(e) => handleTypeChange((e.target as HTMLSelectElement).value)}
           >
             {typeOptions.map((t) => (
               <option key={t} value={t}>
@@ -90,10 +221,18 @@ function AddForm({
         <legend class="fieldset-legend">Config (JSON)</legend>
         <textarea
           class="textarea textarea-bordered textarea-sm font-mono w-full"
-          rows={3}
+          rows={type === "http" ? 12 : 3}
           value={config}
           onInput={(e) => setConfig((e.target as HTMLTextAreaElement).value)}
         />
+        {type === "http" && (
+          <p class="text-xs text-base-content/50 mt-1">
+            <strong>baseUrl</strong> — API root (e.g. <code>https://api.akahu.io/v1</code>).{" "}
+            <strong>headers</strong> — sent on every request; use <code>{"{{name}}"}</code> to
+            reference a value from <strong>variables</strong> (keeps secrets out of the header
+            string).
+          </p>
+        )}
       </fieldset>
       <button type="submit" class="btn btn-sm btn-primary" disabled={submitting || !name.trim()}>
         {submitting && <span class="loading loading-spinner loading-xs" />}
@@ -103,6 +242,8 @@ function AddForm({
   );
 }
 
+// ── SettingsSection ───────────────────────────────────────────────────────
+
 function SettingsSection<T extends { id: string; name: string; type: string }>({
   title,
   addTitle,
@@ -110,6 +251,7 @@ function SettingsSection<T extends { id: string; name: string; type: string }>({
   typeOptions,
   onAdd,
   onDelete,
+  onTest,
 }: {
   title: string;
   addTitle: string;
@@ -117,6 +259,7 @@ function SettingsSection<T extends { id: string; name: string; type: string }>({
   typeOptions: string[];
   onAdd: (name: string, type: string, config: string) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
+  onTest?: (id: string, name: string) => void;
 }) {
   return (
     <div class="card bg-base-200">
@@ -141,7 +284,16 @@ function SettingsSection<T extends { id: string; name: string; type: string }>({
                       <span class="badge badge-ghost badge-sm">{row.type}</span>
                     </td>
                     <td class="font-mono text-xs text-base-content/50">{row.id}</td>
-                    <td>
+                    <td class="flex gap-1">
+                      {onTest && row.type === "http" && (
+                        <button
+                          type="button"
+                          class="btn btn-ghost btn-xs"
+                          onClick={() => onTest(row.id, row.name)}
+                        >
+                          Test
+                        </button>
+                      )}
                       <button
                         type="button"
                         class="btn btn-ghost btn-xs text-error"
@@ -167,10 +319,13 @@ function SettingsSection<T extends { id: string; name: string; type: string }>({
   );
 }
 
+// ── SettingsPanel ─────────────────────────────────────────────────────────
+
 export function SettingsPanel({ workerBase, getAuthHeaders }: SettingsPanelProps) {
   const [credentials, setCredentials] = useState<CredentialRow[]>([]);
   const [backends, setBackends] = useState<StorageBackendRow[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [testTarget, setTestTarget] = useState<{ id: string; name: string } | null>(null);
 
   const fetchAll = useCallback(async () => {
     try {
@@ -246,6 +401,15 @@ export function SettingsPanel({ workerBase, getAuthHeaders }: SettingsPanelProps
 
   return (
     <div class="max-w-4xl mx-auto p-6 space-y-4">
+      {testTarget && (
+        <TestDialog
+          credentialId={testTarget.id}
+          credentialName={testTarget.name}
+          workerBase={workerBase}
+          getAuthHeaders={getAuthHeaders}
+          onClose={() => setTestTarget(null)}
+        />
+      )}
       {loadError && (
         <div role="alert" class="alert alert-error">
           <span>{loadError}</span>
@@ -258,6 +422,7 @@ export function SettingsPanel({ workerBase, getAuthHeaders }: SettingsPanelProps
         typeOptions={CREDENTIAL_TYPES}
         onAdd={addCredential}
         onDelete={deleteCredential}
+        onTest={(id, name) => setTestTarget({ id, name })}
       />
       <SettingsSection
         title="Storage Backends"

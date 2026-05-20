@@ -88,6 +88,78 @@ export async function verifyStorageToken(
   }
 }
 
+interface DataSourceTokenPayload {
+  sub: string;
+  aud: string;
+  exp: number;
+  iat: number;
+  jti: string;
+  c: string; // credential ID
+  p: string; // API path
+  u: string; // user ID
+}
+
+export async function signDataSourceToken(
+  payload: DataSourceTokenPayload,
+  secret: string,
+): Promise<string> {
+  const header = base64urlEncodeStr(JSON.stringify({ alg: "HS256", typ: "JWT" }));
+  const body = base64urlEncodeStr(JSON.stringify(payload));
+  const signingInput = `${header}.${body}`;
+  const key = await hmacKey(secret);
+  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(signingInput));
+  return `${signingInput}.${base64urlEncode(sig)}`;
+}
+
+export async function verifyDataSourceToken(
+  token: string,
+  secret: string,
+): Promise<DataSourceTokenPayload | null> {
+  const parts = token.split(".");
+  if (parts.length !== 3) return null;
+  const [headerB64, payloadB64, sigB64] = parts as [string, string, string];
+  try {
+    const key = await hmacKey(secret);
+    const valid = await crypto.subtle.verify(
+      "HMAC",
+      key,
+      base64urlDecode(sigB64),
+      new TextEncoder().encode(`${headerB64}.${payloadB64}`),
+    );
+    if (!valid) return null;
+
+    const payload = JSON.parse(new TextDecoder().decode(base64urlDecode(payloadB64))) as unknown;
+
+    if (
+      typeof payload !== "object" ||
+      payload === null ||
+      (payload as Record<string, unknown>).aud !== "data-source" ||
+      typeof (payload as Record<string, unknown>).c !== "string" ||
+      typeof (payload as Record<string, unknown>).p !== "string" ||
+      typeof (payload as Record<string, unknown>).u !== "string" ||
+      typeof (payload as Record<string, unknown>).exp !== "number"
+    ) {
+      return null;
+    }
+
+    const p = payload as DataSourceTokenPayload;
+    if (p.exp < Math.floor(Date.now() / 1000)) return null;
+    return p;
+  } catch {
+    return null;
+  }
+}
+
+export function parseHttpDsUri(uri: string): { credentialId: string; path: string } | null {
+  if (!uri.startsWith("http-ds://")) return null;
+  const rest = uri.slice("http-ds://".length);
+  const slash = rest.indexOf("/");
+  const credentialId = slash === -1 ? rest : rest.slice(0, slash);
+  const path = slash === -1 ? "/" : rest.slice(slash);
+  if (!credentialId) return null;
+  return { credentialId, path };
+}
+
 export function parseR2Uri(uri: string): { bucket: string; key: string } | null {
   if (!uri.startsWith("r2://")) return null;
   const rest = uri.slice("r2://".length);

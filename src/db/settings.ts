@@ -77,6 +77,23 @@ export async function insertStorageBackend(
   return { id };
 }
 
+interface CredentialConfigRow {
+  type: string;
+  encrypted_config: string;
+}
+
+export async function getCredentialConfig(
+  db: D1Database,
+  id: string,
+  userId: string,
+): Promise<CredentialConfigRow | null> {
+  const result = await db
+    .prepare("SELECT type, encrypted_config FROM credentials WHERE id = ? AND user_id = ?")
+    .bind(id, userId)
+    .first<CredentialConfigRow>();
+  return result ?? null;
+}
+
 export async function deleteStorageBackend(
   db: D1Database,
   id: string,
