@@ -1,0 +1,9 @@
+[
+  {
+    "AllowedOrigins": ["https://data-shack-staging.pages.dev"],
+    "AllowedMethods": ["GET", "PUT", "HEAD"],
+    "AllowedHeaders": ["*"],
+    "ExposeHeaders": ["ETag", "Content-Type", "Content-Length"],
+    "MaxAgeSeconds": 3600
+  }
+]
