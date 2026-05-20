@@ -13,7 +13,10 @@ beforeAll(async () => {
     .run();
 });
 
-// baseUrl points to the worker itself — Miniflare routes it back so no real network needed.
+// baseUrl points to localhost — outbound fetch will fail (connection refused) in the workerd
+// test environment, which is intentional: tests that expect 502 verify the auth + config path
+// succeeds up to the outbound fetch stage. Tests that only need a credential (e.g. resolve
+// pipeline tests) don't exercise the actual proxy.
 const LOOPBACK_CONFIG = {
   baseUrl: "http://localhost",
   headers: { "X-Custom": "static-value" },

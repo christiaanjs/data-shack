@@ -9,10 +9,13 @@ Each stage produces something functional and testable independently. Stages 1–
 | Auth (from Stage 2) | OAuth 2.0 + JWT worker, D1 schema | ✅ Done |
 | Stage 1 | Skeleton with one working data path | ✅ Done |
 | Stage 2 (remainder) | Credential storage, storage backends, settings UI | ✅ Done |
+| HTTP data source | `http` credential type + `http-ds://` URI scheme + test UI | ✅ Done |
 | Stage 3 | Catalog DO | Not started |
 | Stage 4–10 | See below | Not started |
 
 **Note on Stage 1 + Stage 2 storage resolution:** The `POST /api/storage/resolve` endpoint and the `GET /api/storage/obj/:token` proxy are working end-to-end for `r2://` URIs against the bound R2 bucket. However, URI resolution does not yet look up the `storage_backends` table — the bucket name in the URI is validated syntactically but not matched against a configured backend row. Full backend dispatch (choosing between `r2-bound`, `s3`, `gcs`, etc. based on D1 config) will be wired in Stage 3 when the catalog DO's snapshot records tie URIs to specific backend IDs.
+
+**Note on HTTP data source (direct query alternative to Stage 4 ETL):** Rather than building the Akahu ETL worker first (Stage 4), a direct-query path was implemented that allows DuckDB to read from HTTP APIs in real time. A generic `http` credential type stores a base URL, configurable headers (with `{{variable}}` template interpolation), and variables in D1. The `http-ds://credentialId/path` URI scheme plugs into the existing `POST /api/storage/resolve` pipeline — DuckDB queries like `SELECT * FROM read_json('http-ds://cred_xxx/accounts') LIMIT 10` work transparently. The Worker signs a short-lived token that DuckDB uses to fetch through the proxy, which decrypts credentials and injects auth headers at request time. A test dialog in the Settings UI lets you call any HTTP data source path and see the raw response. This replaces the separate `akahu` credential type and covers the Akahu use case without requiring a cron-triggered ETL worker or catalog DO.
 
 Auth was built first to establish the security boundary before any data flows through the system. All subsequent stages build on top of this foundation — see [Stage 2](#stage-2--auth-and-credential-storage) for what's done and what remains.
 
@@ -87,6 +90,8 @@ Implemented as a standalone Cloudflare Worker with D1, ahead of Stage 1, to esta
 ## Stage 4 — First load job (Akahu)
 
 **Goal:** Real data flows in automatically.
+
+> **Alternative already built:** Akahu data can already be queried directly from DuckDB via the `http-ds://` URI scheme (see HTTP data source note in the implementation status section above). Stage 4 as described below adds a cron-triggered ETL path that snapshots data to R2 for catalog-tracked, time-travel-capable storage. The two approaches are complementary — direct query for ad-hoc exploration, ETL for reliable scheduled ingestion.
 
 - Akahu ETL Worker: cron-triggered, reads Akahu API credential from D1 via Worker proxy, calls Akahu API, writes NDJSON to the primary storage backend, commits snapshot URI to catalog DO
 - Cursor tracking: last-fetched timestamp stored in D1 alongside the credential

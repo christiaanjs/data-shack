@@ -199,17 +199,28 @@ async function decryptHttpConfig(
       string,
       unknown
     >;
-    const baseUrl = raw.baseUrl;
-    if (typeof baseUrl !== "string" || !baseUrl.startsWith("http")) return null;
-    const headers =
-      typeof raw.headers === "object" && raw.headers !== null
-        ? (raw.headers as Record<string, string>)
-        : {};
-    const variables =
-      typeof raw.variables === "object" && raw.variables !== null
-        ? (raw.variables as Record<string, string>)
-        : {};
-    return { baseUrl, headers, variables };
+    if (typeof raw.baseUrl !== "string") return null;
+    let parsed: URL;
+    try {
+      parsed = new URL(raw.baseUrl);
+    } catch {
+      return null;
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+
+    const headers: Record<string, string> = {};
+    if (typeof raw.headers === "object" && raw.headers !== null) {
+      for (const [k, v] of Object.entries(raw.headers as Record<string, unknown>)) {
+        if (typeof v === "string") headers[k] = v;
+      }
+    }
+    const variables: Record<string, string> = {};
+    if (typeof raw.variables === "object" && raw.variables !== null) {
+      for (const [k, v] of Object.entries(raw.variables as Record<string, unknown>)) {
+        if (typeof v === "string") variables[k] = v;
+      }
+    }
+    return { baseUrl: raw.baseUrl, headers, variables };
   } catch {
     return null;
   }

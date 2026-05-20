@@ -79,7 +79,12 @@ function TestDialog({
   }
 
   return (
-    <div class="modal modal-open">
+    <div
+      class="modal modal-open"
+      onKeyDown={(e) => {
+        if (e.key === "Escape") onClose();
+      }}
+    >
       <div class="modal-box max-w-2xl space-y-4">
         <h3 class="font-bold text-lg">Test: {credentialName}</h3>
 
@@ -131,16 +136,7 @@ function TestDialog({
           </button>
         </div>
       </div>
-      <div
-        role="button"
-        tabIndex={-1}
-        class="modal-backdrop"
-        onClick={onClose}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" || e.key === " ") onClose();
-        }}
-        aria-label="Close dialog"
-      />
+      <button type="button" class="modal-backdrop" onClick={onClose} aria-label="Close dialog" />
     </div>
   );
 }
