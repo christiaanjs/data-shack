@@ -105,3 +105,20 @@ export async function deleteStorageBackend(
     .run();
   return (result.meta.changes ?? 0) > 0;
 }
+
+interface StorageBackendConfigRow {
+  type: string;
+  encrypted_config: string;
+}
+
+export async function getStorageBackendConfig(
+  db: D1Database,
+  id: string,
+  userId: string,
+): Promise<StorageBackendConfigRow | null> {
+  const result = await db
+    .prepare("SELECT type, encrypted_config FROM storage_backends WHERE id = ? AND user_id = ?")
+    .bind(id, userId)
+    .first<StorageBackendConfigRow>();
+  return result ?? null;
+}

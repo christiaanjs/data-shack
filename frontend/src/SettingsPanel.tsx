@@ -38,6 +38,18 @@ const HTTP_CONFIG_TEMPLATE = JSON.stringify(
   2,
 );
 
+const R2_S3COMPAT_CONFIG_TEMPLATE = JSON.stringify(
+  {
+    endpoint: "https://<accountId>.r2.cloudflarestorage.com",
+    accessKeyId: "your-access-key-id",
+    secretAccessKey: "your-secret-access-key",
+    bucket: "your-bucket-name",
+    region: "auto",
+  },
+  null,
+  2,
+);
+
 // ── TestDialog ────────────────────────────────────────────────────────────
 
 function TestDialog({
@@ -154,16 +166,23 @@ function AddForm({
 }) {
   const [name, setName] = useState("");
   const [type, setType] = useState(typeOptions[0] ?? "");
-  const [config, setConfig] = useState(typeOptions[0] === "http" ? HTTP_CONFIG_TEMPLATE : "{}");
+  const initialConfig =
+    typeOptions[0] === "http"
+      ? HTTP_CONFIG_TEMPLATE
+      : typeOptions[0] === "r2-s3compat"
+        ? R2_S3COMPAT_CONFIG_TEMPLATE
+        : "{}";
+  const [config, setConfig] = useState(initialConfig);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   function handleTypeChange(newType: string) {
     setType(newType);
-    // Pre-fill config template when switching to http; reset otherwise
     if (newType === "http") {
       setConfig(HTTP_CONFIG_TEMPLATE);
-    } else if (config === HTTP_CONFIG_TEMPLATE) {
+    } else if (newType === "r2-s3compat") {
+      setConfig(R2_S3COMPAT_CONFIG_TEMPLATE);
+    } else if (config === HTTP_CONFIG_TEMPLATE || config === R2_S3COMPAT_CONFIG_TEMPLATE) {
       setConfig("{}");
     }
   }
@@ -175,7 +194,13 @@ function AddForm({
     try {
       await onAdd(name, type, config);
       setName("");
-      setConfig(type === "http" ? HTTP_CONFIG_TEMPLATE : "{}");
+      setConfig(
+        type === "http"
+          ? HTTP_CONFIG_TEMPLATE
+          : type === "r2-s3compat"
+            ? R2_S3COMPAT_CONFIG_TEMPLATE
+            : "{}",
+      );
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed");
     } finally {
@@ -221,7 +246,7 @@ function AddForm({
         <legend class="fieldset-legend">Config (JSON)</legend>
         <textarea
           class="textarea textarea-bordered textarea-sm font-mono w-full"
-          rows={type === "http" ? 12 : 3}
+          rows={type === "http" || type === "r2-s3compat" ? 8 : 3}
           value={config}
           onInput={(e) => setConfig((e.target as HTMLTextAreaElement).value)}
         />
@@ -231,6 +256,18 @@ function AddForm({
             <strong>headers</strong> — sent on every request; use <code>{"{{name}}"}</code> to
             reference a value from <strong>variables</strong> (keeps secrets out of the header
             string).
+          </p>
+        )}
+        {type === "r2-s3compat" && (
+          <p class="text-xs text-base-content/50 mt-1">
+            <strong>endpoint</strong> — your R2 S3-compatible URL:{" "}
+            <code>https://{"<accountId>"}.r2.cloudflarestorage.com</code> (Account ID is on the R2
+            overview page). <strong>accessKeyId</strong> and <strong>secretAccessKey</strong> —
+            create an API token under <em>R2 → Manage R2 API tokens</em>. Once saved, query files as{" "}
+            <code>
+              r2-s3compat://{"<backendId>"}/{"<path>"}
+            </code>{" "}
+            in SQL.
           </p>
         )}
       </fieldset>

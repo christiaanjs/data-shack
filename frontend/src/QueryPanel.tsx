@@ -23,7 +23,7 @@ interface CredentialRow {
   type: string;
 }
 
-const STORAGE_URI_REGEX = /(?:r2|http-ds):\/\/[^\s'"]+/g;
+const STORAGE_URI_REGEX = /(?:r2-s3compat|r2|http-ds):\/\/[^\s'"]+/g;
 const PLACEHOLDER_SQL = "SELECT * FROM read_json('r2://data-shack-storage/sample.ndjson') LIMIT 10";
 
 export function QueryPanel({ workerBase, getAuthHeaders }: QueryPanelProps) {

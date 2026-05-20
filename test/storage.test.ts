@@ -54,9 +54,10 @@ describe("GET /api/storage/obj/:token", () => {
     expect(res.status).toBe(404);
   });
 
-  it("streams an R2 object when it exists", async () => {
+  it("streams an R2 object when it exists (user-scoped key)", async () => {
     const content = '{"id":1,"name":"test"}\n';
-    await env.R2.put("test-obj.ndjson", content, {
+    // r2-bound keys are prefixed with users/{userId}/ for isolation
+    await env.R2.put("users/usr_test/test-obj.ndjson", content, {
       httpMetadata: { contentType: "application/x-ndjson" },
     });
 
@@ -213,5 +214,43 @@ describe("GET /api/storage-backends", () => {
     });
     const data = (await listRes.json()) as { backends: Array<{ id: string }> };
     expect(data.backends.find((b) => b.id === id)).toBeUndefined();
+  });
+});
+
+describe("r2-s3compat URI resolution", () => {
+  it("resolves r2-s3compat:// URI to a /api/storage/r2s3compat/obj/ URL", async () => {
+    const createRes = await SELF.fetch("http://localhost/api/storage-backends", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({
+        name: "Test R2 S3Compat",
+        type: "r2-s3compat",
+        config: {
+          endpoint: "https://test-account.r2.cloudflarestorage.com",
+          accessKeyId: "test-key-id",
+          secretAccessKey: "test-secret",
+          bucket: "test-bucket",
+          region: "auto",
+        },
+      }),
+    });
+    expect(createRes.status).toBe(201);
+    const { id } = (await createRes.json()) as { id: string };
+
+    const resolveRes = await SELF.fetch("http://localhost/api/storage/resolve", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({ uris: [`r2-s3compat://${id}/path/to/data.parquet`] }),
+    });
+    expect(resolveRes.status).toBe(200);
+    const data = (await resolveRes.json()) as { urls: Record<string, string> };
+    const url = data.urls[`r2-s3compat://${id}/path/to/data.parquet`];
+    expect(url).toBeDefined();
+    expect(url).toContain("/api/storage/r2s3compat/obj/");
+  });
+
+  it("returns 401 for invalid r2s3compat token", async () => {
+    const res = await SELF.fetch("http://localhost/api/storage/r2s3compat/obj/invalid-token");
+    expect(res.status).toBe(401);
   });
 });
