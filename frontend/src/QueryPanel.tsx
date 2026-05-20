@@ -140,6 +140,10 @@ export function QueryPanel({ workerBase, getAuthHeaders }: QueryPanelProps) {
       const allUris = Array.from(new Set(rawSql.match(STORAGE_URI_REGEX) ?? []));
       const readUris = allUris.filter((u) => !writeUris.includes(u));
 
+      // DuckDB WASM httpfs doesn't support HTTP PUT, so write URIs are redirected
+      // to a virtual FS temp path; we upload the buffer ourselves after the query.
+      const writeTempMap: Record<string, { tempPath: string; resolvedUrl: string }> = {};
+
       let resolvedSql = rawSql;
 
       if (allUris.length > 0) {
@@ -155,16 +159,52 @@ export function QueryPanel({ workerBase, getAuthHeaders }: QueryPanelProps) {
         });
         if (!res.ok) throw new Error(`URI resolution failed: ${res.status}`);
         const data = (await res.json()) as { urls: Record<string, string> };
+
+        writeUris.forEach((uri, i) => {
+          const ext = uri.split(".").pop() ?? "parquet";
+          writeTempMap[uri] = {
+            tempPath: `/tmp/ds_write_${i}.${ext}`,
+            resolvedUrl: data.urls[uri] ?? "",
+          };
+        });
+
         // Sort longest-first so a URI that is a prefix of another doesn't
         // corrupt the longer one during substitution.
         for (const uri of [...allUris].sort((a, b) => b.length - a.length)) {
-          const url = data.urls[uri];
-          if (url) resolvedSql = resolvedSql.replaceAll(uri, url);
+          const write = writeTempMap[uri];
+          if (write) {
+            resolvedSql = resolvedSql.replaceAll(uri, write.tempPath);
+          } else {
+            const url = data.urls[uri];
+            if (url) resolvedSql = resolvedSql.replaceAll(uri, url);
+          }
         }
       }
 
       const result = await runQuery(db, resolvedSql);
       setQueryResult(result);
+
+      // Upload files DuckDB wrote to virtual FS, then clean up
+      for (const { tempPath, resolvedUrl } of Object.values(writeTempMap)) {
+        if (!resolvedUrl) continue;
+        const ext = tempPath.split(".").pop() ?? "";
+        const contentType =
+          ext === "parquet"
+            ? "application/vnd.apache.parquet"
+            : ext === "csv"
+              ? "text/csv"
+              : ext === "json" || ext === "ndjson"
+                ? "application/json"
+                : "application/octet-stream";
+        const buffer = await db.copyFileToBuffer(tempPath);
+        const uploadRes = await fetch(resolvedUrl, {
+          method: "PUT",
+          headers: { "Content-Type": contentType },
+          body: buffer.buffer as ArrayBuffer,
+        });
+        if (!uploadRes.ok) throw new Error(`Storage upload failed: ${uploadRes.status}`);
+        await db.dropFile(tempPath);
+      }
     } catch (err) {
       setQueryError(err instanceof Error ? err.message : "Query failed");
     } finally {
