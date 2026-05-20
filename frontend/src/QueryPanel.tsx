@@ -24,6 +24,8 @@ interface CredentialRow {
 }
 
 const STORAGE_URI_REGEX = /(?:r2-s3compat|r2|http-ds):\/\/[^\s'"]+/g;
+// Matches storage URIs that appear after a SQL TO keyword (COPY TO write destinations)
+const WRITE_URI_REGEX = /\bTO\s+['"]?((?:r2-s3compat|r2):\/\/[^\s'"]+)/gi;
 const PLACEHOLDER_SQL = "SELECT * FROM read_json('r2://data-shack-storage/sample.ndjson') LIMIT 10";
 
 export function QueryPanel({ workerBase, getAuthHeaders }: QueryPanelProps) {
@@ -132,21 +134,42 @@ export function QueryPanel({ workerBase, getAuthHeaders }: QueryPanelProps) {
     setQueryResult(null);
 
     try {
-      const uris = Array.from(new Set(rawSql.match(STORAGE_URI_REGEX) ?? []));
+      // Separate write URIs (after TO keyword) from read URIs
+      const writeUris = [
+        ...new Set([...rawSql.matchAll(WRITE_URI_REGEX)].map((m) => m[1] as string)),
+      ];
+      const allUris = Array.from(new Set(rawSql.match(STORAGE_URI_REGEX) ?? []));
+      const readUris = allUris.filter((u) => !writeUris.includes(u));
+
       let resolvedSql = rawSql;
 
-      if (uris.length > 0) {
+      if (readUris.length > 0) {
         const headers = await getAuthHeaders();
         const res = await fetch(`${workerBase}/api/storage/resolve`, {
           method: "POST",
           headers: { "Content-Type": "application/json", ...headers },
-          body: JSON.stringify({ uris }),
+          body: JSON.stringify({ uris: readUris }),
         });
         if (!res.ok) throw new Error(`URI resolution failed: ${res.status}`);
         const data = (await res.json()) as { urls: Record<string, string> };
         // Sort longest-first so a URI that is a prefix of another doesn't
         // corrupt the longer one during substitution.
-        for (const uri of [...uris].sort((a, b) => b.length - a.length)) {
+        for (const uri of [...readUris].sort((a, b) => b.length - a.length)) {
+          const url = data.urls[uri];
+          if (url) resolvedSql = resolvedSql.replaceAll(uri, url);
+        }
+      }
+
+      if (writeUris.length > 0) {
+        const headers = await getAuthHeaders();
+        const res = await fetch(`${workerBase}/api/storage/resolve-write`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...headers },
+          body: JSON.stringify({ uris: writeUris }),
+        });
+        if (!res.ok) throw new Error(`Write URI resolution failed: ${res.status}`);
+        const data = (await res.json()) as { urls: Record<string, string> };
+        for (const uri of [...writeUris].sort((a, b) => b.length - a.length)) {
           const url = data.urls[uri];
           if (url) resolvedSql = resolvedSql.replaceAll(uri, url);
         }

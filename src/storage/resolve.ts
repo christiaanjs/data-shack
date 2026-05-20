@@ -219,7 +219,7 @@ async function sha256Hex(data: string): Promise<string> {
 }
 
 export async function signS3Request(opts: {
-  method: "GET" | "HEAD";
+  method: "GET" | "HEAD" | "PUT";
   endpoint: string;
   bucket: string;
   key: string;
@@ -351,4 +351,156 @@ export function parseR2S3CompatUri(uri: string): { backendId: string; key: strin
   const key = rest.slice(slash + 1);
   if (!backendId || !key) return null;
   return { backendId, key };
+}
+
+// ── Write tokens ──────────────────────────────────────────────────────────
+
+interface StorageWriteTokenPayload {
+  sub: string;
+  iss: string;
+  aud: "storage-write";
+  exp: number;
+  iat: number;
+  jti: string;
+  b: string; // bucket
+  k: string; // object key — user-scoped: "users/{userId}/{key}"
+}
+
+interface R2S3CompatWriteTokenPayload {
+  sub: string;
+  aud: "r2-s3compat-write";
+  exp: number;
+  iat: number;
+  jti: string;
+  d: string; // storage backend ID
+  k: string; // object key — user-scoped
+  u: string; // user ID
+}
+
+export async function signStorageWriteToken(
+  payload: StorageWriteTokenPayload,
+  secret: string,
+): Promise<string> {
+  const header = base64urlEncodeStr(JSON.stringify({ alg: "HS256", typ: "JWT" }));
+  const body = base64urlEncodeStr(JSON.stringify(payload));
+  const signingInput = `${header}.${body}`;
+  const key = await hmacKey(secret);
+  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(signingInput));
+  return `${signingInput}.${base64urlEncode(sig)}`;
+}
+
+export async function verifyStorageWriteToken(
+  token: string,
+  secret: string,
+): Promise<StorageWriteTokenPayload | null> {
+  const parts = token.split(".");
+  if (parts.length !== 3) return null;
+  const [headerB64, payloadB64, sigB64] = parts as [string, string, string];
+  try {
+    const key = await hmacKey(secret);
+    const valid = await crypto.subtle.verify(
+      "HMAC",
+      key,
+      base64urlDecode(sigB64),
+      new TextEncoder().encode(`${headerB64}.${payloadB64}`),
+    );
+    if (!valid) return null;
+
+    const payload = JSON.parse(new TextDecoder().decode(base64urlDecode(payloadB64))) as unknown;
+
+    if (
+      typeof payload !== "object" ||
+      payload === null ||
+      (payload as Record<string, unknown>).aud !== "storage-write" ||
+      typeof (payload as Record<string, unknown>).b !== "string" ||
+      typeof (payload as Record<string, unknown>).k !== "string" ||
+      typeof (payload as Record<string, unknown>).exp !== "number"
+    ) {
+      return null;
+    }
+
+    const p = payload as StorageWriteTokenPayload;
+    if (p.exp < Math.floor(Date.now() / 1000)) return null;
+    return p;
+  } catch {
+    return null;
+  }
+}
+
+export async function signR2S3CompatWriteToken(
+  payload: R2S3CompatWriteTokenPayload,
+  secret: string,
+): Promise<string> {
+  const header = base64urlEncodeStr(JSON.stringify({ alg: "HS256", typ: "JWT" }));
+  const body = base64urlEncodeStr(JSON.stringify(payload));
+  const signingInput = `${header}.${body}`;
+  const key = await hmacKey(secret);
+  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(signingInput));
+  return `${signingInput}.${base64urlEncode(sig)}`;
+}
+
+export async function verifyR2S3CompatWriteToken(
+  token: string,
+  secret: string,
+): Promise<R2S3CompatWriteTokenPayload | null> {
+  const parts = token.split(".");
+  if (parts.length !== 3) return null;
+  const [headerB64, payloadB64, sigB64] = parts as [string, string, string];
+  try {
+    const key = await hmacKey(secret);
+    const valid = await crypto.subtle.verify(
+      "HMAC",
+      key,
+      base64urlDecode(sigB64),
+      new TextEncoder().encode(`${headerB64}.${payloadB64}`),
+    );
+    if (!valid) return null;
+
+    const payload = JSON.parse(new TextDecoder().decode(base64urlDecode(payloadB64))) as unknown;
+
+    if (
+      typeof payload !== "object" ||
+      payload === null ||
+      (payload as Record<string, unknown>).aud !== "r2-s3compat-write" ||
+      typeof (payload as Record<string, unknown>).d !== "string" ||
+      typeof (payload as Record<string, unknown>).k !== "string" ||
+      typeof (payload as Record<string, unknown>).u !== "string" ||
+      typeof (payload as Record<string, unknown>).exp !== "number"
+    ) {
+      return null;
+    }
+
+    const p = payload as R2S3CompatWriteTokenPayload;
+    if (p.exp < Math.floor(Date.now() / 1000)) return null;
+    return p;
+  } catch {
+    return null;
+  }
+}
+
+export async function resolveWriteUri(
+  uri: string,
+  env: Env,
+  userId: string,
+  workerOrigin: string,
+): Promise<string> {
+  const parsed = parseR2Uri(uri);
+  if (!parsed) throw new Error(`Unsupported URI: ${uri}`);
+
+  const now = Math.floor(Date.now() / 1000);
+  const token = await signStorageWriteToken(
+    {
+      sub: "storage-write",
+      iss: workerOrigin,
+      aud: "storage-write",
+      iat: now,
+      exp: now + 900,
+      jti: crypto.randomUUID(),
+      b: parsed.bucket,
+      k: `users/${userId}/${parsed.key}`,
+    },
+    env.JWT_SECRET,
+  );
+
+  return `${workerOrigin}/api/storage/obj/${token}`;
 }

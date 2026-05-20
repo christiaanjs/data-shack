@@ -18,12 +18,16 @@ import {
   parseHttpDsUri,
   parseR2S3CompatUri,
   resolveUri,
+  resolveWriteUri,
   signDataSourceToken,
   signR2S3CompatToken,
+  signR2S3CompatWriteToken,
   signS3Request,
   verifyDataSourceToken,
   verifyR2S3CompatToken,
+  verifyR2S3CompatWriteToken,
   verifyStorageToken,
+  verifyStorageWriteToken,
 } from "./storage/resolve.ts";
 import type { Env } from "./types.ts";
 
@@ -147,6 +151,19 @@ app.on(["GET", "HEAD"], "/api/storage/obj/:token", async (c) => {
     return new Response(obj.body, { status: 206, headers });
   }
   return new Response(obj.body, { headers });
+});
+
+app.put("/api/storage/obj/:token", async (c) => {
+  const token = c.req.param("token");
+  const payload = await verifyStorageWriteToken(token, c.env.JWT_SECRET);
+  if (!payload) return new Response("Unauthorized", { status: 401 });
+
+  const body = c.req.raw.body;
+  if (!body) return new Response("Bad Request", { status: 400 });
+
+  const contentType = c.req.header("Content-Type") ?? "application/octet-stream";
+  await c.env.R2.put(payload.k, body, { httpMetadata: { contentType } });
+  return new Response(null, { status: 204 });
 });
 
 // ── R2 S3-compatible helpers ──────────────────────────────────────────────
@@ -273,6 +290,113 @@ app.on(["GET", "HEAD"], "/api/storage/r2s3compat/obj/:token", async (c) => {
     status: upstream.status,
     headers: responseHeaders,
   });
+});
+
+async function resolveR2S3CompatWriteUri(
+  uri: string,
+  env: Env,
+  userId: string,
+  workerOrigin: string,
+): Promise<string> {
+  const parsed = parseR2S3CompatUri(uri);
+  if (!parsed) throw new Error(`Invalid r2-s3compat URI: ${uri}`);
+
+  const row = await getStorageBackendConfig(env.DB, parsed.backendId, userId);
+  if (!row || row.type !== "r2-s3compat")
+    throw new Error(`r2-s3compat backend not found: ${parsed.backendId}`);
+
+  const config = await decryptR2S3CompatConfig(row.encrypted_config, env.JWT_SECRET);
+  if (!config) throw new Error(`Invalid r2-s3compat backend config: ${parsed.backendId}`);
+
+  const now = Math.floor(Date.now() / 1000);
+  const token = await signR2S3CompatWriteToken(
+    {
+      sub: "r2-s3compat-write",
+      aud: "r2-s3compat-write",
+      iat: now,
+      exp: now + 900,
+      jti: crypto.randomUUID(),
+      d: parsed.backendId,
+      k: `users/${userId}/${parsed.key}`,
+      u: userId,
+    },
+    env.JWT_SECRET,
+  );
+
+  return `${workerOrigin}/api/storage/r2s3compat/obj/${token}`;
+}
+
+// Proxies R2 S3-compatible writes for DuckDB httpfs COPY TO — token is the auth mechanism.
+app.put("/api/storage/r2s3compat/obj/:token", async (c) => {
+  const token = c.req.param("token");
+  const payload = await verifyR2S3CompatWriteToken(token, c.env.JWT_SECRET);
+  if (!payload) return new Response("Unauthorized", { status: 401 });
+
+  const row = await getStorageBackendConfig(c.env.DB, payload.d, payload.u);
+  if (!row || row.type !== "r2-s3compat") return new Response("Not Found", { status: 404 });
+
+  const config = await decryptR2S3CompatConfig(row.encrypted_config, c.env.JWT_SECRET);
+  if (!config) return new Response("Bad Gateway", { status: 502 });
+
+  const body = c.req.raw.body;
+  if (!body) return new Response("Bad Request", { status: 400 });
+
+  const contentType = c.req.header("Content-Type") ?? "application/octet-stream";
+  const contentLength = c.req.header("Content-Length");
+
+  const { url, headers } = await signS3Request({
+    method: "PUT",
+    endpoint: config.endpoint,
+    bucket: config.bucket,
+    key: payload.k,
+    region: config.region,
+    accessKeyId: config.accessKeyId,
+    secretAccessKey: config.secretAccessKey,
+  });
+
+  headers["Content-Type"] = contentType;
+  if (contentLength) headers["Content-Length"] = contentLength;
+
+  let upstream: Response;
+  try {
+    // duplex: "half" required by Cloudflare Workers to stream a request body to upstream
+    upstream = await fetch(url, {
+      method: "PUT",
+      headers,
+      body,
+      // @ts-expect-error — Cloudflare Workers fetch supports duplex streaming
+      duplex: "half",
+    });
+  } catch {
+    return new Response("Bad Gateway", { status: 502 });
+  }
+
+  if (!upstream.ok) return new Response("Bad Gateway", { status: 502 });
+  return new Response(null, { status: 204 });
+});
+
+// ── Write resolution ──────────────────────────────────────────────────────
+
+app.post("/api/storage/resolve-write", requireAuth, async (c) => {
+  const body = await c.req.json<{ uris?: unknown }>();
+  if (!Array.isArray(body.uris)) return c.json({ error: "uris must be an array" }, 400);
+  const workerOrigin = new URL(c.req.url).origin;
+  const userId = c.get("userId");
+  const urls: Record<string, string> = {};
+  for (const uri of body.uris) {
+    if (typeof uri !== "string") continue;
+    try {
+      if (uri.startsWith("r2-s3compat://")) {
+        urls[uri] = await resolveR2S3CompatWriteUri(uri, c.env, userId, workerOrigin);
+      } else if (uri.startsWith("r2://")) {
+        urls[uri] = await resolveWriteUri(uri, c.env, userId, workerOrigin);
+      }
+      // http-ds:// not supported for writes — silently skip
+    } catch (err) {
+      console.error(err);
+    }
+  }
+  return c.json({ urls });
 });
 
 // ── HTTP data source helpers ──────────────────────────────────────────────
