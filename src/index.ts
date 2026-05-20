@@ -3,6 +3,8 @@ import { createMiddleware } from "hono/factory";
 import { Hono } from "hono/tiny";
 import { authenticate } from "./auth/middleware.ts";
 import { oauthRouter } from "./auth/oauth.ts";
+import { CatalogDO } from "./catalog/do.ts";
+export { CatalogDO };
 import { decryptConfig, encryptConfig } from "./crypto.ts";
 import {
   deleteCredential,
@@ -516,6 +518,44 @@ app.delete("/api/storage-backends/:id", requireAuth, async (c) => {
   const deleted = await deleteStorageBackend(c.env.DB, c.req.param("id"), c.get("userId"));
   if (!deleted) return new Response("Not Found", { status: 404 });
   return new Response(null, { status: 204 });
+});
+
+// ── Catalog endpoints ─────────────────────────────────────────────────────
+
+function catalogStub(env: Env, userId: string) {
+  return env.CATALOG.get(env.CATALOG.idFromName(userId));
+}
+
+app.get("/catalog/tables", requireAuth, async (c) => {
+  const res = await catalogStub(c.env, c.get("userId")).fetch("http://do/tables");
+  return new Response(res.body, {
+    status: res.status,
+    headers: { "Content-Type": "application/json" },
+  });
+});
+
+app.get("/catalog/snapshots/:table", requireAuth, async (c) => {
+  const table = c.req.param("table");
+  const res = await catalogStub(c.env, c.get("userId")).fetch(
+    `http://do/snapshots/${encodeURIComponent(table)}`,
+  );
+  return new Response(res.body, {
+    status: res.status,
+    headers: { "Content-Type": "application/json" },
+  });
+});
+
+app.post("/catalog/commit", requireAuth, async (c) => {
+  const body = await c.req.json();
+  const res = await catalogStub(c.env, c.get("userId")).fetch("http://do/commit", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return new Response(res.body, {
+    status: res.status,
+    headers: { "Content-Type": "application/json" },
+  });
 });
 
 // ── Root ─────────────────────────────────────────────────────────────────

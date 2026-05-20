@@ -11,6 +11,14 @@ database_id = "b5f7796d-323f-49d0-aca1-e39a64bdb55b"
 binding = "R2"
 bucket_name = "data-shack-storage"
 
+[[durable_objects.bindings]]
+name = "CATALOG"
+class_name = "CatalogDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["CatalogDO"]
+
 [vars]
 ENABLE_OAUTH = "true"
 ALLOWED_ORIGIN = "https://data-shack.pages.dev"
@@ -35,6 +43,10 @@ database_id = "1910faa5-f94e-4e15-aedd-648e604a6915"
 [[env.staging.r2_buckets]]
 binding = "R2"
 bucket_name = "data-shack-storage-staging"
+
+[[env.staging.durable_objects.bindings]]
+name = "CATALOG"
+class_name = "CatalogDO"
 
 [env.staging.vars]
 ENABLE_OAUTH = "true"
