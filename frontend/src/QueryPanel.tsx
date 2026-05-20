@@ -158,15 +158,42 @@ export function QueryPanel({ workerBase, getAuthHeaders }: QueryPanelProps) {
           body: JSON.stringify({ uris: uriRequests }),
         });
         if (!res.ok) throw new Error(`URI resolution failed: ${res.status}`);
-        const data = (await res.json()) as { urls: Record<string, string> };
+        const data = (await res.json()) as {
+          urls: Record<string, string>;
+          s3Configs?: Record<
+            string,
+            { endpoint: string; accessKeyId: string; secretAccessKey: string; region: string }
+          >;
+        };
 
+        // r2:// writes can't go through the worker proxy via DuckDB httpfs PUT,
+        // so redirect them to a virtual FS temp path and upload the buffer manually.
+        // r2-s3compat:// writes resolve to s3:// URIs with S3 config — DuckDB native.
         writeUris.forEach((uri, i) => {
-          const ext = uri.split(".").pop() ?? "parquet";
-          writeTempMap[uri] = {
-            tempPath: `/tmp/ds_write_${i}.${ext}`,
-            resolvedUrl: data.urls[uri] ?? "",
-          };
+          if (uri.startsWith("r2://")) {
+            const ext = uri.split(".").pop() ?? "parquet";
+            writeTempMap[uri] = {
+              tempPath: `/tmp/ds_write_${i}.${ext}`,
+              resolvedUrl: data.urls[uri] ?? "",
+            };
+          }
         });
+
+        // Configure DuckDB S3 for any r2-s3compat write backends.
+        // Use the first config (DuckDB supports one global S3 endpoint at a time).
+        const s3Preamble: string[] = [];
+        const firstS3Config = data.s3Configs ? Object.values(data.s3Configs)[0] : undefined;
+        if (firstS3Config) {
+          const endpointHost = new URL(firstS3Config.endpoint).host;
+          s3Preamble.push(
+            `SET s3_endpoint='${endpointHost}'`,
+            `SET s3_access_key_id='${firstS3Config.accessKeyId}'`,
+            `SET s3_secret_access_key='${firstS3Config.secretAccessKey}'`,
+            `SET s3_region='${firstS3Config.region}'`,
+            "SET s3_use_ssl=true",
+            "SET s3_url_style='path'",
+          );
+        }
 
         // Sort longest-first so a URI that is a prefix of another doesn't
         // corrupt the longer one during substitution.
@@ -179,31 +206,38 @@ export function QueryPanel({ workerBase, getAuthHeaders }: QueryPanelProps) {
             if (url) resolvedSql = resolvedSql.replaceAll(uri, url);
           }
         }
-      }
 
-      const result = await runQuery(db, resolvedSql);
-      setQueryResult(result);
+        const result = await runQuery(
+          db,
+          resolvedSql,
+          s3Preamble.length > 0 ? s3Preamble : undefined,
+        );
+        setQueryResult(result);
 
-      // Upload files DuckDB wrote to virtual FS, then clean up
-      for (const { tempPath, resolvedUrl } of Object.values(writeTempMap)) {
-        if (!resolvedUrl) continue;
-        const ext = tempPath.split(".").pop() ?? "";
-        const contentType =
-          ext === "parquet"
-            ? "application/vnd.apache.parquet"
-            : ext === "csv"
-              ? "text/csv"
-              : ext === "json" || ext === "ndjson"
-                ? "application/json"
-                : "application/octet-stream";
-        const buffer = await db.copyFileToBuffer(tempPath);
-        const uploadRes = await fetch(resolvedUrl, {
-          method: "PUT",
-          headers: { "Content-Type": contentType },
-          body: buffer.buffer as ArrayBuffer,
-        });
-        if (!uploadRes.ok) throw new Error(`Storage upload failed: ${uploadRes.status}`);
-        await db.dropFile(tempPath);
+        // Upload files DuckDB wrote to virtual FS (r2-bound writes), then clean up
+        for (const { tempPath, resolvedUrl } of Object.values(writeTempMap)) {
+          if (!resolvedUrl) continue;
+          const ext = tempPath.split(".").pop() ?? "";
+          const contentType =
+            ext === "parquet"
+              ? "application/vnd.apache.parquet"
+              : ext === "csv"
+                ? "text/csv"
+                : ext === "json" || ext === "ndjson"
+                  ? "application/json"
+                  : "application/octet-stream";
+          const buffer = await db.copyFileToBuffer(tempPath);
+          const uploadRes = await fetch(resolvedUrl, {
+            method: "PUT",
+            headers: { "Content-Type": contentType },
+            body: buffer.buffer as ArrayBuffer,
+          });
+          if (!uploadRes.ok) throw new Error(`Storage upload failed: ${uploadRes.status}`);
+          await db.dropFile(tempPath);
+        }
+      } else {
+        const result = await runQuery(db, resolvedSql);
+        setQueryResult(result);
       }
     } catch (err) {
       setQueryError(err instanceof Error ? err.message : "Query failed");

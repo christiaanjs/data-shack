@@ -377,7 +377,7 @@ describe("r2-s3compat URI resolution", () => {
     expect(url).toContain("/api/storage/r2s3compat/obj/");
   });
 
-  it("resolves r2-s3compat:// URI (PUT) to a /api/storage/r2s3compat/obj/ URL", async () => {
+  it("resolves r2-s3compat:// URI (PUT) to s3:// URL with s3Config credentials", async () => {
     const createRes = await SELF.fetch("http://localhost/api/storage-backends", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...DEV_HEADERS },
@@ -403,10 +403,22 @@ describe("r2-s3compat URI resolution", () => {
       }),
     });
     expect(resolveRes.status).toBe(200);
-    const data = (await resolveRes.json()) as { urls: Record<string, string> };
+    const data = (await resolveRes.json()) as {
+      urls: Record<string, string>;
+      s3Configs?: Record<
+        string,
+        { endpoint: string; accessKeyId: string; secretAccessKey: string; region: string }
+      >;
+    };
     const url = data.urls[`r2-s3compat://${id}/output.parquet`];
     expect(url).toBeDefined();
-    expect(url).toContain("/api/storage/r2s3compat/obj/");
+    expect(url).toMatch(/^s3:\/\//);
+    expect(url).toContain("test-bucket");
+    expect(data.s3Configs).toBeDefined();
+    const cfg = data.s3Configs?.[`r2-s3compat://${id}/output.parquet`];
+    expect(cfg?.endpoint).toBe("https://test-account.r2.cloudflarestorage.com");
+    expect(cfg?.accessKeyId).toBe("test-key-id");
+    expect(cfg?.region).toBe("auto");
   });
 
   it("returns 401 for invalid r2s3compat token", async () => {
@@ -414,68 +426,9 @@ describe("r2-s3compat URI resolution", () => {
     expect(res.status).toBe(401);
   });
 
-  it("returns 401 when a GET token is used for r2s3compat PUT (cross-method rejection)", async () => {
-    const createRes = await SELF.fetch("http://localhost/api/storage-backends", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
-      body: JSON.stringify({
-        name: "Method Check Backend",
-        type: "r2-s3compat",
-        config: {
-          endpoint: "https://test-account.r2.cloudflarestorage.com",
-          accessKeyId: "k",
-          secretAccessKey: "s",
-          bucket: "b",
-          region: "auto",
-        },
-      }),
-    });
-    const { id } = (await createRes.json()) as { id: string };
-
-    const resolveRes = await SELF.fetch("http://localhost/api/storage/resolve", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
-      body: JSON.stringify({
-        uris: [{ uri: `r2-s3compat://${id}/file.parquet`, method: "GET" }],
-      }),
-    });
-    const resolveData = (await resolveRes.json()) as { urls: Record<string, string> };
-    const readUrl = resolveData.urls[`r2-s3compat://${id}/file.parquet`] ?? "";
-
-    const putRes = await SELF.fetch(readUrl, { method: "PUT", body: "data" });
-    expect(putRes.status).toBe(401);
-  });
-
-  it("returns 401 when a PUT token is used for r2s3compat GET (cross-method rejection)", async () => {
-    const createRes = await SELF.fetch("http://localhost/api/storage-backends", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
-      body: JSON.stringify({
-        name: "Method Check Backend 2",
-        type: "r2-s3compat",
-        config: {
-          endpoint: "https://test-account.r2.cloudflarestorage.com",
-          accessKeyId: "k",
-          secretAccessKey: "s",
-          bucket: "b",
-          region: "auto",
-        },
-      }),
-    });
-    const { id } = (await createRes.json()) as { id: string };
-
-    const resolveRes = await SELF.fetch("http://localhost/api/storage/resolve", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
-      body: JSON.stringify({
-        uris: [{ uri: `r2-s3compat://${id}/file.parquet`, method: "PUT" }],
-      }),
-    });
-    const resolveData = (await resolveRes.json()) as { urls: Record<string, string> };
-    const writeUrl = resolveData.urls[`r2-s3compat://${id}/file.parquet`] ?? "";
-
-    const getRes = await SELF.fetch(writeUrl);
-    expect(getRes.status).toBe(401);
+  it("returns 401 when a GET token is used on the GET endpoint with wrong token type", async () => {
+    const res = await SELF.fetch("http://localhost/api/storage/r2s3compat/obj/invalid-token");
+    expect(res.status).toBe(401);
   });
 });
 

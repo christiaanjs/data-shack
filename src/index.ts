@@ -83,6 +83,10 @@ app.post("/api/storage/resolve", requireAuth, async (c) => {
   const workerOrigin = new URL(c.req.url).origin;
   const userId = c.get("userId");
   const urls: Record<string, string> = {};
+  const s3Configs: Record<
+    string,
+    { endpoint: string; accessKeyId: string; secretAccessKey: string; region: string }
+  > = {};
   for (const item of body.uris) {
     if (typeof item !== "object" || item === null) continue;
     const { uri, method: rawMethod } = item as Record<string, unknown>;
@@ -92,7 +96,9 @@ app.post("/api/storage/resolve", requireAuth, async (c) => {
       if (uri.startsWith("http-ds://")) {
         if (method === "GET") urls[uri] = await resolveHttpDsUri(uri, c.env, userId, workerOrigin);
       } else if (uri.startsWith("r2-s3compat://")) {
-        urls[uri] = await resolveR2S3CompatUri(uri, c.env, userId, workerOrigin, method);
+        const result = await resolveR2S3CompatUri(uri, c.env, userId, workerOrigin, method);
+        urls[uri] = result.url;
+        if (result.s3Config) s3Configs[uri] = result.s3Config;
       } else {
         urls[uri] = await resolveUri(uri, c.env, userId, workerOrigin, method);
       }
@@ -100,7 +106,7 @@ app.post("/api/storage/resolve", requireAuth, async (c) => {
       console.error(err);
     }
   }
-  return c.json({ urls });
+  return c.json(Object.keys(s3Configs).length > 0 ? { urls, s3Configs } : { urls });
 });
 
 app.on(["GET", "HEAD"], "/api/storage/obj/:token", async (c) => {
@@ -213,7 +219,10 @@ async function resolveR2S3CompatUri(
   userId: string,
   workerOrigin: string,
   method: "GET" | "PUT" = "GET",
-): Promise<string> {
+): Promise<{
+  url: string;
+  s3Config?: { endpoint: string; accessKeyId: string; secretAccessKey: string; region: string };
+}> {
   const parsed = parseR2S3CompatUri(uri);
   if (!parsed) throw new Error(`Invalid r2-s3compat URI: ${uri}`);
 
@@ -224,23 +233,38 @@ async function resolveR2S3CompatUri(
   const config = await decryptR2S3CompatConfig(row.encrypted_config, env.JWT_SECRET);
   if (!config) throw new Error(`Invalid r2-s3compat backend config: ${parsed.backendId}`);
 
+  if (method === "PUT") {
+    // Return S3 credentials so DuckDB WASM can write natively via s3:// URI.
+    // The user already knows these credentials (they configured them), so
+    // exposing them to their own browser session is acceptable.
+    return {
+      url: `s3://${config.bucket}/${parsed.key}`,
+      s3Config: {
+        endpoint: config.endpoint,
+        accessKeyId: config.accessKeyId,
+        secretAccessKey: config.secretAccessKey,
+        region: config.region,
+      },
+    };
+  }
+
   const now = Math.floor(Date.now() / 1000);
   const token = await signR2S3CompatToken(
     {
       sub: "r2-s3compat",
       aud: "r2-s3compat",
       iat: now,
-      exp: now + (method === "PUT" ? 900 : 3600),
+      exp: now + 3600,
       jti: crypto.randomUUID(),
       d: parsed.backendId,
       k: parsed.key,
       u: userId,
-      method,
+      method: "GET",
     },
     env.JWT_SECRET,
   );
 
-  return `${workerOrigin}/api/storage/r2s3compat/obj/${token}`;
+  return { url: `${workerOrigin}/api/storage/r2s3compat/obj/${token}` };
 }
 
 // Proxies R2 S3-compatible requests for DuckDB httpfs — token is the auth mechanism.
@@ -290,55 +314,6 @@ app.on(["GET", "HEAD"], "/api/storage/r2s3compat/obj/:token", async (c) => {
     status: upstream.status,
     headers: responseHeaders,
   });
-});
-
-// Proxies R2 S3-compatible writes for DuckDB httpfs COPY TO — token is the auth mechanism.
-app.put("/api/storage/r2s3compat/obj/:token", async (c) => {
-  const token = c.req.param("token");
-  const payload = await verifyR2S3CompatToken(token, c.env.JWT_SECRET);
-  if (!payload || payload.method !== "PUT") return new Response("Unauthorized", { status: 401 });
-
-  const row = await getStorageBackendConfig(c.env.DB, payload.d, payload.u);
-  if (!row || row.type !== "r2-s3compat") return new Response("Not Found", { status: 404 });
-
-  const config = await decryptR2S3CompatConfig(row.encrypted_config, c.env.JWT_SECRET);
-  if (!config) return new Response("Bad Gateway", { status: 502 });
-
-  const body = c.req.raw.body;
-  if (!body) return new Response("Bad Request", { status: 400 });
-
-  const contentType = c.req.header("Content-Type") ?? "application/octet-stream";
-  const contentLength = c.req.header("Content-Length");
-
-  const { url, headers } = await signS3Request({
-    method: "PUT",
-    endpoint: config.endpoint,
-    bucket: config.bucket,
-    key: payload.k,
-    region: config.region,
-    accessKeyId: config.accessKeyId,
-    secretAccessKey: config.secretAccessKey,
-  });
-
-  headers["Content-Type"] = contentType;
-  if (contentLength) headers["Content-Length"] = contentLength;
-
-  let upstream: Response;
-  try {
-    // duplex: "half" required by Cloudflare Workers to stream a request body to upstream
-    upstream = await fetch(url, {
-      method: "PUT",
-      headers,
-      body,
-      // @ts-expect-error — Cloudflare Workers fetch supports duplex streaming
-      duplex: "half",
-    });
-  } catch {
-    return new Response("Bad Gateway", { status: 502 });
-  }
-
-  if (!upstream.ok) return new Response("Bad Gateway", { status: 502 });
-  return new Response(null, { status: 204 });
 });
 
 // ── HTTP data source helpers ──────────────────────────────────────────────
