@@ -230,15 +230,16 @@ app.on(["GET", "HEAD"], "/api/data-sources/obj/:token", async (c) => {
   const url = config.baseUrl.replace(/\/$/, "") + payload.p;
   const resolvedHeaders = resolveHeaderTemplates(config.headers, config.variables);
 
-  const method = c.req.method === "HEAD" ? "HEAD" : "GET";
+  // Always GET upstream — many APIs don't support HEAD. Strip body ourselves for HEAD requests.
   let upstream: Response;
   try {
-    upstream = await fetch(url, { method, headers: resolvedHeaders });
+    upstream = await fetch(url, { method: "GET", headers: resolvedHeaders });
   } catch {
     return new Response("Bad Gateway", { status: 502 });
   }
 
-  return new Response(upstream.body, {
+  const isHead = c.req.method === "HEAD";
+  return new Response(isHead ? null : upstream.body, {
     status: upstream.status,
     headers: {
       "Content-Type": upstream.headers.get("Content-Type") ?? "application/octet-stream",
