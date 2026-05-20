@@ -377,7 +377,7 @@ describe("r2-s3compat URI resolution", () => {
     expect(url).toContain("/api/storage/r2s3compat/obj/");
   });
 
-  it("resolves r2-s3compat:// URI (PUT) to s3:// URL with s3Config credentials", async () => {
+  it("resolves r2-s3compat:// URI (PUT) to a presigned https:// URL", async () => {
     const createRes = await SELF.fetch("http://localhost/api/storage-backends", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...DEV_HEADERS },
@@ -403,22 +403,13 @@ describe("r2-s3compat URI resolution", () => {
       }),
     });
     expect(resolveRes.status).toBe(200);
-    const data = (await resolveRes.json()) as {
-      urls: Record<string, string>;
-      s3Configs?: Record<
-        string,
-        { endpoint: string; accessKeyId: string; secretAccessKey: string; region: string }
-      >;
-    };
+    const data = (await resolveRes.json()) as { urls: Record<string, string> };
     const url = data.urls[`r2-s3compat://${id}/output.parquet`];
     expect(url).toBeDefined();
-    expect(url).toMatch(/^s3:\/\//);
+    expect(url).toMatch(/^https:\/\//);
+    expect(url).toContain("X-Amz-Signature");
     expect(url).toContain("test-bucket");
-    expect(data.s3Configs).toBeDefined();
-    const cfg = data.s3Configs?.[`r2-s3compat://${id}/output.parquet`];
-    expect(cfg?.endpoint).toBe("https://test-account.r2.cloudflarestorage.com");
-    expect(cfg?.accessKeyId).toBe("test-key-id");
-    expect(cfg?.region).toBe("auto");
+    expect((data as { s3Configs?: unknown }).s3Configs).toBeUndefined();
   });
 
   it("returns 401 for invalid r2s3compat token", async () => {
@@ -426,8 +417,20 @@ describe("r2-s3compat URI resolution", () => {
     expect(res.status).toBe(401);
   });
 
-  it("returns 401 when a GET token is used on the GET endpoint with wrong token type", async () => {
-    const res = await SELF.fetch("http://localhost/api/storage/r2s3compat/obj/invalid-token");
+  it("returns 401 when an r2-bound storage token is used on the r2s3compat endpoint", async () => {
+    const resolveRes = await SELF.fetch("http://localhost/api/storage/resolve", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({
+        uris: [{ uri: "r2://data-shack-storage/test.parquet", method: "GET" }],
+      }),
+    });
+    const { urls } = (await resolveRes.json()) as { urls: Record<string, string> };
+    const readUrl = urls["r2://data-shack-storage/test.parquet"] ?? "";
+    const token = readUrl.split("/api/storage/obj/")[1] ?? "";
+
+    // An r2-bound token (aud: "storage") must be rejected on the r2s3compat endpoint
+    const res = await SELF.fetch(`http://localhost/api/storage/r2s3compat/obj/${token}`);
     expect(res.status).toBe(401);
   });
 });

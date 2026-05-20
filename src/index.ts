@@ -20,6 +20,7 @@ import {
   resolveUri,
   signDataSourceToken,
   signR2S3CompatToken,
+  signS3PresignedPutUrl,
   signS3Request,
   verifyDataSourceToken,
   verifyR2S3CompatToken,
@@ -83,10 +84,6 @@ app.post("/api/storage/resolve", requireAuth, async (c) => {
   const workerOrigin = new URL(c.req.url).origin;
   const userId = c.get("userId");
   const urls: Record<string, string> = {};
-  const s3Configs: Record<
-    string,
-    { endpoint: string; accessKeyId: string; secretAccessKey: string; region: string }
-  > = {};
   for (const item of body.uris) {
     if (typeof item !== "object" || item === null) continue;
     const { uri, method: rawMethod } = item as Record<string, unknown>;
@@ -98,7 +95,6 @@ app.post("/api/storage/resolve", requireAuth, async (c) => {
       } else if (uri.startsWith("r2-s3compat://")) {
         const result = await resolveR2S3CompatUri(uri, c.env, userId, workerOrigin, method);
         urls[uri] = result.url;
-        if (result.s3Config) s3Configs[uri] = result.s3Config;
       } else {
         urls[uri] = await resolveUri(uri, c.env, userId, workerOrigin, method);
       }
@@ -106,7 +102,7 @@ app.post("/api/storage/resolve", requireAuth, async (c) => {
       console.error(err);
     }
   }
-  return c.json(Object.keys(s3Configs).length > 0 ? { urls, s3Configs } : { urls });
+  return c.json({ urls });
 });
 
 app.on(["GET", "HEAD"], "/api/storage/obj/:token", async (c) => {
@@ -219,10 +215,7 @@ async function resolveR2S3CompatUri(
   userId: string,
   workerOrigin: string,
   method: "GET" | "PUT" = "GET",
-): Promise<{
-  url: string;
-  s3Config?: { endpoint: string; accessKeyId: string; secretAccessKey: string; region: string };
-}> {
+): Promise<{ url: string }> {
   const parsed = parseR2S3CompatUri(uri);
   if (!parsed) throw new Error(`Invalid r2-s3compat URI: ${uri}`);
 
@@ -234,18 +227,16 @@ async function resolveR2S3CompatUri(
   if (!config) throw new Error(`Invalid r2-s3compat backend config: ${parsed.backendId}`);
 
   if (method === "PUT") {
-    // Return S3 credentials so DuckDB WASM can write natively via s3:// URI.
-    // The user already knows these credentials (they configured them), so
-    // exposing them to their own browser session is acceptable.
-    return {
-      url: `s3://${config.bucket}/${parsed.key}`,
-      s3Config: {
-        endpoint: config.endpoint,
-        accessKeyId: config.accessKeyId,
-        secretAccessKey: config.secretAccessKey,
-        region: config.region,
-      },
-    };
+    const presignedUrl = await signS3PresignedPutUrl({
+      endpoint: config.endpoint,
+      bucket: config.bucket,
+      key: parsed.key,
+      region: config.region,
+      accessKeyId: config.accessKeyId,
+      secretAccessKey: config.secretAccessKey,
+      expiresSeconds: 900,
+    });
+    return { url: presignedUrl };
   }
 
   const now = Math.floor(Date.now() / 1000);

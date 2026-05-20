@@ -223,6 +223,17 @@ async function sha256Hex(data: string): Promise<string> {
     .join("");
 }
 
+function s3EncodeSegment(s: string): string {
+  return encodeURIComponent(s).replace(
+    /[!'()*]/g,
+    (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+}
+
+function s3EncodeKey(key: string): string {
+  return key.split("/").map(s3EncodeSegment).join("/");
+}
+
 export async function signS3Request(opts: {
   method: "GET" | "HEAD" | "PUT";
   endpoint: string;
@@ -239,8 +250,10 @@ export async function signS3Request(opts: {
 
   const endpointUrl = new URL(opts.endpoint);
   const host = endpointUrl.host;
-  const encodedKey = opts.key.split("/").map(encodeURIComponent).join("/");
-  const path = `/${opts.bucket}/${encodedKey}`;
+  const endpointPathPrefix =
+    endpointUrl.pathname === "/" ? "" : endpointUrl.pathname.replace(/\/$/, "");
+  const encodedKey = s3EncodeKey(opts.key);
+  const path = `${endpointPathPrefix}/${opts.bucket}/${encodedKey}`;
   const url = `${endpointUrl.origin}${path}`;
 
   const payloadHash = "UNSIGNED-PAYLOAD";
@@ -281,6 +294,65 @@ export async function signS3Request(opts: {
       Authorization: `AWS4-HMAC-SHA256 Credential=${opts.accessKeyId}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`,
     },
   };
+}
+
+export async function signS3PresignedPutUrl(opts: {
+  endpoint: string;
+  bucket: string;
+  key: string;
+  region: string;
+  accessKeyId: string;
+  secretAccessKey: string;
+  expiresSeconds: number;
+}): Promise<string> {
+  const now = new Date();
+  const pad2 = (n: number) => String(n).padStart(2, "0");
+  const dateStamp = `${now.getUTCFullYear()}${pad2(now.getUTCMonth() + 1)}${pad2(now.getUTCDate())}`;
+  const amzDate = `${dateStamp}T${pad2(now.getUTCHours())}${pad2(now.getUTCMinutes())}${pad2(now.getUTCSeconds())}Z`;
+
+  const endpointUrl = new URL(opts.endpoint);
+  const host = endpointUrl.host;
+  const endpointPathPrefix =
+    endpointUrl.pathname === "/" ? "" : endpointUrl.pathname.replace(/\/$/, "");
+  const encodedKey = s3EncodeKey(opts.key);
+  const path = `${endpointPathPrefix}/${opts.bucket}/${encodedKey}`;
+
+  const credentialScope = `${dateStamp}/${opts.region}/s3/aws4_request`;
+
+  // Query params must be in alphabetical order for the canonical query string.
+  const canonicalQueryString = [
+    "X-Amz-Algorithm=AWS4-HMAC-SHA256",
+    `X-Amz-Credential=${encodeURIComponent(`${opts.accessKeyId}/${credentialScope}`)}`,
+    `X-Amz-Date=${amzDate}`,
+    `X-Amz-Expires=${opts.expiresSeconds}`,
+    "X-Amz-SignedHeaders=host",
+  ].join("&");
+
+  const canonicalRequest = [
+    "PUT",
+    path,
+    canonicalQueryString,
+    `host:${host}\n`,
+    "host",
+    "UNSIGNED-PAYLOAD",
+  ].join("\n");
+
+  const stringToSign = [
+    "AWS4-HMAC-SHA256",
+    amzDate,
+    credentialScope,
+    await sha256Hex(canonicalRequest),
+  ].join("\n");
+
+  let sigKey = new TextEncoder().encode(`AWS4${opts.secretAccessKey}`).buffer as ArrayBuffer;
+  for (const part of [dateStamp, opts.region, "s3", "aws4_request"]) {
+    sigKey = await hmacSha256Raw(sigKey, part);
+  }
+  const signature = Array.from(new Uint8Array(await hmacSha256Raw(sigKey, stringToSign)))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+
+  return `${endpointUrl.origin}${path}?${canonicalQueryString}&X-Amz-Signature=${signature}`;
 }
 
 // ── R2 S3-compatible token ────────────────────────────────────────────────
