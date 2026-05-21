@@ -75,6 +75,7 @@ export function QueryPanel({ workerBase, getAuthHeaders }: QueryPanelProps) {
   const [catalogTables, setCatalogTables] = useState<CatalogTable[]>([]);
   const [catalogLoading, setCatalogLoading] = useState(false);
   const [catalogError, setCatalogError] = useState<string | null>(null);
+  const [failedViews, setFailedViews] = useState<string[]>([]);
 
   const fetchHttpCredentials = useCallback(async () => {
     try {
@@ -93,6 +94,7 @@ export function QueryPanel({ workerBase, getAuthHeaders }: QueryPanelProps) {
   const registerCatalogViews = useCallback(async () => {
     setCatalogLoading(true);
     setCatalogError(null);
+    setFailedViews([]);
     try {
       const headers = await getAuthHeaders();
 
@@ -100,10 +102,9 @@ export function QueryPanel({ workerBase, getAuthHeaders }: QueryPanelProps) {
       if (!tablesRes.ok) throw new Error(`Catalog fetch failed: ${tablesRes.status}`);
       const { tables } = (await tablesRes.json()) as { tables: CatalogTable[] };
 
-      if (tables.length === 0) {
-        setCatalogTables([]);
-        return;
-      }
+      setCatalogTables(tables);
+
+      if (tables.length === 0) return;
 
       const snapEntries = await Promise.all(
         tables.map(async (t) => {
@@ -121,34 +122,38 @@ export function QueryPanel({ workerBase, getAuthHeaders }: QueryPanelProps) {
         (e): e is { table: CatalogTable; snapshot: CatalogSnapshot } => e !== null,
       );
 
-      if (withSnaps.length > 0) {
-        const uriRequests = withSnaps.map(({ snapshot }) => ({
-          uri: snapshot.uri,
-          method: "GET" as const,
-        }));
-        const resolveRes = await fetch(`${workerBase}/api/storage/resolve`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", ...headers },
-          body: JSON.stringify({ uris: uriRequests }),
-        });
-        if (!resolveRes.ok) throw new Error(`URI resolution failed: ${resolveRes.status}`);
-        const { urls } = (await resolveRes.json()) as { urls: Record<string, string> };
+      if (withSnaps.length === 0) return;
 
-        const db = dbRef.current;
-        if (db) {
-          for (const { table, snapshot } of withSnaps) {
-            const url = urls[snapshot.uri];
-            if (!url) continue;
-            const reader = readerFn(snapshot.uri);
-            await runQuery(
-              db,
-              `CREATE OR REPLACE VIEW "${table.name}" AS SELECT * FROM ${reader}('${url}')`,
-            );
-          }
+      const uriRequests = withSnaps.map(({ snapshot }) => ({
+        uri: snapshot.uri,
+        method: "GET" as const,
+      }));
+      const resolveRes = await fetch(`${workerBase}/api/storage/resolve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...headers },
+        body: JSON.stringify({ uris: uriRequests }),
+      });
+      if (!resolveRes.ok) throw new Error(`URI resolution failed: ${resolveRes.status}`);
+      const { urls } = (await resolveRes.json()) as { urls: Record<string, string> };
+
+      const db = dbRef.current;
+      if (!db) return;
+
+      const failed: string[] = [];
+      for (const { table, snapshot } of withSnaps) {
+        const url = urls[snapshot.uri];
+        if (!url) continue;
+        const reader = readerFn(snapshot.uri);
+        try {
+          await runQuery(
+            db,
+            `CREATE OR REPLACE VIEW "${table.name}" AS SELECT * FROM ${reader}('${url}')`,
+          );
+        } catch {
+          failed.push(table.name);
         }
       }
-
-      setCatalogTables(tables);
+      if (failed.length > 0) setFailedViews(failed);
     } catch (err) {
       setCatalogError(err instanceof Error ? err.message : "Catalog load failed");
     } finally {
@@ -359,22 +364,36 @@ export function QueryPanel({ workerBase, getAuthHeaders }: QueryPanelProps) {
           )}
           {catalogTables.length > 0 && (
             <div class="flex flex-wrap gap-2">
-              {catalogTables.map((t) => (
-                <button
-                  key={t.id}
-                  type="button"
-                  class="badge badge-outline font-mono cursor-pointer hover:badge-primary"
-                  onClick={() => setSql(`SELECT * FROM "${t.name}" LIMIT 100`)}
-                  title={`Click to query ${t.name}`}
-                >
-                  {t.name}
-                </button>
-              ))}
+              {catalogTables.map((t) => {
+                const failed = failedViews.includes(t.name);
+                return (
+                  <button
+                    key={t.id}
+                    type="button"
+                    class={`badge badge-outline font-mono cursor-pointer ${failed ? "badge-warning" : "hover:badge-primary"}`}
+                    onClick={() => setSql(`SELECT * FROM "${t.name}" LIMIT 100`)}
+                    title={
+                      failed
+                        ? "View unavailable — file not found in storage"
+                        : `Click to query ${t.name}`
+                    }
+                  >
+                    {t.name}
+                    {failed && " ⚠"}
+                  </button>
+                );
+              })}
             </div>
           )}
-          {catalogTables.length > 0 && (
+          {catalogTables.length > 0 && failedViews.length === 0 && (
             <p class="text-xs text-base-content/40">
               Views registered — query tables by name directly in SQL.
+            </p>
+          )}
+          {failedViews.length > 0 && (
+            <p class="text-xs text-warning/70">
+              {failedViews.length === catalogTables.length ? "No" : "Some"} views could not be
+              registered — the snapshot file may not exist in storage yet.
             </p>
           )}
         </div>
