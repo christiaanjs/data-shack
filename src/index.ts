@@ -545,6 +545,20 @@ app.get("/catalog/snapshots/:table", requireAuth, async (c) => {
   });
 });
 
+app.patch("/catalog/snapshots/:id", requireAuth, async (c) => {
+  const snapshotId = c.req.param("id");
+  const body = await c.req.json();
+  const res = await catalogStub(c.env, c.get("userId")).fetch(
+    `http://do/snapshots/${encodeURIComponent(snapshotId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+  );
+  return new Response(res.body, { status: res.status });
+});
+
 app.post("/catalog/commit", requireAuth, async (c) => {
   const body = await c.req.json();
   const res = await catalogStub(c.env, c.get("userId")).fetch("http://do/commit", {

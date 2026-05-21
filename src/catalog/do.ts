@@ -70,6 +70,12 @@ export class CatalogDO implements DurableObject {
       return this.commit(body);
     }
 
+    if (request.method === "PATCH" && pathname.startsWith("/snapshots/")) {
+      const snapshotId = decodeURIComponent(pathname.slice("/snapshots/".length));
+      const body = (await request.json()) as Record<string, unknown>;
+      return this.patchSnapshot(snapshotId, body);
+    }
+
     return new Response("Not Found", { status: 404 });
   }
 
@@ -149,5 +155,23 @@ export class CatalogDO implements DurableObject {
     );
 
     return Response.json({ tableId, snapshotId, commitId }, { status: 201 });
+  }
+
+  private patchSnapshot(snapshotId: string, body: Record<string, unknown>): Response {
+    const rows = this.ctx.storage.sql
+      .exec("SELECT id FROM snapshots WHERE id = ?", snapshotId)
+      .toArray();
+    if (rows.length === 0) return new Response("Not Found", { status: 404 });
+
+    if ("format" in body) {
+      const format =
+        body.format === null ? null : typeof body.format === "string" ? body.format : undefined;
+      if (format === undefined) {
+        return new Response("format must be a string or null", { status: 400 });
+      }
+      this.ctx.storage.sql.exec("UPDATE snapshots SET format = ? WHERE id = ?", format, snapshotId);
+    }
+
+    return new Response(null, { status: 204 });
   }
 }
