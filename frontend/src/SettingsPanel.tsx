@@ -38,6 +38,14 @@ const HTTP_CONFIG_TEMPLATE = JSON.stringify(
   2,
 );
 
+const R2_BOUND_CONFIG_TEMPLATE = JSON.stringify(
+  {
+    bucket: "data-shack-storage",
+  },
+  null,
+  2,
+);
+
 const R2_S3COMPAT_CONFIG_TEMPLATE = JSON.stringify(
   {
     endpoint: "https://<accountId>.r2.cloudflarestorage.com",
@@ -169,9 +177,11 @@ function AddForm({
   const initialConfig =
     typeOptions[0] === "http"
       ? HTTP_CONFIG_TEMPLATE
-      : typeOptions[0] === "r2-s3compat"
-        ? R2_S3COMPAT_CONFIG_TEMPLATE
-        : "{}";
+      : typeOptions[0] === "r2-bound"
+        ? R2_BOUND_CONFIG_TEMPLATE
+        : typeOptions[0] === "r2-s3compat"
+          ? R2_S3COMPAT_CONFIG_TEMPLATE
+          : "{}";
   const [config, setConfig] = useState(initialConfig);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -180,9 +190,15 @@ function AddForm({
     setType(newType);
     if (newType === "http") {
       setConfig(HTTP_CONFIG_TEMPLATE);
+    } else if (newType === "r2-bound") {
+      setConfig(R2_BOUND_CONFIG_TEMPLATE);
     } else if (newType === "r2-s3compat") {
       setConfig(R2_S3COMPAT_CONFIG_TEMPLATE);
-    } else if (config === HTTP_CONFIG_TEMPLATE || config === R2_S3COMPAT_CONFIG_TEMPLATE) {
+    } else if (
+      config === HTTP_CONFIG_TEMPLATE ||
+      config === R2_BOUND_CONFIG_TEMPLATE ||
+      config === R2_S3COMPAT_CONFIG_TEMPLATE
+    ) {
       setConfig("{}");
     }
   }
@@ -197,9 +213,11 @@ function AddForm({
       setConfig(
         type === "http"
           ? HTTP_CONFIG_TEMPLATE
-          : type === "r2-s3compat"
-            ? R2_S3COMPAT_CONFIG_TEMPLATE
-            : "{}",
+          : type === "r2-bound"
+            ? R2_BOUND_CONFIG_TEMPLATE
+            : type === "r2-s3compat"
+              ? R2_S3COMPAT_CONFIG_TEMPLATE
+              : "{}",
       );
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed");
@@ -256,6 +274,13 @@ function AddForm({
             <strong>headers</strong> — sent on every request; use <code>{"{{name}}"}</code> to
             reference a value from <strong>variables</strong> (keeps secrets out of the header
             string).
+          </p>
+        )}
+        {type === "r2-bound" && (
+          <p class="text-xs text-base-content/50 mt-1">
+            The primary Cloudflare R2 bucket bound to this worker. <strong>bucket</strong> — set to{" "}
+            <code>data-shack-storage</code> (used for URI construction in the catalog). Load jobs
+            writing to this backend use the Worker's R2 binding directly.
           </p>
         )}
         {type === "r2-s3compat" && (

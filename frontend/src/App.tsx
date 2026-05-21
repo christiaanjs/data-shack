@@ -1,5 +1,6 @@
 import { useEffect, useState } from "preact/hooks";
 import { CatalogPanel } from "./CatalogPanel.tsx";
+import { LoadJobsPanel } from "./LoadJobsPanel.tsx";
 import { QueryPanel } from "./QueryPanel.tsx";
 import { SettingsPanel } from "./SettingsPanel.tsx";
 import { clearTokens, getAccessToken, getValidToken, handleCallback, startLogin } from "./auth.ts";
@@ -7,7 +8,7 @@ import { clearTokens, getAccessToken, getValidToken, handleCallback, startLogin 
 const WORKER_BASE = import.meta.env.VITE_WORKER_URL ?? "";
 const DEV_TOKEN = import.meta.env.VITE_DEV_TOKEN as string | undefined;
 
-type Tab = "query" | "catalog" | "settings";
+type Tab = "query" | "catalog" | "jobs" | "settings";
 
 async function getAuthHeaders(): Promise<Record<string, string>> {
   if (DEV_TOKEN) return { "X-Dev-Token": DEV_TOKEN };
@@ -123,6 +124,14 @@ export function App() {
             <button
               type="button"
               role="tab"
+              class={`tab${activeTab === "jobs" ? " tab-active" : ""}`}
+              onClick={() => setActiveTab("jobs")}
+            >
+              Jobs
+            </button>
+            <button
+              type="button"
+              role="tab"
               class={`tab${activeTab === "settings" ? " tab-active" : ""}`}
               onClick={() => setActiveTab("settings")}
             >
@@ -156,6 +165,9 @@ export function App() {
         )}
         {activeTab === "catalog" && (
           <CatalogPanel workerBase={WORKER_BASE} getAuthHeaders={getAuthHeaders} />
+        )}
+        {activeTab === "jobs" && (
+          <LoadJobsPanel workerBase={WORKER_BASE} getAuthHeaders={getAuthHeaders} />
         )}
         {activeTab === "settings" && (
           <SettingsPanel workerBase={WORKER_BASE} getAuthHeaders={getAuthHeaders} />
