@@ -57,6 +57,7 @@ export async function runHttpLoadJob(job: LoadJob, env: Env): Promise<{ uri: str
       bucket: string;
       region: string;
     };
+    const bodyBuffer = await upstream.arrayBuffer();
     const { url: s3Url, headers: s3Headers } = await signS3Request({
       method: "PUT",
       endpoint: raw.endpoint,
@@ -66,7 +67,11 @@ export async function runHttpLoadJob(job: LoadJob, env: Env): Promise<{ uri: str
       accessKeyId: raw.accessKeyId,
       secretAccessKey: raw.secretAccessKey,
     });
-    const putRes = await fetch(s3Url, { method: "PUT", headers: s3Headers, body: upstream.body });
+    const putRes = await fetch(s3Url, {
+      method: "PUT",
+      headers: { ...s3Headers, "Content-Length": String(bodyBuffer.byteLength) },
+      body: bodyBuffer,
+    });
     if (!putRes.ok) {
       throw new Error(`S3 PUT failed: ${putRes.status} ${putRes.statusText}`);
     }
