@@ -126,6 +126,52 @@ export async function insertLoadJob(
   };
 }
 
+export async function updateLoadJob(
+  db: D1Database,
+  userId: string,
+  id: string,
+  data: {
+    name: string;
+    credential_id: string;
+    storage_backend_id: string;
+    table_name: string;
+    table_path: string;
+    http_path: string;
+    http_method: string;
+    format: string;
+    cron_schedule: string;
+  },
+): Promise<LoadJob | null> {
+  const now = Date.now();
+  const nextRunAt = new Cron(data.cron_schedule).nextRun()?.getTime() ?? null;
+  const result = await db
+    .prepare(
+      `UPDATE load_jobs
+          SET name = ?, credential_id = ?, storage_backend_id = ?, table_name = ?,
+              table_path = ?, http_path = ?, http_method = ?, format = ?,
+              cron_schedule = ?, next_run_at = ?, updated_at = ?
+        WHERE id = ? AND user_id = ?`,
+    )
+    .bind(
+      data.name,
+      data.credential_id,
+      data.storage_backend_id,
+      data.table_name,
+      data.table_path,
+      data.http_path,
+      data.http_method,
+      data.format,
+      data.cron_schedule,
+      nextRunAt,
+      now,
+      id,
+      userId,
+    )
+    .run();
+  if ((result.meta.changes ?? 0) === 0) return null;
+  return db.prepare("SELECT * FROM load_jobs WHERE id = ?").bind(id).first<LoadJob>() ?? null;
+}
+
 export async function deleteLoadJob(db: D1Database, userId: string, id: string): Promise<boolean> {
   const result = await db
     .prepare("DELETE FROM load_jobs WHERE id = ? AND user_id = ?")

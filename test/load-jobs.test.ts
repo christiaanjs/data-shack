@@ -188,6 +188,121 @@ describe("POST /api/load-jobs", () => {
   });
 });
 
+// ── PATCH /api/load-jobs/:id ──────────────────────────────────────────────
+
+describe("PATCH /api/load-jobs/:id", () => {
+  it("returns 401 without auth", async () => {
+    const res = await SELF.fetch("http://localhost/api/load-jobs/lj_fake", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it("returns 404 for non-existent id", async () => {
+    const credId = await createCredential();
+    const sbId = await createBackend();
+    const res = await SELF.fetch("http://localhost/api/load-jobs/lj_doesnotexist", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({
+        name: "x",
+        credential_id: credId,
+        storage_backend_id: sbId,
+        table_name: "tbl",
+      }),
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it("updates fields and returns updated job", async () => {
+    const credId = await createCredential();
+    const sbId = await createBackend();
+    const createRes = await SELF.fetch("http://localhost/api/load-jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({
+        name: "Original",
+        credential_id: credId,
+        storage_backend_id: sbId,
+        table_name: "orig_tbl",
+        cron_schedule: "0 * * * *",
+      }),
+    });
+    const { id } = (await createRes.json()) as { id: string };
+
+    const patchRes = await SELF.fetch(`http://localhost/api/load-jobs/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({
+        name: "Updated",
+        credential_id: credId,
+        storage_backend_id: sbId,
+        table_name: "updated_tbl",
+        table_path: "data/updated",
+        http_path: "/v2/data",
+        http_method: "GET",
+        format: "json",
+        cron_schedule: "0 2 * * *",
+      }),
+    });
+    expect(patchRes.status).toBe(200);
+    const updated = (await patchRes.json()) as {
+      name: string;
+      table_name: string;
+      table_path: string;
+      cron_schedule: string;
+      next_run_at: number | null;
+    };
+    expect(updated.name).toBe("Updated");
+    expect(updated.table_name).toBe("updated_tbl");
+    expect(updated.table_path).toBe("data/updated");
+    expect(updated.cron_schedule).toBe("0 2 * * *");
+    expect(updated.next_run_at).not.toBeNull();
+  });
+
+  it("returns 404 when patching another user's job", async () => {
+    const now = Date.now();
+    const otherId = `lj_patchother_${crypto.randomUUID().replace(/-/g, "")}`;
+    await env.DB.prepare(
+      `INSERT INTO load_jobs (id, user_id, name, credential_id, storage_backend_id, table_name,
+       table_path, http_path, http_method, format, cron_schedule, enabled, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+    )
+      .bind(
+        otherId,
+        "usr_other",
+        "Other",
+        "cred_x",
+        "sb_x",
+        "tbl",
+        "",
+        "/",
+        "GET",
+        "ndjson",
+        "0 * * * *",
+        now,
+        now,
+      )
+      .run();
+
+    const credId = await createCredential();
+    const sbId = await createBackend();
+    const res = await SELF.fetch(`http://localhost/api/load-jobs/${otherId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({
+        name: "Hijack",
+        credential_id: credId,
+        storage_backend_id: sbId,
+        table_name: "tbl",
+      }),
+    });
+    expect(res.status).toBe(404);
+  });
+});
+
 // ── DELETE /api/load-jobs/:id ─────────────────────────────────────────────
 
 describe("DELETE /api/load-jobs/:id", () => {

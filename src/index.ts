@@ -15,6 +15,7 @@ import {
   insertLoadJob,
   listDueLoadJobs,
   listLoadJobs,
+  updateLoadJob,
   updateLoadJobOutcome,
 } from "./db/load-jobs.ts";
 import {
@@ -569,6 +570,35 @@ app.post("/api/load-jobs", requireAuth, async (c) => {
     cron_schedule: typeof body.cron_schedule === "string" ? body.cron_schedule : undefined,
   });
   return c.json(job, 201);
+});
+
+app.patch("/api/load-jobs/:id", requireAuth, async (c) => {
+  const body = await c.req.json<Record<string, unknown>>();
+  if (typeof body.name !== "string" || !body.name) {
+    return c.json({ error: "name is required" }, 400);
+  }
+  if (typeof body.credential_id !== "string" || !body.credential_id) {
+    return c.json({ error: "credential_id is required" }, 400);
+  }
+  if (typeof body.storage_backend_id !== "string" || !body.storage_backend_id) {
+    return c.json({ error: "storage_backend_id is required" }, 400);
+  }
+  if (typeof body.table_name !== "string" || !SAFE_TABLE_NAME.test(body.table_name)) {
+    return c.json({ error: "table_name must match [a-zA-Z_][a-zA-Z0-9_]*" }, 400);
+  }
+  const updated = await updateLoadJob(c.env.DB, c.get("userId"), c.req.param("id"), {
+    name: body.name,
+    credential_id: body.credential_id,
+    storage_backend_id: body.storage_backend_id,
+    table_name: body.table_name,
+    table_path: typeof body.table_path === "string" ? body.table_path : "",
+    http_path: typeof body.http_path === "string" ? body.http_path : "/",
+    http_method: typeof body.http_method === "string" ? body.http_method : "GET",
+    format: typeof body.format === "string" ? body.format : "ndjson",
+    cron_schedule: typeof body.cron_schedule === "string" ? body.cron_schedule : "0 * * * *",
+  });
+  if (!updated) return new Response("Not Found", { status: 404 });
+  return c.json(updated);
 });
 
 app.delete("/api/load-jobs/:id", requireAuth, async (c) => {

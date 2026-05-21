@@ -46,7 +46,7 @@ export function LoadJobsPanel({ workerBase, getAuthHeaders }: LoadJobsPanelProps
   const [loadError, setLoadError] = useState<string | null>(null);
   const [triggering, setTriggering] = useState<Record<string, boolean>>({});
   const [triggerResults, setTriggerResults] = useState<Record<string, string>>({});
-  const [showCreate, setShowCreate] = useState(false);
+  const [formMode, setFormMode] = useState<null | "create" | LoadJob>(null);
 
   // Form state
   const [formName, setFormName] = useState("");
@@ -60,6 +60,34 @@ export function LoadJobsPanel({ workerBase, getAuthHeaders }: LoadJobsPanelProps
   const [formCron, setFormCron] = useState("0 * * * *");
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+
+  function openCreate() {
+    setFormMode("create");
+    setFormName("");
+    setFormCredId("");
+    setFormSbId("");
+    setFormTable("");
+    setFormTablePath("");
+    setFormPath("/");
+    setFormMethod("GET");
+    setFormFormat("ndjson");
+    setFormCron("0 * * * *");
+    setFormError(null);
+  }
+
+  function openEdit(job: LoadJob) {
+    setFormMode(job);
+    setFormName(job.name);
+    setFormCredId(job.credential_id);
+    setFormSbId(job.storage_backend_id);
+    setFormTable(job.table_name);
+    setFormTablePath(job.table_path);
+    setFormPath(job.http_path);
+    setFormMethod(job.http_method);
+    setFormFormat(job.format);
+    setFormCron(job.cron_schedule);
+    setFormError(null);
+  }
 
   const fetchAll = useCallback(async () => {
     try {
@@ -123,14 +151,18 @@ export function LoadJobsPanel({ workerBase, getAuthHeaders }: LoadJobsPanelProps
     await fetchAll();
   }
 
-  async function handleCreate(e: Event) {
+  async function handleSubmit(e: Event) {
     e.preventDefault();
     setSubmitting(true);
     setFormError(null);
+    const isEdit = formMode !== null && formMode !== "create";
+    const url = isEdit
+      ? `${workerBase}/api/load-jobs/${(formMode as LoadJob).id}`
+      : `${workerBase}/api/load-jobs`;
     try {
       const headers = await getAuthHeaders();
-      const res = await fetch(`${workerBase}/api/load-jobs`, {
-        method: "POST",
+      const res = await fetch(url, {
+        method: isEdit ? "PATCH" : "POST",
         headers: { "Content-Type": "application/json", ...headers },
         body: JSON.stringify({
           name: formName,
@@ -148,12 +180,7 @@ export function LoadJobsPanel({ workerBase, getAuthHeaders }: LoadJobsPanelProps
         const data = (await res.json()) as { error?: string };
         throw new Error(data.error ?? `Failed: ${res.status}`);
       }
-      setShowCreate(false);
-      setFormName("");
-      setFormTable("");
-      setFormTablePath("");
-      setFormPath("/");
-      setFormCron("0 * * * *");
+      setFormMode(null);
       await fetchAll();
     } catch (err) {
       setFormError(err instanceof Error ? err.message : "Failed");
@@ -177,18 +204,20 @@ export function LoadJobsPanel({ workerBase, getAuthHeaders }: LoadJobsPanelProps
             <button
               type="button"
               class="btn btn-sm btn-primary"
-              onClick={() => setShowCreate((s) => !s)}
+              onClick={() => (formMode !== null ? setFormMode(null) : openCreate())}
             >
-              {showCreate ? "Cancel" : "New job"}
+              {formMode !== null ? "Cancel" : "New job"}
             </button>
           </div>
 
-          {showCreate && (
+          {formMode !== null && (
             <form
               class="space-y-3 border border-base-300 rounded-box p-4"
-              onSubmit={(e) => handleCreate(e).catch(() => {})}
+              onSubmit={(e) => handleSubmit(e).catch(() => {})}
             >
-              <h3 class="font-semibold text-sm">New Load Job</h3>
+              <h3 class="font-semibold text-sm">
+                {formMode === "create" ? "New Load Job" : "Edit Load Job"}
+              </h3>
               {formError && (
                 <div role="alert" class="alert alert-error py-2 text-sm">
                   <span>{formError}</span>
@@ -317,12 +346,18 @@ export function LoadJobsPanel({ workerBase, getAuthHeaders }: LoadJobsPanelProps
                 }
               >
                 {submitting && <span class="loading loading-spinner loading-xs" />}
-                {submitting ? "Creating…" : "Create"}
+                {submitting
+                  ? formMode === "create"
+                    ? "Creating…"
+                    : "Saving…"
+                  : formMode === "create"
+                    ? "Create"
+                    : "Save"}
               </button>
             </form>
           )}
 
-          {jobs.length === 0 && !showCreate ? (
+          {jobs.length === 0 && formMode === null ? (
             <p class="text-sm text-base-content/50">No load jobs yet. Create one to get started.</p>
           ) : jobs.length > 0 ? (
             <div class="overflow-x-auto">
@@ -372,6 +407,13 @@ export function LoadJobsPanel({ workerBase, getAuthHeaders }: LoadJobsPanelProps
                           ) : (
                             "Run now"
                           )}
+                        </button>
+                        <button
+                          type="button"
+                          class="btn btn-ghost btn-xs"
+                          onClick={() => openEdit(job)}
+                        >
+                          Edit
                         </button>
                         <button
                           type="button"
