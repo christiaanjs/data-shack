@@ -2,6 +2,37 @@ import type { AsyncDuckDB } from "@duckdb/duckdb-wasm";
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import { initDuckDB, runQuery } from "./duckdb.ts";
 
+interface CatalogTable {
+  id: string;
+  name: string;
+  description: string | null;
+  created_at: number;
+}
+
+interface CatalogSnapshot {
+  id: string;
+  table_id: string;
+  uri: string;
+  storage_backend: string;
+  access_mode: string;
+  format: string | null;
+  created_at: number;
+}
+
+function readerFn(uri: string, format?: string | null): string {
+  const fmt = format ?? inferFormat(uri);
+  if (fmt === "parquet") return "read_parquet";
+  if (fmt === "csv") return "read_csv_auto";
+  return "read_json"; // ndjson, jsonl, json, and unknown
+}
+
+function inferFormat(uri: string): string {
+  if (uri.endsWith(".parquet")) return "parquet";
+  if (uri.endsWith(".csv")) return "csv";
+  if (uri.endsWith(".ndjson") || uri.endsWith(".jsonl")) return "ndjson";
+  return "json";
+}
+
 interface QueryPanelProps {
   workerBase: string;
   getAuthHeaders: () => Promise<Record<string, string>>;
@@ -50,6 +81,11 @@ export function QueryPanel({ workerBase, getAuthHeaders }: QueryPanelProps) {
   const [dsResponse, setDsResponse] = useState<{ status: number; body: string } | null>(null);
   const [dsError, setDsError] = useState<string | null>(null);
 
+  const [catalogTables, setCatalogTables] = useState<CatalogTable[]>([]);
+  const [catalogLoading, setCatalogLoading] = useState(false);
+  const [catalogError, setCatalogError] = useState<string | null>(null);
+  const [failedViews, setFailedViews] = useState<string[]>([]);
+
   const fetchHttpCredentials = useCallback(async () => {
     try {
       const headers = await getAuthHeaders();
@@ -64,6 +100,82 @@ export function QueryPanel({ workerBase, getAuthHeaders }: QueryPanelProps) {
     }
   }, [workerBase, getAuthHeaders, selectedCredId]);
 
+  const registerCatalogViews = useCallback(async () => {
+    setCatalogLoading(true);
+    setCatalogError(null);
+    setFailedViews([]);
+    try {
+      const headers = await getAuthHeaders();
+
+      const tablesRes = await fetch(`${workerBase}/catalog/tables`, { headers });
+      if (!tablesRes.ok) throw new Error(`Catalog fetch failed: ${tablesRes.status}`);
+      const { tables } = (await tablesRes.json()) as { tables: CatalogTable[] };
+
+      setCatalogTables(tables);
+
+      if (tables.length === 0) return;
+
+      const snapEntries = await Promise.all(
+        tables.map(async (t) => {
+          const res = await fetch(`${workerBase}/catalog/snapshots/${encodeURIComponent(t.name)}`, {
+            headers,
+          });
+          if (!res.ok) return null;
+          const { snapshots } = (await res.json()) as { snapshots: CatalogSnapshot[] };
+          return snapshots.length > 0
+            ? { table: t, snapshot: snapshots[0] as CatalogSnapshot }
+            : null;
+        }),
+      );
+      const withSnaps = snapEntries.filter(
+        (e): e is { table: CatalogTable; snapshot: CatalogSnapshot } => e !== null,
+      );
+
+      if (withSnaps.length === 0) return;
+
+      const uriRequests = withSnaps.map(({ snapshot }) => ({
+        uri: snapshot.uri,
+        method: "GET" as const,
+      }));
+      const resolveRes = await fetch(`${workerBase}/api/storage/resolve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...headers },
+        body: JSON.stringify({ uris: uriRequests }),
+      });
+      if (!resolveRes.ok) throw new Error(`URI resolution failed: ${resolveRes.status}`);
+      const { urls } = (await resolveRes.json()) as { urls: Record<string, string> };
+
+      const db = dbRef.current;
+      if (!db) return;
+
+      const failed: string[] = [];
+      for (const { table, snapshot } of withSnaps) {
+        const url = urls[snapshot.uri];
+        if (!url) {
+          failed.push(table.name);
+          continue;
+        }
+        const reader = readerFn(snapshot.uri, snapshot.format);
+        // Escape the identifier (double-quote) and the URL string literal (single-quote).
+        const safeId = table.name.replace(/"/g, '""');
+        const safeUrl = url.replace(/'/g, "''");
+        try {
+          await runQuery(
+            db,
+            `CREATE OR REPLACE VIEW "${safeId}" AS SELECT * FROM ${reader}('${safeUrl}')`,
+          );
+        } catch {
+          failed.push(table.name);
+        }
+      }
+      if (failed.length > 0) setFailedViews(failed);
+    } catch (err) {
+      setCatalogError(err instanceof Error ? err.message : "Catalog load failed");
+    } finally {
+      setCatalogLoading(false);
+    }
+  }, [workerBase, getAuthHeaders]);
+
   useEffect(() => {
     initDuckDB()
       .then((db) => {
@@ -74,6 +186,10 @@ export function QueryPanel({ workerBase, getAuthHeaders }: QueryPanelProps) {
         setDbError(err instanceof Error ? err.message : "DuckDB failed to initialize");
       });
   }, []);
+
+  useEffect(() => {
+    if (dbReady) registerCatalogViews().catch(() => {});
+  }, [dbReady, registerCatalogViews]);
 
   useEffect(() => {
     fetchHttpCredentials().catch(() => {});
@@ -228,6 +344,75 @@ export function QueryPanel({ workerBase, getAuthHeaders }: QueryPanelProps) {
           <span>Initialising DuckDB…</span>
         </div>
       )}
+
+      {/* Catalog tables */}
+      <div class="card bg-base-200">
+        <div class="card-body gap-3">
+          <div class="flex items-center justify-between">
+            <h2 class="card-title text-base">Catalog</h2>
+            <button
+              type="button"
+              class="btn btn-xs btn-ghost"
+              onClick={() => registerCatalogViews().catch(() => {})}
+              disabled={catalogLoading || !dbReady}
+              title="Reload catalog and re-register views"
+            >
+              {catalogLoading ? <span class="loading loading-spinner loading-xs" /> : "↺"}
+            </button>
+          </div>
+          {catalogError && (
+            <div role="alert" class="alert alert-error py-2 text-sm">
+              <span>{catalogError}</span>
+            </div>
+          )}
+          {catalogLoading && (
+            <div class="flex items-center gap-2 text-base-content/60 text-sm">
+              <span class="loading loading-spinner loading-xs" />
+              <span>Loading catalog…</span>
+            </div>
+          )}
+          {!catalogLoading && catalogTables.length === 0 && !catalogError && (
+            <p class="text-sm text-base-content/50">
+              No tables yet. Use <code class="font-mono">POST /catalog/commit</code> to register
+              one.
+            </p>
+          )}
+          {catalogTables.length > 0 && (
+            <div class="flex flex-wrap gap-2">
+              {catalogTables.map((t) => {
+                const failed = failedViews.includes(t.name);
+                return (
+                  <button
+                    key={t.id}
+                    type="button"
+                    class={`badge badge-outline font-mono cursor-pointer ${failed ? "badge-warning" : "hover:badge-primary"}`}
+                    onClick={() => setSql(`SELECT * FROM "${t.name}" LIMIT 100`)}
+                    title={
+                      failed
+                        ? "View unavailable — file not found in storage"
+                        : `Click to query ${t.name}`
+                    }
+                  >
+                    {t.name}
+                    {failed && " ⚠"}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+          {catalogTables.length > 0 && failedViews.length === 0 && (
+            <p class="text-xs text-base-content/40">
+              Views registered — query tables by name directly in SQL.
+            </p>
+          )}
+          {failedViews.length > 0 && (
+            <p class="text-xs text-warning/70">
+              {failedViews.length === catalogTables.length ? "No" : "Some"} views could not be
+              registered — the snapshot file may not exist in storage yet.
+            </p>
+          )}
+        </div>
+      </div>
 
       {/* URI resolver */}
       <div class="card bg-base-200">

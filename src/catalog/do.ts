@@ -1,0 +1,242 @@
+import type { Env } from "../types.ts";
+
+function genId(prefix: string): string {
+  return `${prefix}_${crypto.randomUUID().replace(/-/g, "")}`;
+}
+
+// Safe SQL identifier: must start with a letter or underscore, then alphanumeric/underscore only.
+const SAFE_TABLE_NAME = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
+
+interface CommitBody {
+  table: string;
+  uri: string;
+  storageBackend: string;
+  accessMode?: string;
+  format?: string;
+  message?: string;
+}
+
+export class CatalogDO implements DurableObject {
+  constructor(
+    private ctx: DurableObjectState,
+    private _env: Env,
+  ) {
+    ctx.storage.sql.exec(`
+      CREATE TABLE IF NOT EXISTS tables (
+        id          TEXT PRIMARY KEY,
+        name        TEXT NOT NULL UNIQUE,
+        description TEXT,
+        created_at  INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS snapshots (
+        id              TEXT PRIMARY KEY,
+        table_id        TEXT NOT NULL REFERENCES tables(id),
+        uri             TEXT NOT NULL,
+        storage_backend TEXT NOT NULL,
+        access_mode     TEXT NOT NULL DEFAULT 'signed',
+        created_at      INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS commits (
+        id           TEXT PRIMARY KEY,
+        table_id     TEXT NOT NULL REFERENCES tables(id),
+        snapshot_id  TEXT NOT NULL REFERENCES snapshots(id),
+        committed_at INTEGER NOT NULL,
+        message      TEXT
+      );
+    `);
+
+    // Add format column to existing instances that predate this field.
+    try {
+      ctx.storage.sql.exec("ALTER TABLE snapshots ADD COLUMN format TEXT");
+    } catch {
+      // Column already exists — nothing to do.
+    }
+
+    // Add deleted_at for soft-delete support.
+    try {
+      ctx.storage.sql.exec("ALTER TABLE tables ADD COLUMN deleted_at INTEGER");
+    } catch {
+      // Column already exists — nothing to do.
+    }
+  }
+
+  async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    const { pathname } = url;
+
+    if (request.method === "GET" && pathname === "/tables") {
+      return this.getTables();
+    }
+
+    if (request.method === "GET" && pathname.startsWith("/snapshots/")) {
+      const tableRef = decodeURIComponent(pathname.slice("/snapshots/".length));
+      return this.getSnapshots(tableRef);
+    }
+
+    if (request.method === "POST" && pathname === "/commit") {
+      const body = (await request.json()) as CommitBody;
+      return this.commit(body);
+    }
+
+    if (request.method === "PATCH" && pathname.startsWith("/snapshots/")) {
+      const snapshotId = decodeURIComponent(pathname.slice("/snapshots/".length));
+      const body = (await request.json()) as Record<string, unknown>;
+      return this.patchSnapshot(snapshotId, body);
+    }
+
+    if (request.method === "DELETE" && pathname.startsWith("/tables/")) {
+      const tableRef = decodeURIComponent(pathname.slice("/tables/".length));
+      return this.deleteTable(tableRef);
+    }
+
+    return new Response("Not Found", { status: 404 });
+  }
+
+  private getTables(): Response {
+    const rows = this.ctx.storage.sql
+      .exec(
+        "SELECT id, name, description, created_at FROM tables WHERE deleted_at IS NULL ORDER BY name",
+      )
+      .toArray();
+    return Response.json({ tables: rows });
+  }
+
+  private getSnapshots(tableRef: string): Response {
+    // Prefer an exact name match; fall back to id lookup so callers can use either.
+    let tableRows = this.ctx.storage.sql
+      .exec("SELECT id FROM tables WHERE name = ? AND deleted_at IS NULL", tableRef)
+      .toArray();
+    if (tableRows.length === 0) {
+      tableRows = this.ctx.storage.sql
+        .exec("SELECT id FROM tables WHERE id = ? AND deleted_at IS NULL", tableRef)
+        .toArray();
+    }
+    const table = tableRows[0];
+    if (!table) return new Response("Not Found", { status: 404 });
+
+    const snapshots = this.ctx.storage.sql
+      .exec(
+        `SELECT id, table_id, uri, storage_backend, access_mode, format, created_at
+         FROM snapshots WHERE table_id = ? ORDER BY created_at DESC`,
+        table.id,
+      )
+      .toArray();
+    return Response.json({ snapshots });
+  }
+
+  private commit(body: CommitBody): Response {
+    const { table, uri, storageBackend, accessMode = "signed", format, message } = body;
+
+    if (
+      typeof table !== "string" ||
+      typeof uri !== "string" ||
+      typeof storageBackend !== "string"
+    ) {
+      return new Response("Bad Request: table, uri, storageBackend required", { status: 400 });
+    }
+
+    if (!SAFE_TABLE_NAME.test(table)) {
+      return new Response("Bad Request: table name must match [a-zA-Z_][a-zA-Z0-9_]*", {
+        status: 400,
+      });
+    }
+
+    const now = Date.now();
+    const snapshotId = genId("snap");
+    const commitId = genId("commit");
+
+    const tableId = this.ctx.storage.transactionSync(() => {
+      // Include soft-deleted rows so we can restore them on re-commit.
+      const tableRows = this.ctx.storage.sql
+        .exec("SELECT id, deleted_at FROM tables WHERE name = ?", table)
+        .toArray();
+
+      let resolvedId: string;
+      if (tableRows.length > 0) {
+        resolvedId = tableRows[0]!.id as string;
+        if (tableRows[0]!.deleted_at !== null) {
+          // Restore soft-deleted table on re-commit.
+          this.ctx.storage.sql.exec("UPDATE tables SET deleted_at = NULL WHERE id = ?", resolvedId);
+        }
+      } else {
+        resolvedId = genId("tbl");
+        this.ctx.storage.sql.exec(
+          "INSERT INTO tables (id, name, created_at) VALUES (?, ?, ?)",
+          resolvedId,
+          table,
+          now,
+        );
+      }
+
+      this.ctx.storage.sql.exec(
+        "INSERT INTO snapshots (id, table_id, uri, storage_backend, access_mode, format, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        snapshotId,
+        resolvedId,
+        uri,
+        storageBackend,
+        accessMode,
+        typeof format === "string" ? format : null,
+        now,
+      );
+
+      this.ctx.storage.sql.exec(
+        "INSERT INTO commits (id, table_id, snapshot_id, committed_at, message) VALUES (?, ?, ?, ?, ?)",
+        commitId,
+        resolvedId,
+        snapshotId,
+        now,
+        typeof message === "string" ? message : null,
+      );
+
+      return resolvedId;
+    });
+
+    return Response.json({ tableId, snapshotId, commitId }, { status: 201 });
+  }
+
+  private deleteTable(tableRef: string): Response {
+    // Prefer name match; fall back to id.
+    let tableRows = this.ctx.storage.sql
+      .exec("SELECT id FROM tables WHERE name = ? AND deleted_at IS NULL", tableRef)
+      .toArray();
+    if (tableRows.length === 0) {
+      tableRows = this.ctx.storage.sql
+        .exec("SELECT id FROM tables WHERE id = ? AND deleted_at IS NULL", tableRef)
+        .toArray();
+    }
+    if (tableRows.length === 0) return new Response("Not Found", { status: 404 });
+
+    this.ctx.storage.sql.exec(
+      "UPDATE tables SET deleted_at = ? WHERE id = ?",
+      Date.now(),
+      tableRows[0]!.id as string,
+    );
+    return new Response(null, { status: 204 });
+  }
+
+  private patchSnapshot(snapshotId: string, body: Record<string, unknown>): Response {
+    const rows = this.ctx.storage.sql
+      .exec("SELECT id FROM snapshots WHERE id = ?", snapshotId)
+      .toArray();
+    if (rows.length === 0) return new Response("Not Found", { status: 404 });
+
+    if ("uri" in body) {
+      if (typeof body.uri !== "string")
+        return new Response("uri must be a string", { status: 400 });
+      this.ctx.storage.sql.exec("UPDATE snapshots SET uri = ? WHERE id = ?", body.uri, snapshotId);
+    }
+
+    if ("format" in body) {
+      const format =
+        body.format === null ? null : typeof body.format === "string" ? body.format : undefined;
+      if (format === undefined) {
+        return new Response("format must be a string or null", { status: 400 });
+      }
+      this.ctx.storage.sql.exec("UPDATE snapshots SET format = ? WHERE id = ?", format, snapshotId);
+    }
+
+    return new Response(null, { status: 204 });
+  }
+}

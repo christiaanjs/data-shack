@@ -3,6 +3,8 @@ import { createMiddleware } from "hono/factory";
 import { Hono } from "hono/tiny";
 import { authenticate } from "./auth/middleware.ts";
 import { oauthRouter } from "./auth/oauth.ts";
+import { CatalogDO } from "./catalog/do.ts";
+export { CatalogDO };
 import { decryptConfig, encryptConfig } from "./crypto.ts";
 import {
   deleteCredential,
@@ -54,7 +56,7 @@ app.use("*", (c, next) => {
       isAllowedOrigin(origin, env.ALLOWED_ORIGIN, env.ALLOW_ORIGIN_SUBDOMAINS === "true")
         ? origin
         : null,
-    allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowHeaders: ["Content-Type", "Authorization", "X-Dev-Token", "Range"],
     exposeHeaders: ["Content-Length", "Content-Range", "Accept-Ranges"],
     maxAge: 86400,
@@ -516,6 +518,58 @@ app.delete("/api/storage-backends/:id", requireAuth, async (c) => {
   const deleted = await deleteStorageBackend(c.env.DB, c.req.param("id"), c.get("userId"));
   if (!deleted) return new Response("Not Found", { status: 404 });
   return new Response(null, { status: 204 });
+});
+
+// ── Catalog endpoints ─────────────────────────────────────────────────────
+
+function catalogStub(env: Env, userId: string) {
+  return env.CATALOG.get(env.CATALOG.idFromName(userId));
+}
+
+app.get("/catalog/tables", requireAuth, async (c) => {
+  const res = await catalogStub(c.env, c.get("userId")).fetch("http://do/tables");
+  return new Response(res.body, { status: res.status, headers: res.headers });
+});
+
+app.get("/catalog/snapshots/:table", requireAuth, async (c) => {
+  const table = c.req.param("table");
+  const res = await catalogStub(c.env, c.get("userId")).fetch(
+    `http://do/snapshots/${encodeURIComponent(table)}`,
+  );
+  return new Response(res.body, { status: res.status, headers: res.headers });
+});
+
+app.patch("/catalog/snapshots/:id", requireAuth, async (c) => {
+  const snapshotId = c.req.param("id");
+  const body = await c.req.json();
+  const res = await catalogStub(c.env, c.get("userId")).fetch(
+    `http://do/snapshots/${encodeURIComponent(snapshotId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+  );
+  return new Response(res.body, { status: res.status });
+});
+
+app.delete("/catalog/tables/:table", requireAuth, async (c) => {
+  const table = c.req.param("table");
+  const res = await catalogStub(c.env, c.get("userId")).fetch(
+    `http://do/tables/${encodeURIComponent(table)}`,
+    { method: "DELETE" },
+  );
+  return new Response(res.body, { status: res.status, headers: res.headers });
+});
+
+app.post("/catalog/commit", requireAuth, async (c) => {
+  const body = await c.req.json();
+  const res = await catalogStub(c.env, c.get("userId")).fetch("http://do/commit", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return new Response(res.body, { status: res.status, headers: res.headers });
 });
 
 // ── Root ─────────────────────────────────────────────────────────────────
