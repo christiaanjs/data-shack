@@ -538,6 +538,8 @@ app.post("/catalog/commit", requireAuth, async (c) => {
 // ── Load jobs endpoints ───────────────────────────────────────────────────
 
 const SAFE_TABLE_NAME = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
+const VALID_HTTP_METHODS = ["GET", "POST"] as const;
+const VALID_FORMATS = ["json", "ndjson", "csv", "parquet"] as const;
 
 app.get("/api/load-jobs", requireAuth, async (c) => {
   const jobs = await listLoadJobs(c.env.DB, c.get("userId"));
@@ -558,17 +560,37 @@ app.post("/api/load-jobs", requireAuth, async (c) => {
   if (typeof body.table_name !== "string" || !SAFE_TABLE_NAME.test(body.table_name)) {
     return c.json({ error: "table_name must match [a-zA-Z_][a-zA-Z0-9_]*" }, 400);
   }
-  const job = await insertLoadJob(c.env.DB, c.get("userId"), {
-    name: body.name,
-    credential_id: body.credential_id,
-    storage_backend_id: body.storage_backend_id,
-    table_name: body.table_name,
-    table_path: typeof body.table_path === "string" ? body.table_path : undefined,
-    http_path: typeof body.http_path === "string" ? body.http_path : undefined,
-    http_method: typeof body.http_method === "string" ? body.http_method : undefined,
-    format: typeof body.format === "string" ? body.format : undefined,
-    cron_schedule: typeof body.cron_schedule === "string" ? body.cron_schedule : undefined,
-  });
+  if (
+    body.http_method !== undefined &&
+    !VALID_HTTP_METHODS.includes(body.http_method as (typeof VALID_HTTP_METHODS)[number])
+  ) {
+    return c.json({ error: "http_method must be GET or POST" }, 400);
+  }
+  if (
+    body.format !== undefined &&
+    !VALID_FORMATS.includes(body.format as (typeof VALID_FORMATS)[number])
+  ) {
+    return c.json({ error: "format must be json, ndjson, csv, or parquet" }, 400);
+  }
+  let job: Awaited<ReturnType<typeof insertLoadJob>>;
+  try {
+    job = await insertLoadJob(c.env.DB, c.get("userId"), {
+      name: body.name,
+      credential_id: body.credential_id,
+      storage_backend_id: body.storage_backend_id,
+      table_name: body.table_name,
+      table_path: typeof body.table_path === "string" ? body.table_path : undefined,
+      http_path: typeof body.http_path === "string" ? body.http_path : undefined,
+      http_method: typeof body.http_method === "string" ? body.http_method : undefined,
+      format: typeof body.format === "string" ? body.format : undefined,
+      cron_schedule: typeof body.cron_schedule === "string" ? body.cron_schedule : undefined,
+    });
+  } catch (err) {
+    if (err instanceof Error && err.message.startsWith("Invalid cron_schedule")) {
+      return c.json({ error: err.message }, 400);
+    }
+    throw err;
+  }
   return c.json(job, 201);
 });
 
@@ -586,17 +608,37 @@ app.patch("/api/load-jobs/:id", requireAuth, async (c) => {
   if (typeof body.table_name !== "string" || !SAFE_TABLE_NAME.test(body.table_name)) {
     return c.json({ error: "table_name must match [a-zA-Z_][a-zA-Z0-9_]*" }, 400);
   }
-  const updated = await updateLoadJob(c.env.DB, c.get("userId"), c.req.param("id"), {
-    name: body.name,
-    credential_id: body.credential_id,
-    storage_backend_id: body.storage_backend_id,
-    table_name: body.table_name,
-    table_path: typeof body.table_path === "string" ? body.table_path : "",
-    http_path: typeof body.http_path === "string" ? body.http_path : "/",
-    http_method: typeof body.http_method === "string" ? body.http_method : "GET",
-    format: typeof body.format === "string" ? body.format : "ndjson",
-    cron_schedule: typeof body.cron_schedule === "string" ? body.cron_schedule : "0 * * * *",
-  });
+  if (
+    body.http_method !== undefined &&
+    !VALID_HTTP_METHODS.includes(body.http_method as (typeof VALID_HTTP_METHODS)[number])
+  ) {
+    return c.json({ error: "http_method must be GET or POST" }, 400);
+  }
+  if (
+    body.format !== undefined &&
+    !VALID_FORMATS.includes(body.format as (typeof VALID_FORMATS)[number])
+  ) {
+    return c.json({ error: "format must be json, ndjson, csv, or parquet" }, 400);
+  }
+  let updated: Awaited<ReturnType<typeof updateLoadJob>>;
+  try {
+    updated = await updateLoadJob(c.env.DB, c.get("userId"), c.req.param("id"), {
+      name: body.name,
+      credential_id: body.credential_id,
+      storage_backend_id: body.storage_backend_id,
+      table_name: body.table_name,
+      table_path: typeof body.table_path === "string" ? body.table_path : "",
+      http_path: typeof body.http_path === "string" ? body.http_path : "/",
+      http_method: typeof body.http_method === "string" ? body.http_method : "GET",
+      format: typeof body.format === "string" ? body.format : "ndjson",
+      cron_schedule: typeof body.cron_schedule === "string" ? body.cron_schedule : "0 * * * *",
+    });
+  } catch (err) {
+    if (err instanceof Error && err.message.startsWith("Invalid cron_schedule")) {
+      return c.json({ error: err.message }, 400);
+    }
+    throw err;
+  }
   if (!updated) return new Response("Not Found", { status: 404 });
   return c.json(updated);
 });

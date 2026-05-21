@@ -106,7 +106,7 @@ export function LoadJobsPanel({ workerBase, getAuthHeaders }: LoadJobsPanelProps
       }
       if (backendRes.ok) {
         const bd = (await backendRes.json()) as { backends: StorageBackendRow[] };
-        setBackends(bd.backends);
+        setBackends(bd.backends.filter((b) => b.type === "r2-bound" || b.type === "r2-s3compat"));
       }
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : "Load failed");

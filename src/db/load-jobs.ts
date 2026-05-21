@@ -77,7 +77,13 @@ export async function insertLoadJob(
   const httpMethod = data.http_method ?? "GET";
   const format = data.format ?? "ndjson";
   const tablePath = data.table_path ?? "";
-  const nextRunAt = new Cron(cronSchedule).nextRun()?.getTime() ?? null;
+  let cron: Cron;
+  try {
+    cron = new Cron(cronSchedule);
+  } catch {
+    throw new Error(`Invalid cron_schedule: ${cronSchedule}`);
+  }
+  const nextRunAt = cron.nextRun()?.getTime() ?? null;
 
   await db
     .prepare(
@@ -143,7 +149,13 @@ export async function updateLoadJob(
   },
 ): Promise<LoadJob | null> {
   const now = Date.now();
-  const nextRunAt = new Cron(data.cron_schedule).nextRun()?.getTime() ?? null;
+  let cron: Cron;
+  try {
+    cron = new Cron(data.cron_schedule);
+  } catch {
+    throw new Error(`Invalid cron_schedule: ${data.cron_schedule}`);
+  }
+  const nextRunAt = cron.nextRun()?.getTime() ?? null;
   const result = await db
     .prepare(
       `UPDATE load_jobs

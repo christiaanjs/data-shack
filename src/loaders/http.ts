@@ -55,21 +55,33 @@ export async function runHttpLoadJob(job: LoadJob, env: Env): Promise<{ uri: str
   let uri: string;
 
   if (backendRow.type === "r2-bound") {
-    const raw = JSON.parse(await decryptConfig(backendRow.encrypted_config, env.JWT_SECRET)) as {
-      bucket: string;
-    };
+    let raw: { bucket: string };
+    try {
+      raw = JSON.parse(await decryptConfig(backendRow.encrypted_config, env.JWT_SECRET)) as {
+        bucket: string;
+      };
+    } catch {
+      throw new Error(`Invalid storage backend config for: ${job.storage_backend_id}`);
+    }
     const relPath = `${tableDir}/${filename}`;
     const r2Body = await toFixedLengthBody(upstream);
     await env.R2.put(r2BoundKey(job.user_id, relPath), r2Body);
     uri = `r2://${raw.bucket}/${relPath}`;
   } else if (backendRow.type === "r2-s3compat") {
-    const raw = JSON.parse(await decryptConfig(backendRow.encrypted_config, env.JWT_SECRET)) as {
+    let raw: {
       endpoint: string;
       accessKeyId: string;
       secretAccessKey: string;
       bucket: string;
       region: string;
     };
+    try {
+      raw = JSON.parse(
+        await decryptConfig(backendRow.encrypted_config, env.JWT_SECRET),
+      ) as typeof raw;
+    } catch {
+      throw new Error(`Invalid storage backend config for: ${job.storage_backend_id}`);
+    }
     const key = `${tableDir}/${filename}`;
     const putBody = await toFixedLengthBody(upstream);
     const contentLength =

@@ -25,7 +25,7 @@ Requires: `wrangler` (or npx), `openssl`, `jq`.
 Before every commit, run all three checks from the repo root:
 
 ```bash
-npm test          # 43 vitest tests via @cloudflare/vitest-pool-workers
+npm test          # 136 vitest tests across 6 test files via @cloudflare/vitest-pool-workers
 npm run typecheck # tsc for worker + tsc -p test/tsconfig.json
 npm run lint      # biome check . (lint + format + import order)
 ```
@@ -56,13 +56,15 @@ They have separate `node_modules`, `package.json`, and `tsconfig.json`. The work
 2. All OAuth endpoints live in `src/auth/oauth.ts` via `oauthRouter`. The flow: `/authorize/:provider` → Google OAuth → `/oauth/callback` → exchange code → issue MCP auth code → redirect to client → client POSTs to `/token` → receives JWT + refresh token.
 3. Provider support is Google-only. Passing any other provider to `/authorize/:provider` returns `400 invalid_request`.
 
-**D1 query layer:** `src/db/queries.ts` for user/identity operations, `src/db/oauth.ts` for OAuth table operations. All SQL is in these files — no inline SQL elsewhere.
+**D1 query layer:** `src/db/queries.ts` for user/identity operations, `src/db/oauth.ts` for OAuth table operations, `src/db/settings.ts` for credentials/storage backends, `src/db/load-jobs.ts` for load job CRUD. All SQL is in these files — no inline SQL elsewhere.
 
 **User identity model:** Each user is their own tenant (no household concept). `oauth_identities` maps (provider, provider_id) → user. On login, the resolution order is: existing identity → link by verified email → create new user. Email is nullable on `users` — providers that don't return a verified email still work.
 
 **Token lifetimes:** Access tokens 1 hour (JWT), refresh tokens 30 days (stored as SHA-256 hashes in D1, rotated on every use).
 
-**Key D1 tables:** `users`, `oauth_identities`, `oauth_states`, `oauth_clients`, `oauth_codes`, `oauth_refresh_tokens`. All `expires_at` columns are Unix milliseconds (`Date.now()`).
+**Key D1 tables:** `users`, `oauth_identities`, `oauth_states`, `oauth_clients`, `oauth_codes`, `oauth_refresh_tokens`, `credentials`, `storage_backends`, `load_jobs`. All timestamp columns are Unix milliseconds (`Date.now()`).
+
+**Load jobs:** Cron-triggered HTTP→storage ETL jobs. The `scheduled()` handler queries D1 for due jobs and enqueues `{ jobId }` messages to `LOAD_JOB_QUEUE`. The `queue()` consumer fetches the job, runs `runHttpLoadJob` from `src/loaders/http.ts` (HTTP fetch → R2/S3 write → catalog commit), then updates `last_run_at`/`last_error`/`next_run_at` in D1. On failure, the job error is persisted and the message is retried (up to `max_retries = 3`). `POST /api/load-jobs/:id/trigger` enqueues directly for on-demand runs.
 
 ## Frontend architecture
 
@@ -113,9 +115,11 @@ npm test -- --reporter=verbose -t "test name substring"
 ## Adding new routes
 
 1. Add the handler to `src/index.ts` behind `requireAuth` for protected routes.
-2. Add any D1 queries to `src/db/queries.ts`.
+2. Add any D1 queries to a file in `src/db/` (e.g. `src/db/settings.ts` for credentials/backends, `src/db/load-jobs.ts` for load jobs).
 3. Add the `Env` binding in `src/types.ts` if a new binding is needed.
-4. Add corresponding tests in `test/oauth.test.ts` (or a new test file) — use the `SELF` export from `cloudflare:test` to make real HTTP requests against the worker.
+4. Add corresponding tests in a new `test/*.test.ts` file — use the `SELF` export from `cloudflare:test` to make real HTTP requests against the worker.
+
+**Worker export shape:** `src/index.ts` exports `{ fetch, scheduled, queue }`. The `scheduled()` handler runs the cron dispatcher; `queue()` is the Cloudflare Queues consumer for `LOAD_JOB_QUEUE`.
 
 ## Migrations
 
@@ -126,3 +130,11 @@ wrangler d1 migrations apply data-shack-db  # applies to production D1
 ```
 
 The `TEST_MIGRATIONS` binding in `vitest.config.ts` is populated from the `migrations/` directory at test startup — new migration files are picked up automatically.
+
+**Test files:**
+- `test/oauth.test.ts` — OAuth flow, auth middleware
+- `test/http-datasource.test.ts` — `http` credential type and `http-ds://` proxy
+- `test/storage.test.ts` — R2 and r2-s3compat URI resolution, storage backends CRUD
+- `test/catalog.test.ts` — Catalog DO: tables, snapshots, commits
+- `test/load-jobs.test.ts` — Load jobs CRUD, trigger endpoint, scheduler/consumer helpers
+- `test/loader.test.ts` — `runHttpLoadJob` unit tests (mocked fetch, both backend types)
