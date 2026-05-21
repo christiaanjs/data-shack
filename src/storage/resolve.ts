@@ -174,6 +174,10 @@ export function parseR2Uri(uri: string): { bucket: string; key: string } | null 
   return { bucket, key };
 }
 
+export function r2BoundKey(userId: string, relPath: string): string {
+  return `users/${userId}/${relPath}`;
+}
+
 export async function resolveUri(
   uri: string,
   env: Env,
@@ -194,7 +198,7 @@ export async function resolveUri(
       exp: now + (method === "PUT" ? 900 : 3600),
       jti: crypto.randomUUID(),
       b: parsed.bucket,
-      k: `users/${userId}/${parsed.key}`,
+      k: r2BoundKey(userId, parsed.key),
       method,
     },
     env.JWT_SECRET,

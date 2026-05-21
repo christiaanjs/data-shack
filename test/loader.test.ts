@@ -154,8 +154,11 @@ describe("runHttpLoadJob r2-bound", () => {
       const job = makeJob(credId, backendId, "r2_cl_tbl");
       const { uri } = await runHttpLoadJob(job, env);
 
-      expect(uri).toMatch(new RegExp(`^r2://data-shack-storage/${USER_ID}/`));
-      const key = uri.replace("r2://data-shack-storage/", "");
+      expect(uri).toMatch(/^r2:\/\/data-shack-storage\//);
+      expect(uri).not.toContain(USER_ID);
+      // resolveUri will prepend users/${userId}/ — verify the actual R2 key
+      const relPath = uri.replace("r2://data-shack-storage/", "");
+      const key = `users/${USER_ID}/${relPath}`;
       const obj = await env.R2.get(key);
       expect(obj).not.toBeNull();
       expect(await obj!.text()).toBe(BODY);
@@ -168,8 +171,11 @@ describe("runHttpLoadJob r2-bound", () => {
       const job = makeJob(credId, backendId, "r2_nocl_tbl");
       const { uri } = await runHttpLoadJob(job, env);
 
-      expect(uri).toMatch(new RegExp(`^r2://data-shack-storage/${USER_ID}/`));
-      const key = uri.replace("r2://data-shack-storage/", "");
+      expect(uri).toMatch(/^r2:\/\/data-shack-storage\//);
+      expect(uri).not.toContain(USER_ID);
+      // resolveUri will prepend users/${userId}/ — verify the actual R2 key
+      const relPath = uri.replace("r2://data-shack-storage/", "");
+      const key = `users/${USER_ID}/${relPath}`;
       const obj = await env.R2.get(key);
       expect(obj).not.toBeNull();
       expect(await obj!.text()).toBe(BODY);
@@ -182,7 +188,8 @@ describe("runHttpLoadJob r2-bound", () => {
       const job = makeJob(credId, backendId, "accounts", "financial/accounts");
       const { uri } = await runHttpLoadJob(job, env);
 
-      expect(uri).toContain(`/${USER_ID}/financial/accounts/`);
+      expect(uri).toContain("/financial/accounts/");
+      expect(uri).not.toContain(USER_ID);
     }),
   );
 });

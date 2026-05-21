@@ -2,7 +2,7 @@ import { decryptConfig } from "../crypto.ts";
 import type { LoadJob } from "../db/load-jobs.ts";
 import { getCredentialConfig, getStorageBackendConfig } from "../db/settings.ts";
 import { decryptHttpConfig, resolveHeaderTemplates } from "../http-config.ts";
-import { signS3Request } from "../storage/resolve.ts";
+import { r2BoundKey, signS3Request } from "../storage/resolve.ts";
 import type { Env } from "../types.ts";
 
 async function toFixedLengthBody(response: Response): Promise<ReadableStream | ArrayBuffer> {
@@ -58,10 +58,10 @@ export async function runHttpLoadJob(job: LoadJob, env: Env): Promise<{ uri: str
     const raw = JSON.parse(await decryptConfig(backendRow.encrypted_config, env.JWT_SECRET)) as {
       bucket: string;
     };
-    const key = `${job.user_id}/${tableDir}/${filename}`;
+    const relPath = `${tableDir}/${filename}`;
     const r2Body = await toFixedLengthBody(upstream);
-    await env.R2.put(key, r2Body);
-    uri = `r2://${raw.bucket}/${key}`;
+    await env.R2.put(r2BoundKey(job.user_id, relPath), r2Body);
+    uri = `r2://${raw.bucket}/${relPath}`;
   } else if (backendRow.type === "r2-s3compat") {
     const raw = JSON.parse(await decryptConfig(backendRow.encrypted_config, env.JWT_SECRET)) as {
       endpoint: string;
