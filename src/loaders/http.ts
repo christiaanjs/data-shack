@@ -5,6 +5,16 @@ import { decryptHttpConfig, resolveHeaderTemplates } from "../http-config.ts";
 import { signS3Request } from "../storage/resolve.ts";
 import type { Env } from "../types.ts";
 
+async function toFixedLengthBody(response: Response): Promise<ReadableStream | ArrayBuffer> {
+  const len = response.headers.get("Content-Length");
+  if (len && response.body) {
+    const fixed = new FixedLengthStream(Number(len));
+    response.body.pipeTo(fixed.writable);
+    return fixed.readable;
+  }
+  return response.arrayBuffer();
+}
+
 export async function runHttpLoadJob(job: LoadJob, env: Env): Promise<{ uri: string }> {
   // 1. Fetch and decrypt HTTP credential
   const credRow = await getCredentialConfig(env.DB, job.credential_id, job.user_id);
@@ -47,7 +57,8 @@ export async function runHttpLoadJob(job: LoadJob, env: Env): Promise<{ uri: str
     const raw = JSON.parse(await decryptConfig(backendRow.encrypted_config, env.JWT_SECRET)) as {
       bucket: string;
     };
-    await env.R2.put(key, upstream.body);
+    const r2Body = await toFixedLengthBody(upstream);
+    await env.R2.put(key, r2Body);
     uri = `r2://${raw.bucket}/${key}`;
   } else if (backendRow.type === "r2-s3compat") {
     const raw = JSON.parse(await decryptConfig(backendRow.encrypted_config, env.JWT_SECRET)) as {
@@ -57,19 +68,9 @@ export async function runHttpLoadJob(job: LoadJob, env: Env): Promise<{ uri: str
       bucket: string;
       region: string;
     };
-    const upstreamLength = upstream.headers.get("Content-Length");
-    let putBody: ReadableStream | ArrayBuffer;
-    let contentLength: string;
-    if (upstreamLength && upstream.body) {
-      const fixed = new FixedLengthStream(Number(upstreamLength));
-      upstream.body.pipeTo(fixed.writable);
-      putBody = fixed.readable;
-      contentLength = upstreamLength;
-    } else {
-      const buf = await upstream.arrayBuffer();
-      putBody = buf;
-      contentLength = String(buf.byteLength);
-    }
+    const putBody = await toFixedLengthBody(upstream);
+    const contentLength =
+      putBody instanceof ArrayBuffer ? String(putBody.byteLength) : upstream.headers.get("Content-Length")!;
     const { url: s3Url, headers: s3Headers } = await signS3Request({
       method: "PUT",
       endpoint: raw.endpoint,

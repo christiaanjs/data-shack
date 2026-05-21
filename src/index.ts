@@ -614,12 +614,12 @@ export default {
           msg.ack();
           return;
         }
-        let lastError: string | undefined;
         try {
           await runHttpLoadJob(job, env);
         } catch (err) {
-          lastError = String(err);
+          const lastError = String(err);
           console.error(`Load job ${job.id} (${job.name}) failed:`, err);
+          await updateLoadJobOutcome(env.DB, job.id, Date.now(), job.next_run_at, lastError);
           msg.retry();
           return;
         }
