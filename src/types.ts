@@ -19,4 +19,5 @@ export interface Env {
   ALLOWED_ORIGIN: string;
   ALLOW_ORIGIN_SUBDOMAINS: string;
   DEFAULT_OAUTH_PROVIDER?: string;
+  MAX_PAGINATION_PAGES?: string;
 }

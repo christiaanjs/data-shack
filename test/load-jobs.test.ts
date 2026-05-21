@@ -420,6 +420,178 @@ describe("POST /api/load-jobs/:id/trigger", () => {
   });
 });
 
+// ── ETL config (date_range_config / pagination_config) ───────────────────
+
+describe("load job ETL config", () => {
+  it("stores and returns date_range_config on create", async () => {
+    const credId = await createCredential();
+    const sbId = await createBackend();
+    const dateRangeConfig = {
+      param_from: "start",
+      param_to: "end",
+      format: "iso_date",
+      lookback_days: 7,
+    };
+    const res = await SELF.fetch("http://localhost/api/load-jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({
+        name: "ETL date job",
+        credential_id: credId,
+        storage_backend_id: sbId,
+        table_name: "date_tbl",
+        date_range_config: dateRangeConfig,
+      }),
+    });
+    expect(res.status).toBe(201);
+    const job = (await res.json()) as { date_range_config: string | null };
+    expect(job.date_range_config).not.toBeNull();
+    expect(JSON.parse(job.date_range_config!)).toMatchObject(dateRangeConfig);
+  });
+
+  it("stores and returns pagination_config on create", async () => {
+    const credId = await createCredential();
+    const sbId = await createBackend();
+    const paginationConfig = {
+      type: "cursor",
+      cursor_param: "cursor",
+      cursor_path: "cursor.next",
+      data_path: "items",
+    };
+    const res = await SELF.fetch("http://localhost/api/load-jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({
+        name: "ETL paged job",
+        credential_id: credId,
+        storage_backend_id: sbId,
+        table_name: "paged_tbl",
+        format: "ndjson",
+        pagination_config: paginationConfig,
+      }),
+    });
+    expect(res.status).toBe(201);
+    const job = (await res.json()) as { pagination_config: string | null };
+    expect(job.pagination_config).not.toBeNull();
+    expect(JSON.parse(job.pagination_config!)).toMatchObject(paginationConfig);
+  });
+
+  it("returns 400 for invalid date_range_config (missing param_from)", async () => {
+    const credId = await createCredential();
+    const sbId = await createBackend();
+    const res = await SELF.fetch("http://localhost/api/load-jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({
+        name: "bad date",
+        credential_id: credId,
+        storage_backend_id: sbId,
+        table_name: "bad_date_tbl",
+        date_range_config: { param_to: "end", format: "iso", lookback_days: 7 },
+      }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("returns 400 for invalid date_range_config (invalid format)", async () => {
+    const credId = await createCredential();
+    const sbId = await createBackend();
+    const res = await SELF.fetch("http://localhost/api/load-jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({
+        name: "bad date fmt",
+        credential_id: credId,
+        storage_backend_id: sbId,
+        table_name: "bad_fmt_tbl",
+        date_range_config: {
+          param_from: "start",
+          param_to: "end",
+          format: "epoch",
+          lookback_days: 7,
+        },
+      }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("returns 400 for invalid pagination_config (wrong type)", async () => {
+    const credId = await createCredential();
+    const sbId = await createBackend();
+    const res = await SELF.fetch("http://localhost/api/load-jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({
+        name: "bad page",
+        credential_id: credId,
+        storage_backend_id: sbId,
+        table_name: "bad_page_tbl",
+        pagination_config: { type: "offset", cursor_param: "p", cursor_path: "next" },
+      }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("returns 400 when pagination_config used with csv format", async () => {
+    const credId = await createCredential();
+    const sbId = await createBackend();
+    const res = await SELF.fetch("http://localhost/api/load-jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({
+        name: "csv page",
+        credential_id: credId,
+        storage_backend_id: sbId,
+        table_name: "csv_page_tbl",
+        format: "csv",
+        pagination_config: { type: "cursor", cursor_param: "cursor", cursor_path: "next" },
+      }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("PATCH clears configs when omitted", async () => {
+    const credId = await createCredential();
+    const sbId = await createBackend();
+    const createRes = await SELF.fetch("http://localhost/api/load-jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({
+        name: "Clear Config Job",
+        credential_id: credId,
+        storage_backend_id: sbId,
+        table_name: "clr_tbl",
+        date_range_config: {
+          param_from: "start",
+          param_to: "end",
+          format: "iso",
+          lookback_days: 7,
+        },
+      }),
+    });
+    const { id } = (await createRes.json()) as { id: string };
+
+    const patchRes = await SELF.fetch(`http://localhost/api/load-jobs/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({
+        name: "Clear Config Job",
+        credential_id: credId,
+        storage_backend_id: sbId,
+        table_name: "clr_tbl",
+        // no date_range_config → should be cleared to null
+      }),
+    });
+    expect(patchRes.status).toBe(200);
+    const updated = (await patchRes.json()) as {
+      date_range_config: string | null;
+      pagination_config: string | null;
+    };
+    expect(updated.date_range_config).toBeNull();
+    expect(updated.pagination_config).toBeNull();
+  });
+});
+
 // ── Scheduler / D1 path ───────────────────────────────────────────────────
 
 describe("scheduler and outcome tracking", () => {
