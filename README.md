@@ -17,7 +17,9 @@ A personal data integration platform built on Cloudflare that brings your data t
 | `http` credential type: configurable headers with `{{variable}}` templates | ✅ Done |
 | HTTP data source proxy: `http-ds://` URI scheme + token endpoint for DuckDB | ✅ Done |
 | Settings test dialog: call any HTTP data source path and see the raw response | ✅ Done |
-| Catalog Durable Object | Not started |
+| Catalog Durable Object: tables, snapshots, commits; per-user DO isolation | ✅ Done |
+| Catalog UI: commit snapshots, edit URI/format, URI convention docs | ✅ Done |
+| Browser auto-registers DuckDB views from catalog on startup | ✅ Done |
 | Session Durable Object + MCP server | Not started |
 | ETL workers (Akahu, Google Sheets) | Not started |
 | Dashboarding platform | Not started |
@@ -60,6 +62,28 @@ wrangler r2 bucket cors set <bucket-name> --file r2-cors.json
 
 The `POST /api/storage/resolve` endpoint handles both read and write URI resolution via a `method: "GET" | "PUT"` field per URI — no separate endpoint needed.
 
+### Catalog: tracking and querying tables
+
+The **Catalog** tab lets you register files in object storage as named tables that DuckDB automatically sees on startup.
+
+1. Go to the **Catalog** tab and fill in the commit form:
+   - **Table name** — e.g. `transactions`
+   - **URI** — e.g. `r2://data-shack-storage/transactions/2026-05.parquet`
+   - **Storage backend** — the backend ID from Settings (e.g. `primary-r2`)
+   - **Format** — leave as Auto to infer from the file extension, or pick explicitly if the extension is misleading (e.g. a `.json` file that is actually NDJSON)
+
+2. The URI convention for bound R2 storage:
+   - `r2://bucket-name/path/to/file.parquet` — the bucket name is a required placeholder (use the real bucket name as a convention). Everything **after the first slash** is the file path within your user namespace, so `r2://bucket/folder/file.parquet` resolves to `users/<you>/folder/file.parquet` in the bucket.
+   - `r2-s3compat://backend-id/path/to/file.parquet` — use the backend ID shown in Settings → Storage Backends.
+
+3. Open the **Query** tab. The catalog is loaded automatically — registered tables appear as badges and are available as DuckDB views:
+   ```sql
+   SELECT * FROM transactions LIMIT 100
+   ```
+   Tables with unresolvable URIs (missing files, wrong backend) show a ⚠ badge but don't block other tables from loading.
+
+4. To correct a committed snapshot, click **Edit** on its row in the Catalog tab to update the URI or format in-place.
+
 ### Querying HTTP APIs (Akahu, etc.)
 
 External HTTP APIs can be queried directly from DuckDB using the `http` credential type and the `http-ds://` URI scheme:
@@ -85,7 +109,7 @@ External HTTP APIs can be queried directly from DuckDB using the `http` credenti
    ```
    The worker resolves the URI to a short-lived signed proxy URL. DuckDB fetches through the Worker, which injects the configured auth headers before forwarding to the API.
 
-The **Settings** tab also stores storage backend configs (encrypted in D1). The `r2-s3compat` backend type is now fully dispatched — both read and write URI resolution looks up config from D1 and signs requests with SigV4 accordingly. The `r2://` backend uses the Worker's bound R2 binding directly (no D1 lookup needed at resolve time). Full dispatch for other backend types (`s3`, `gcs`, `azure`) will be wired in Stage 3 when the catalog DO ties snapshot URIs to specific backend IDs.
+The **Settings** tab also stores storage backend configs (encrypted in D1). The `r2-s3compat` backend type is fully dispatched — both read and write URI resolution looks up config from D1 and signs requests with SigV4 accordingly. The `r2://` backend uses the Worker's bound R2 binding directly (no D1 lookup needed at resolve time). Full dispatch for `s3`, `gcs`, and `azure` backend types is deferred to a later stage.
 
 ## Architecture Overview
 
@@ -121,13 +145,13 @@ For the primary R2 backend, ETL Workers use the native R2 Worker binding directl
 
 The catalog DO is the source of truth for all warehouse metadata. It holds a SQLite database with:
 
-- `tables` — table definitions and schemas
-- `snapshots` — every storage URI that constitutes a table, with backend ID, access mode, row count, format, and timestamp
+- `tables` — table definitions (name, description, created_at)
+- `snapshots` — every storage URI that constitutes a table, with backend ID, access mode, format, and timestamp
 - `commits` — a log of every change, enabling time-travel queries
-- `jobs` — the pending/claimed/done queue for transform jobs
-- `triggers` — the mapping from input tables to downstream transform jobs
+- `jobs` — the pending/claimed/done queue for transform jobs *(deferred to Stage 7)*
+- `triggers` — the mapping from input tables to downstream transform jobs *(deferred to Stage 7)*
 
-All writes to the catalog are processed single-threadedly inside the DO isolate, eliminating race conditions between concurrent ETL Workers. After every commit, the DO broadcasts a notification to all connected browser tabs over WebSocket.
+Each user gets their own DO instance, isolated by user ID. All writes are processed single-threadedly inside the DO isolate, eliminating race conditions between concurrent ETL Workers. After every commit, the DO will broadcast a notification to all connected browser tabs over WebSocket *(deferred to Stage 5)*.
 
 This is a distinct class from the session DO. The catalog DO holds persistent state that outlives any browser session. The session DO is ephemeral — it exists only to route MCP queries to an active browser tab.
 

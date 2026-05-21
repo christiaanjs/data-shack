@@ -11,12 +11,14 @@ Each stage produces something functional and testable independently. Stages 1–
 | Stage 2 (remainder) | Credential storage, storage backends, settings UI | ✅ Done |
 | HTTP data source | `http` credential type + `http-ds://` URI scheme + test UI | ✅ Done |
 | Storage write path | `COPY TO 'r2://…'` and `COPY TO 'r2-s3compat://…'` from DuckDB WASM | ✅ Done |
-| Stage 3 | Catalog DO | Not started |
+| Stage 3 | Catalog DO | ✅ Done |
 | Stage 4–10 | See below | Not started |
 
-**Note on Stage 1 + Stage 2 storage resolution:** The `POST /api/storage/resolve` endpoint handles both read (`method: "GET"`) and write (`method: "PUT"`) URI resolution in a single call. `r2://` read/write is fully working against the bound R2 bucket. `r2-s3compat://` read/write is fully working — resolution looks up backend config from D1 and signs requests with SigV4; for writes the worker returns S3 credentials so DuckDB can write natively via its S3 httpfs (requires a CORS policy on the R2 bucket — see `r2-cors.json`). For `r2://` URIs the bucket name is validated syntactically but not matched against a configured backend row — full dispatch for `s3`, `gcs`, and `azure` backends will be wired in Stage 3 when catalog snapshot records tie URIs to specific backend IDs.
+**Note on Stage 1 + Stage 2 storage resolution:** The `POST /api/storage/resolve` endpoint handles both read (`method: "GET"`) and write (`method: "PUT"`) URI resolution in a single call. `r2://` read/write is fully working against the bound R2 bucket. `r2-s3compat://` read/write is fully working — resolution looks up backend config from D1 and signs requests with SigV4; for writes the worker returns S3 credentials so DuckDB can write natively via its S3 httpfs (requires a CORS policy on the R2 bucket — see `r2-cors.json`). For `r2://` URIs the bucket name is validated syntactically but not matched against a configured backend row — full dispatch for `s3`, `gcs`, and `azure` backends is deferred to a later stage.
 
 **Note on HTTP data source (direct query alternative to Stage 4 ETL):** Rather than building the Akahu ETL worker first (Stage 4), a direct-query path was implemented that allows DuckDB to read from HTTP APIs in real time. A generic `http` credential type stores a base URL, configurable headers (with `{{variable}}` template interpolation), and variables in D1. The `http-ds://credentialId/path` URI scheme plugs into the existing `POST /api/storage/resolve` pipeline — DuckDB queries like `SELECT * FROM read_json('http-ds://cred_xxx/accounts') LIMIT 10` work transparently. The Worker signs a short-lived token that DuckDB uses to fetch through the proxy, which decrypts credentials and injects auth headers at request time. A test dialog in the Settings UI lets you call any HTTP data source path and see the raw response. This replaces the separate `akahu` credential type and covers the Akahu use case without requiring a cron-triggered ETL worker or catalog DO.
+
+**Note on Stage 3 (Catalog DO):** The core catalog is fully implemented: `CatalogDO` with SQLite schema (`tables`, `snapshots`, `commits`), four Worker endpoints (`GET /catalog/tables`, `GET /catalog/snapshots/:table`, `POST /catalog/commit`, `PATCH /catalog/snapshots/:id`), browser auto-registration of DuckDB views from the catalog on startup, and a full Catalog management UI for committing snapshots and editing existing ones. The `format` field on snapshots is supported, with an `ALTER TABLE ADD COLUMN` migration applied in the DO constructor for existing instances. The `jobs`/`triggers` tables and WebSocket broadcast-on-commit are deferred to Stages 5 and 7.
 
 Auth was built first to establish the security boundary before any data flows through the system. All subsequent stages build on top of this foundation — see [Stage 2](#stage-2--auth-and-credential-storage) for what's done and what remains.
 
@@ -66,25 +68,33 @@ Implemented as a standalone Cloudflare Worker with D1, ahead of Stage 1, to esta
 
 ---
 
-## Stage 3 — Catalog DO
+## Stage 3 — Catalog DO ✅ Done
 
 **Goal:** The browser discovers what tables exist rather than being told.
 
-- Catalog Durable Object with SQLite schema: `tables`, `snapshots`, `commits`
-- Snapshots store fully-qualified URIs rather than bare R2 keys, plus a `storage_backend` ID and `access_mode`:
+### ✅ Implemented
+
+- `CatalogDO` with SQLite schema: `tables`, `snapshots`, `commits`; per-user DO isolation via `env.CATALOG.idFromName(userId)`
+- Snapshot records store fully-qualified URIs, `storage_backend` ID, `access_mode`, optional `format`, and timestamp:
   ```json
   {
     "uri": "r2://my-bucket/transactions/staging/akahu-2026-05-19.ndjson",
     "storageBackend": "primary-r2",
-    "accessMode": "signed"
+    "accessMode": "signed",
+    "format": "ndjson"
   }
   ```
-- Worker proxy storage resolver endpoint: receives a URI, looks up the backend type from `storage_backends` in D1, returns a readable HTTPS URL (signed URL for R2/S3/GCS, SAS token for Azure, passthrough for public HTTPS)
-- Worker proxy endpoints: `GET /catalog/tables`, `GET /catalog/snapshots/:table`, `POST /catalog/commit`
-- Manually insert a table definition and snapshot URI pointing at the Stage 1 file
-- Browser loads the table list from the catalog on startup; query runner resolves table URIs to HTTPS URLs via the Worker proxy, registers DuckDB views, then runs SQL
+- Worker endpoints: `GET /catalog/tables`, `GET /catalog/snapshots/:table`, `POST /catalog/commit`, `PATCH /catalog/snapshots/:id`
+- `PATCH` supports updating `uri` and/or `format` on an existing snapshot (e.g. to correct a wrong URI or override auto-detected format)
+- Browser (QueryPanel) loads the table list from the catalog on startup; registers DuckDB views from snapshot URIs, marks failed registrations with a ⚠ badge rather than blocking the whole load
+- Catalog management UI (CatalogPanel): URI convention callout, commit form with backend autocomplete, inline edit for URI and format per snapshot
+- `format` column added via `ALTER TABLE ADD COLUMN` in the DO constructor (idempotent migration for existing instances)
+- 10 integration tests in `test/catalog.test.ts`
 
-**Test:** Catalog DO persists across Worker restarts. View registration correctly resolves URIs to readable URLs. Mixed-format snapshots (NDJSON and Parquet) both work as views. Swapping a snapshot's backend ID in D1 and re-resolving returns a URL from the new backend.
+### Deferred
+
+- `jobs` and `triggers` tables (Stage 7 — transform job queue)
+- WebSocket broadcast on commit (Stage 5 — live sync)
 
 ---
 
