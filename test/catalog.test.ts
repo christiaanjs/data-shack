@@ -157,6 +157,43 @@ describe("GET /catalog/snapshots/:table", () => {
     expect(data.snapshots[0]?.access_mode).toBe("signed");
   });
 
+  it("stores and returns an explicit format field", async () => {
+    await SELF.fetch("http://localhost/catalog/commit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({
+        table: "typed_table",
+        uri: "r2://data-shack-storage/data/balances.json",
+        storageBackend: "primary-r2",
+        format: "ndjson",
+      }),
+    });
+
+    const res = await SELF.fetch("http://localhost/catalog/snapshots/typed_table", {
+      headers: DEV_HEADERS,
+    });
+    const data = (await res.json()) as { snapshots: Array<{ format: string | null }> };
+    expect(data.snapshots[0]?.format).toBe("ndjson");
+  });
+
+  it("stores null format when not specified", async () => {
+    await SELF.fetch("http://localhost/catalog/commit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({
+        table: "untyped_table",
+        uri: "r2://data-shack-storage/data/file.parquet",
+        storageBackend: "primary-r2",
+      }),
+    });
+
+    const res = await SELF.fetch("http://localhost/catalog/snapshots/untyped_table", {
+      headers: DEV_HEADERS,
+    });
+    const data = (await res.json()) as { snapshots: Array<{ format: string | null }> };
+    expect(data.snapshots[0]?.format).toBeNull();
+  });
+
   it("can look up snapshots by table id as well as name", async () => {
     const commitRes = await SELF.fetch("http://localhost/catalog/commit", {
       method: "POST",

@@ -9,6 +9,7 @@ interface CommitBody {
   uri: string;
   storageBackend: string;
   accessMode?: string;
+  format?: string;
   message?: string;
 }
 
@@ -42,6 +43,13 @@ export class CatalogDO implements DurableObject {
         message      TEXT
       );
     `);
+
+    // Add format column to existing instances that predate this field.
+    try {
+      ctx.storage.sql.exec("ALTER TABLE snapshots ADD COLUMN format TEXT");
+    } catch {
+      // Column already exists — nothing to do.
+    }
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -81,7 +89,7 @@ export class CatalogDO implements DurableObject {
 
     const snapshots = this.ctx.storage.sql
       .exec(
-        `SELECT id, table_id, uri, storage_backend, access_mode, created_at
+        `SELECT id, table_id, uri, storage_backend, access_mode, format, created_at
          FROM snapshots WHERE table_id = ? ORDER BY created_at DESC`,
         table.id,
       )
@@ -90,7 +98,7 @@ export class CatalogDO implements DurableObject {
   }
 
   private commit(body: CommitBody): Response {
-    const { table, uri, storageBackend, accessMode = "signed", message } = body;
+    const { table, uri, storageBackend, accessMode = "signed", format, message } = body;
 
     if (
       typeof table !== "string" ||
@@ -120,12 +128,13 @@ export class CatalogDO implements DurableObject {
 
     const snapshotId = genId("snap");
     this.ctx.storage.sql.exec(
-      "INSERT INTO snapshots (id, table_id, uri, storage_backend, access_mode, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      "INSERT INTO snapshots (id, table_id, uri, storage_backend, access_mode, format, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
       snapshotId,
       tableId,
       uri,
       storageBackend,
       accessMode,
+      typeof format === "string" ? format : null,
       now,
     );
 

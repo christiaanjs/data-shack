@@ -15,13 +15,22 @@ interface CatalogSnapshot {
   uri: string;
   storage_backend: string;
   access_mode: string;
+  format: string | null;
   created_at: number;
 }
 
-function readerFn(uri: string): string {
-  if (uri.endsWith(".parquet")) return "read_parquet";
-  if (uri.endsWith(".csv")) return "read_csv_auto";
-  return "read_json";
+function readerFn(uri: string, format?: string | null): string {
+  const fmt = format ?? inferFormat(uri);
+  if (fmt === "parquet") return "read_parquet";
+  if (fmt === "csv") return "read_csv_auto";
+  return "read_json"; // ndjson, jsonl, json, and unknown
+}
+
+function inferFormat(uri: string): string {
+  if (uri.endsWith(".parquet")) return "parquet";
+  if (uri.endsWith(".csv")) return "csv";
+  if (uri.endsWith(".ndjson") || uri.endsWith(".jsonl")) return "ndjson";
+  return "json";
 }
 
 interface QueryPanelProps {
@@ -143,7 +152,7 @@ export function QueryPanel({ workerBase, getAuthHeaders }: QueryPanelProps) {
       for (const { table, snapshot } of withSnaps) {
         const url = urls[snapshot.uri];
         if (!url) continue;
-        const reader = readerFn(snapshot.uri);
+        const reader = readerFn(snapshot.uri, snapshot.format);
         try {
           await runQuery(
             db,
