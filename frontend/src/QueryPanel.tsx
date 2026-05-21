@@ -151,7 +151,10 @@ export function QueryPanel({ workerBase, getAuthHeaders }: QueryPanelProps) {
       const failed: string[] = [];
       for (const { table, snapshot } of withSnaps) {
         const url = urls[snapshot.uri];
-        if (!url) continue;
+        if (!url) {
+          failed.push(table.name);
+          continue;
+        }
         const reader = readerFn(snapshot.uri, snapshot.format);
         try {
           await runQuery(
