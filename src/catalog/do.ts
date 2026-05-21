@@ -124,10 +124,9 @@ export class CatalogDO implements DurableObject {
     }
 
     if (!SAFE_TABLE_NAME.test(table)) {
-      return new Response(
-        "Bad Request: table name must match [a-zA-Z_][a-zA-Z0-9_]*",
-        { status: 400 },
-      );
+      return new Response("Bad Request: table name must match [a-zA-Z_][a-zA-Z0-9_]*", {
+        status: 400,
+      });
     }
 
     const now = Date.now();
