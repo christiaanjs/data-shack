@@ -23,6 +23,7 @@ interface LoadJob {
   credential_id: string;
   storage_backend_id: string;
   table_name: string;
+  table_path: string;
   http_path: string;
   http_method: string;
   format: string;
@@ -52,6 +53,7 @@ export function LoadJobsPanel({ workerBase, getAuthHeaders }: LoadJobsPanelProps
   const [formCredId, setFormCredId] = useState("");
   const [formSbId, setFormSbId] = useState("");
   const [formTable, setFormTable] = useState("");
+  const [formTablePath, setFormTablePath] = useState("");
   const [formPath, setFormPath] = useState("/");
   const [formMethod, setFormMethod] = useState("GET");
   const [formFormat, setFormFormat] = useState("ndjson");
@@ -135,6 +137,7 @@ export function LoadJobsPanel({ workerBase, getAuthHeaders }: LoadJobsPanelProps
           credential_id: formCredId,
           storage_backend_id: formSbId,
           table_name: formTable,
+          table_path: formTablePath || undefined,
           http_path: formPath,
           http_method: formMethod,
           format: formFormat,
@@ -148,6 +151,7 @@ export function LoadJobsPanel({ workerBase, getAuthHeaders }: LoadJobsPanelProps
       setShowCreate(false);
       setFormName("");
       setFormTable("");
+      setFormTablePath("");
       setFormPath("/");
       setFormCron("0 * * * *");
       await fetchAll();
@@ -211,6 +215,23 @@ export function LoadJobsPanel({ workerBase, getAuthHeaders }: LoadJobsPanelProps
                     value={formTable}
                     onInput={(e) => setFormTable((e.target as HTMLInputElement).value)}
                   />
+                </fieldset>
+                <fieldset class="fieldset">
+                  <legend class="fieldset-legend">
+                    Storage path <span class="text-base-content/40 font-normal">(optional)</span>
+                  </legend>
+                  <input
+                    type="text"
+                    class="input input-bordered input-sm w-full font-mono"
+                    value={formTablePath}
+                    onInput={(e) => setFormTablePath((e.target as HTMLInputElement).value)}
+                    placeholder={formTable || "tables/accounts"}
+                  />
+                  <p class="text-xs text-base-content/50 mt-1">
+                    Directory for files within the storage backend. Defaults to the table name. For
+                    r2-bound, this is relative to your user namespace; for r2-s3compat, relative to
+                    the bucket root.
+                  </p>
                 </fieldset>
                 <fieldset class="fieldset">
                   <legend class="fieldset-legend">HTTP Credential</legend>

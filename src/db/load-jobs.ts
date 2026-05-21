@@ -7,6 +7,7 @@ export interface LoadJob {
   credential_id: string;
   storage_backend_id: string;
   table_name: string;
+  table_path: string;
   http_path: string;
   http_method: string;
   format: string;
@@ -62,6 +63,7 @@ export async function insertLoadJob(
     credential_id: string;
     storage_backend_id: string;
     table_name: string;
+    table_path?: string;
     http_path?: string;
     http_method?: string;
     format?: string;
@@ -74,15 +76,16 @@ export async function insertLoadJob(
   const httpPath = data.http_path ?? "/";
   const httpMethod = data.http_method ?? "GET";
   const format = data.format ?? "ndjson";
+  const tablePath = data.table_path ?? "";
   const nextRunAt = new Cron(cronSchedule).nextRun()?.getTime() ?? null;
 
   await db
     .prepare(
       `INSERT INTO load_jobs
-        (id, user_id, name, credential_id, storage_backend_id, table_name,
+        (id, user_id, name, credential_id, storage_backend_id, table_name, table_path,
          http_path, http_method, format, cron_schedule, next_run_at,
          last_run_at, last_error, enabled, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 1, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 1, ?, ?)`,
     )
     .bind(
       id,
@@ -91,6 +94,7 @@ export async function insertLoadJob(
       data.credential_id,
       data.storage_backend_id,
       data.table_name,
+      tablePath,
       httpPath,
       httpMethod,
       format,
@@ -108,6 +112,7 @@ export async function insertLoadJob(
     credential_id: data.credential_id,
     storage_backend_id: data.storage_backend_id,
     table_name: data.table_name,
+    table_path: tablePath,
     http_path: httpPath,
     http_method: httpMethod,
     format,

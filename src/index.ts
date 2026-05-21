@@ -562,6 +562,7 @@ app.post("/api/load-jobs", requireAuth, async (c) => {
     credential_id: body.credential_id,
     storage_backend_id: body.storage_backend_id,
     table_name: body.table_name,
+    table_path: typeof body.table_path === "string" ? body.table_path : undefined,
     http_path: typeof body.http_path === "string" ? body.http_path : undefined,
     http_method: typeof body.http_method === "string" ? body.http_method : undefined,
     format: typeof body.format === "string" ? body.format : undefined,

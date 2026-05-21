@@ -40,10 +40,11 @@ export async function runHttpLoadJob(job: LoadJob, env: Env): Promise<{ uri: str
     throw new Error("Upstream response has no body");
   }
 
-  // 4. Compute destination key
+  // 4. Compute destination key (backend-specific namespacing applied below)
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
   const ext = job.format === "ndjson" ? "ndjson" : job.format;
-  const key = `users/${job.user_id}/${job.table_name}/load-${timestamp}.${ext}`;
+  const tableDir = job.table_path.trim() || job.table_name;
+  const filename = `load-${timestamp}.${ext}`;
 
   // 5. Fetch and decrypt storage backend, then write
   const backendRow = await getStorageBackendConfig(env.DB, job.storage_backend_id, job.user_id);
@@ -57,6 +58,7 @@ export async function runHttpLoadJob(job: LoadJob, env: Env): Promise<{ uri: str
     const raw = JSON.parse(await decryptConfig(backendRow.encrypted_config, env.JWT_SECRET)) as {
       bucket: string;
     };
+    const key = `${job.user_id}/${tableDir}/${filename}`;
     const r2Body = await toFixedLengthBody(upstream);
     await env.R2.put(key, r2Body);
     uri = `r2://${raw.bucket}/${key}`;
@@ -68,9 +70,12 @@ export async function runHttpLoadJob(job: LoadJob, env: Env): Promise<{ uri: str
       bucket: string;
       region: string;
     };
+    const key = `${tableDir}/${filename}`;
     const putBody = await toFixedLengthBody(upstream);
     const contentLength =
-      putBody instanceof ArrayBuffer ? String(putBody.byteLength) : upstream.headers.get("Content-Length")!;
+      putBody instanceof ArrayBuffer
+        ? String(putBody.byteLength)
+        : upstream.headers.get("Content-Length")!;
     const { url: s3Url, headers: s3Headers } = await signS3Request({
       method: "PUT",
       endpoint: raw.endpoint,
