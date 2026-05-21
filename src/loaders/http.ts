@@ -57,7 +57,19 @@ export async function runHttpLoadJob(job: LoadJob, env: Env): Promise<{ uri: str
       bucket: string;
       region: string;
     };
-    const bodyBuffer = await upstream.arrayBuffer();
+    const upstreamLength = upstream.headers.get("Content-Length");
+    let putBody: ReadableStream | ArrayBuffer;
+    let contentLength: string;
+    if (upstreamLength && upstream.body) {
+      const fixed = new FixedLengthStream(Number(upstreamLength));
+      upstream.body.pipeTo(fixed.writable);
+      putBody = fixed.readable;
+      contentLength = upstreamLength;
+    } else {
+      const buf = await upstream.arrayBuffer();
+      putBody = buf;
+      contentLength = String(buf.byteLength);
+    }
     const { url: s3Url, headers: s3Headers } = await signS3Request({
       method: "PUT",
       endpoint: raw.endpoint,
@@ -69,8 +81,8 @@ export async function runHttpLoadJob(job: LoadJob, env: Env): Promise<{ uri: str
     });
     const putRes = await fetch(s3Url, {
       method: "PUT",
-      headers: { ...s3Headers, "Content-Length": String(bodyBuffer.byteLength) },
-      body: bodyBuffer,
+      headers: { ...s3Headers, "Content-Length": contentLength },
+      body: putBody,
     });
     if (!putRes.ok) {
       throw new Error(`S3 PUT failed: ${putRes.status} ${putRes.statusText}`);
