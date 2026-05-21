@@ -56,7 +56,7 @@ app.use("*", (c, next) => {
       isAllowedOrigin(origin, env.ALLOWED_ORIGIN, env.ALLOW_ORIGIN_SUBDOMAINS === "true")
         ? origin
         : null,
-    allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowHeaders: ["Content-Type", "Authorization", "X-Dev-Token", "Range"],
     exposeHeaders: ["Content-Length", "Content-Range", "Accept-Ranges"],
     maxAge: 86400,
@@ -528,10 +528,7 @@ function catalogStub(env: Env, userId: string) {
 
 app.get("/catalog/tables", requireAuth, async (c) => {
   const res = await catalogStub(c.env, c.get("userId")).fetch("http://do/tables");
-  return new Response(res.body, {
-    status: res.status,
-    headers: { "Content-Type": "application/json" },
-  });
+  return new Response(res.body, { status: res.status, headers: res.headers });
 });
 
 app.get("/catalog/snapshots/:table", requireAuth, async (c) => {
@@ -539,10 +536,7 @@ app.get("/catalog/snapshots/:table", requireAuth, async (c) => {
   const res = await catalogStub(c.env, c.get("userId")).fetch(
     `http://do/snapshots/${encodeURIComponent(table)}`,
   );
-  return new Response(res.body, {
-    status: res.status,
-    headers: { "Content-Type": "application/json" },
-  });
+  return new Response(res.body, { status: res.status, headers: res.headers });
 });
 
 app.patch("/catalog/snapshots/:id", requireAuth, async (c) => {
@@ -566,10 +560,7 @@ app.post("/catalog/commit", requireAuth, async (c) => {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  return new Response(res.body, {
-    status: res.status,
-    headers: { "Content-Type": "application/json" },
-  });
+  return new Response(res.body, { status: res.status, headers: res.headers });
 });
 
 // ── Root ─────────────────────────────────────────────────────────────────

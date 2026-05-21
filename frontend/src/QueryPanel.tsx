@@ -156,10 +156,13 @@ export function QueryPanel({ workerBase, getAuthHeaders }: QueryPanelProps) {
           continue;
         }
         const reader = readerFn(snapshot.uri, snapshot.format);
+        // Escape the identifier (double-quote) and the URL string literal (single-quote).
+        const safeId = table.name.replace(/"/g, '""');
+        const safeUrl = url.replace(/'/g, "''");
         try {
           await runQuery(
             db,
-            `CREATE OR REPLACE VIEW "${table.name}" AS SELECT * FROM ${reader}('${url}')`,
+            `CREATE OR REPLACE VIEW "${safeId}" AS SELECT * FROM ${reader}('${safeUrl}')`,
           );
         } catch {
           failed.push(table.name);

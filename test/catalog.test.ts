@@ -215,3 +215,114 @@ describe("GET /catalog/snapshots/:table", () => {
     expect(data.snapshots[0]?.uri).toBe("r2://data-shack-storage/payments/file.parquet");
   });
 });
+
+describe("PATCH /catalog/snapshots/:id", () => {
+  it("returns 401 without auth", async () => {
+    const res = await SELF.fetch("http://localhost/catalog/snapshots/snap_fake", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ uri: "r2://bucket/new.parquet" }),
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it("returns 404 for an unknown snapshot id", async () => {
+    const res = await SELF.fetch("http://localhost/catalog/snapshots/snap_doesnotexist", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({ uri: "r2://bucket/new.parquet" }),
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it("updates uri and format on an existing snapshot", async () => {
+    const commitRes = await SELF.fetch("http://localhost/catalog/commit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({
+        table: "patch_target",
+        uri: "r2://bucket/original.json",
+        storageBackend: "primary-r2",
+        format: "json",
+      }),
+    });
+    const { snapshotId } = (await commitRes.json()) as { snapshotId: string };
+
+    const patchRes = await SELF.fetch(`http://localhost/catalog/snapshots/${snapshotId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({ uri: "r2://bucket/corrected.ndjson", format: "ndjson" }),
+    });
+    expect(patchRes.status).toBe(204);
+
+    const snapRes = await SELF.fetch("http://localhost/catalog/snapshots/patch_target", {
+      headers: DEV_HEADERS,
+    });
+    const data = (await snapRes.json()) as {
+      snapshots: Array<{ uri: string; format: string | null }>;
+    };
+    expect(data.snapshots[0]?.uri).toBe("r2://bucket/corrected.ndjson");
+    expect(data.snapshots[0]?.format).toBe("ndjson");
+  });
+
+  it("clears format when patched to null", async () => {
+    const commitRes = await SELF.fetch("http://localhost/catalog/commit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({
+        table: "patch_null_format",
+        uri: "r2://bucket/data.parquet",
+        storageBackend: "primary-r2",
+        format: "parquet",
+      }),
+    });
+    const { snapshotId } = (await commitRes.json()) as { snapshotId: string };
+
+    await SELF.fetch(`http://localhost/catalog/snapshots/${snapshotId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({ format: null }),
+    });
+
+    const snapRes = await SELF.fetch("http://localhost/catalog/snapshots/patch_null_format", {
+      headers: DEV_HEADERS,
+    });
+    const data = (await snapRes.json()) as { snapshots: Array<{ format: string | null }> };
+    expect(data.snapshots[0]?.format).toBeNull();
+  });
+
+  it("returns 400 when uri is not a string", async () => {
+    const commitRes = await SELF.fetch("http://localhost/catalog/commit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({
+        table: "patch_bad_uri",
+        uri: "r2://bucket/data.parquet",
+        storageBackend: "primary-r2",
+      }),
+    });
+    const { snapshotId } = (await commitRes.json()) as { snapshotId: string };
+
+    const res = await SELF.fetch(`http://localhost/catalog/snapshots/${snapshotId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({ uri: 42 }),
+    });
+    expect(res.status).toBe(400);
+  });
+});
+
+describe("POST /catalog/commit validation", () => {
+  it("rejects table names with invalid characters", async () => {
+    const res = await SELF.fetch("http://localhost/catalog/commit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({
+        table: 'bad"name',
+        uri: "r2://bucket/data.parquet",
+        storageBackend: "primary-r2",
+      }),
+    });
+    expect(res.status).toBe(400);
+  });
+});

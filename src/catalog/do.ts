@@ -4,6 +4,9 @@ function genId(prefix: string): string {
   return `${prefix}_${crypto.randomUUID().replace(/-/g, "")}`;
 }
 
+// Safe SQL identifier: must start with a letter or underscore, then alphanumeric/underscore only.
+const SAFE_TABLE_NAME = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
+
 interface CommitBody {
   table: string;
   uri: string;
@@ -87,9 +90,15 @@ export class CatalogDO implements DurableObject {
   }
 
   private getSnapshots(tableRef: string): Response {
-    const tableRows = this.ctx.storage.sql
-      .exec("SELECT id FROM tables WHERE name = ? OR id = ?", tableRef, tableRef)
+    // Prefer an exact name match; fall back to id lookup so callers can use either.
+    let tableRows = this.ctx.storage.sql
+      .exec("SELECT id FROM tables WHERE name = ?", tableRef)
       .toArray();
+    if (tableRows.length === 0) {
+      tableRows = this.ctx.storage.sql
+        .exec("SELECT id FROM tables WHERE id = ?", tableRef)
+        .toArray();
+    }
     const table = tableRows[0];
     if (!table) return new Response("Not Found", { status: 404 });
 
@@ -114,45 +123,57 @@ export class CatalogDO implements DurableObject {
       return new Response("Bad Request: table, uri, storageBackend required", { status: 400 });
     }
 
-    const now = Date.now();
-
-    const tableRows = this.ctx.storage.sql
-      .exec("SELECT id FROM tables WHERE name = ?", table)
-      .toArray();
-    let tableId: string;
-    if (tableRows.length === 0) {
-      tableId = genId("tbl");
-      this.ctx.storage.sql.exec(
-        "INSERT INTO tables (id, name, created_at) VALUES (?, ?, ?)",
-        tableId,
-        table,
-        now,
+    if (!SAFE_TABLE_NAME.test(table)) {
+      return new Response(
+        "Bad Request: table name must match [a-zA-Z_][a-zA-Z0-9_]*",
+        { status: 400 },
       );
-    } else {
-      tableId = tableRows[0]!.id as string;
     }
 
+    const now = Date.now();
     const snapshotId = genId("snap");
-    this.ctx.storage.sql.exec(
-      "INSERT INTO snapshots (id, table_id, uri, storage_backend, access_mode, format, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-      snapshotId,
-      tableId,
-      uri,
-      storageBackend,
-      accessMode,
-      typeof format === "string" ? format : null,
-      now,
-    );
-
     const commitId = genId("commit");
-    this.ctx.storage.sql.exec(
-      "INSERT INTO commits (id, table_id, snapshot_id, committed_at, message) VALUES (?, ?, ?, ?, ?)",
-      commitId,
-      tableId,
-      snapshotId,
-      now,
-      typeof message === "string" ? message : null,
-    );
+
+    const tableId = this.ctx.storage.transactionSync(() => {
+      const tableRows = this.ctx.storage.sql
+        .exec("SELECT id FROM tables WHERE name = ?", table)
+        .toArray();
+
+      let resolvedId: string;
+      if (tableRows.length > 0) {
+        resolvedId = tableRows[0]!.id as string;
+      } else {
+        resolvedId = genId("tbl");
+        this.ctx.storage.sql.exec(
+          "INSERT INTO tables (id, name, created_at) VALUES (?, ?, ?)",
+          resolvedId,
+          table,
+          now,
+        );
+      }
+
+      this.ctx.storage.sql.exec(
+        "INSERT INTO snapshots (id, table_id, uri, storage_backend, access_mode, format, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        snapshotId,
+        resolvedId,
+        uri,
+        storageBackend,
+        accessMode,
+        typeof format === "string" ? format : null,
+        now,
+      );
+
+      this.ctx.storage.sql.exec(
+        "INSERT INTO commits (id, table_id, snapshot_id, committed_at, message) VALUES (?, ?, ?, ?, ?)",
+        commitId,
+        resolvedId,
+        snapshotId,
+        now,
+        typeof message === "string" ? message : null,
+      );
+
+      return resolvedId;
+    });
 
     return Response.json({ tableId, snapshotId, commitId }, { status: 201 });
   }
