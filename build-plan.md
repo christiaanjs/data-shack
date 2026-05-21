@@ -12,7 +12,8 @@ Each stage produces something functional and testable independently. Stages 1–
 | HTTP data source | `http` credential type + `http-ds://` URI scheme + test UI | ✅ Done |
 | Storage write path | `COPY TO 'r2://…'` and `COPY TO 'r2-s3compat://…'` from DuckDB WASM | ✅ Done |
 | Stage 3 | Catalog DO | ✅ Done |
-| Stage 4–10 | See below | Not started |
+| Stage 4 | Load jobs: cron-triggered HTTP→storage ETL with catalog commit | ✅ Done |
+| Stage 5–10 | See below | Not started |
 
 **Note on Stage 1 + Stage 2 storage resolution:** The `POST /api/storage/resolve` endpoint handles both read (`method: "GET"`) and write (`method: "PUT"`) URI resolution in a single call. `r2://` read/write is fully working against the bound R2 bucket. `r2-s3compat://` read/write is fully working — resolution looks up backend config from D1 and signs requests with SigV4; for writes the worker returns S3 credentials so DuckDB can write natively via its S3 httpfs (requires a CORS policy on the R2 bucket — see `r2-cors.json`). For `r2://` URIs the bucket name is validated syntactically but not matched against a configured backend row — full dispatch for `s3`, `gcs`, and `azure` backends is deferred to a later stage.
 
@@ -98,19 +99,23 @@ Implemented as a standalone Cloudflare Worker with D1, ahead of Stage 1, to esta
 
 ---
 
-## Stage 4 — First load job (Akahu)
+## Stage 4 — Load jobs ✅ Done
 
 **Goal:** Real data flows in automatically.
 
-> **Alternative already built:** Akahu data can already be queried directly from DuckDB via the `http-ds://` URI scheme (see HTTP data source note in the implementation status section above). Stage 4 as described below adds a cron-triggered ETL path that snapshots data to R2 for catalog-tracked, time-travel-capable storage. The two approaches are complementary — direct query for ad-hoc exploration, ETL for reliable scheduled ingestion.
+> **Alternative already built:** Akahu data can already be queried directly from DuckDB via the `http-ds://` URI scheme. Stage 4 adds a cron-triggered ETL path that snapshots data to R2 for catalog-tracked, time-travel-capable storage. The two approaches are complementary — direct query for ad-hoc exploration, ETL for reliable scheduled ingestion.
 
-- Akahu ETL Worker: cron-triggered, reads Akahu API credential from D1 via Worker proxy, calls Akahu API, writes NDJSON to the primary storage backend, commits snapshot URI to catalog DO
-- Cursor tracking: last-fetched timestamp stored in D1 alongside the credential
-- The load job definition records which `storage_backend` ID to write to — the Worker looks up the backend config from D1 to determine how to write (R2 binding for bound R2, `fetch()` with credentials for S3-compatible or external backends)
+### ✅ Implemented
 
-> **ETL writes:** For the primary R2 backend, ETL Workers use the native R2 Worker binding — no signed URL needed. For any other backend type, the Worker uses `fetch()` with credentials from D1. The abstraction is in the Worker; the catalog and browser don't need to know which mechanism was used.
-
-**Test:** Cron fires. Akahu API response is correctly written as NDJSON. Catalog commit registers the snapshot URI. Browser picks up the new snapshot on manual reload (WebSocket broadcast not yet built — that's fine).
+- `load_jobs` D1 table: `id`, `user_id`, `name`, `credential_id`, `storage_backend_id`, `table_name`, `table_path`, `http_path`, `http_method`, `format`, `cron_schedule`, `next_run_at`, `last_run_at`, `last_error`, `enabled`
+- CRUD API: `GET/POST/PATCH/DELETE /api/load-jobs`, `POST /api/load-jobs/:id/trigger`
+- `scheduled()` handler: queries due jobs, advances `next_run_at` (claim), enqueues to `LOAD_JOB_QUEUE`
+- `queue()` consumer: fetches job, runs `runHttpLoadJob`, persists `last_run_at`/`last_error`/`next_run_at`; retries on failure (up to 3 times)
+- `runHttpLoadJob` (`src/loaders/http.ts`): HTTP fetch → `FixedLengthStream` for streaming or `ArrayBuffer` for buffering → R2 write (bound or s3-compat) → catalog commit
+- `table_path` field: optional custom storage directory (relative to user namespace for `r2-bound`, relative to bucket root for `r2-s3compat`)
+- Load Jobs UI panel: list, create, edit, delete, "Run now" trigger with status feedback
+- `r2-bound` option in Settings → Storage Backends form
+- 6 new unit tests in `test/loader.test.ts`, 27 new integration tests in `test/load-jobs.test.ts`
 
 ---
 

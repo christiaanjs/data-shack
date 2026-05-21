@@ -8,6 +8,7 @@ export interface Env {
   DB: D1Database;
   R2: R2Bucket;
   CATALOG: DurableObjectNamespace;
+  LOAD_JOB_QUEUE: Queue<{ jobId: string }>;
   DEV_TOKEN: string;
   DEV_USER_ID: string;
   ENABLE_OAUTH: string;

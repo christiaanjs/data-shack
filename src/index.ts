@@ -1,3 +1,4 @@
+import { Cron } from "croner";
 import { cors } from "hono/cors";
 import { createMiddleware } from "hono/factory";
 import { Hono } from "hono/tiny";
@@ -6,6 +7,17 @@ import { oauthRouter } from "./auth/oauth.ts";
 import { CatalogDO } from "./catalog/do.ts";
 export { CatalogDO };
 import { decryptConfig, encryptConfig } from "./crypto.ts";
+import {
+  advanceNextRunAt,
+  deleteLoadJob,
+  getLoadJob,
+  getLoadJobById,
+  insertLoadJob,
+  listDueLoadJobs,
+  listLoadJobs,
+  updateLoadJob,
+  updateLoadJobOutcome,
+} from "./db/load-jobs.ts";
 import {
   deleteCredential,
   deleteStorageBackend,
@@ -16,6 +28,8 @@ import {
   listCredentials,
   listStorageBackends,
 } from "./db/settings.ts";
+import { decryptHttpConfig, resolveHeaderTemplates } from "./http-config.ts";
+import { runHttpLoadJob } from "./loaders/http.ts";
 import {
   parseHttpDsUri,
   parseR2S3CompatUri,
@@ -342,57 +356,6 @@ async function resolveHttpDsUri(
   return `${workerOrigin}/api/data-sources/obj/${token}`;
 }
 
-function resolveHeaderTemplates(
-  headers: Record<string, string>,
-  variables: Record<string, string>,
-): Record<string, string> {
-  const resolved: Record<string, string> = {};
-  for (const [key, value] of Object.entries(headers)) {
-    resolved[key] = value.replace(/\{\{(\w+)\}\}/g, (_, name) => variables[name] ?? "");
-  }
-  return resolved;
-}
-
-async function decryptHttpConfig(
-  encryptedConfig: string,
-  jwtSecret: string,
-): Promise<{
-  baseUrl: string;
-  headers: Record<string, string>;
-  variables: Record<string, string>;
-} | null> {
-  try {
-    const raw = JSON.parse(await decryptConfig(encryptedConfig, jwtSecret)) as Record<
-      string,
-      unknown
-    >;
-    if (typeof raw.baseUrl !== "string") return null;
-    let parsed: URL;
-    try {
-      parsed = new URL(raw.baseUrl);
-    } catch {
-      return null;
-    }
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
-
-    const headers: Record<string, string> = {};
-    if (typeof raw.headers === "object" && raw.headers !== null) {
-      for (const [k, v] of Object.entries(raw.headers as Record<string, unknown>)) {
-        if (typeof v === "string") headers[k] = v;
-      }
-    }
-    const variables: Record<string, string> = {};
-    if (typeof raw.variables === "object" && raw.variables !== null) {
-      for (const [k, v] of Object.entries(raw.variables as Record<string, unknown>)) {
-        if (typeof v === "string") variables[k] = v;
-      }
-    }
-    return { baseUrl: raw.baseUrl, headers, variables };
-  } catch {
-    return null;
-  }
-}
-
 // Serves HTTP data source responses for DuckDB httpfs — token is the auth mechanism.
 app.on(["GET", "HEAD"], "/api/data-sources/obj/:token", async (c) => {
   const token = c.req.param("token");
@@ -572,8 +535,171 @@ app.post("/catalog/commit", requireAuth, async (c) => {
   return new Response(res.body, { status: res.status, headers: res.headers });
 });
 
+// ── Load jobs endpoints ───────────────────────────────────────────────────
+
+const SAFE_TABLE_NAME = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
+const VALID_HTTP_METHODS = ["GET", "POST"] as const;
+const VALID_FORMATS = ["json", "ndjson", "csv", "parquet"] as const;
+
+app.get("/api/load-jobs", requireAuth, async (c) => {
+  const jobs = await listLoadJobs(c.env.DB, c.get("userId"));
+  return c.json({ jobs });
+});
+
+app.post("/api/load-jobs", requireAuth, async (c) => {
+  const body = await c.req.json<Record<string, unknown>>();
+  if (typeof body.name !== "string" || !body.name) {
+    return c.json({ error: "name is required" }, 400);
+  }
+  if (typeof body.credential_id !== "string" || !body.credential_id) {
+    return c.json({ error: "credential_id is required" }, 400);
+  }
+  if (typeof body.storage_backend_id !== "string" || !body.storage_backend_id) {
+    return c.json({ error: "storage_backend_id is required" }, 400);
+  }
+  if (typeof body.table_name !== "string" || !SAFE_TABLE_NAME.test(body.table_name)) {
+    return c.json({ error: "table_name must match [a-zA-Z_][a-zA-Z0-9_]*" }, 400);
+  }
+  if (
+    body.http_method !== undefined &&
+    !VALID_HTTP_METHODS.includes(body.http_method as (typeof VALID_HTTP_METHODS)[number])
+  ) {
+    return c.json({ error: "http_method must be GET or POST" }, 400);
+  }
+  if (
+    body.format !== undefined &&
+    !VALID_FORMATS.includes(body.format as (typeof VALID_FORMATS)[number])
+  ) {
+    return c.json({ error: "format must be json, ndjson, csv, or parquet" }, 400);
+  }
+  let job: Awaited<ReturnType<typeof insertLoadJob>>;
+  try {
+    job = await insertLoadJob(c.env.DB, c.get("userId"), {
+      name: body.name,
+      credential_id: body.credential_id,
+      storage_backend_id: body.storage_backend_id,
+      table_name: body.table_name,
+      table_path: typeof body.table_path === "string" ? body.table_path : undefined,
+      http_path: typeof body.http_path === "string" ? body.http_path : undefined,
+      http_method: typeof body.http_method === "string" ? body.http_method : undefined,
+      format: typeof body.format === "string" ? body.format : undefined,
+      cron_schedule: typeof body.cron_schedule === "string" ? body.cron_schedule : undefined,
+    });
+  } catch (err) {
+    if (err instanceof Error && err.message.startsWith("Invalid cron_schedule")) {
+      return c.json({ error: err.message }, 400);
+    }
+    throw err;
+  }
+  return c.json(job, 201);
+});
+
+app.patch("/api/load-jobs/:id", requireAuth, async (c) => {
+  const body = await c.req.json<Record<string, unknown>>();
+  if (typeof body.name !== "string" || !body.name) {
+    return c.json({ error: "name is required" }, 400);
+  }
+  if (typeof body.credential_id !== "string" || !body.credential_id) {
+    return c.json({ error: "credential_id is required" }, 400);
+  }
+  if (typeof body.storage_backend_id !== "string" || !body.storage_backend_id) {
+    return c.json({ error: "storage_backend_id is required" }, 400);
+  }
+  if (typeof body.table_name !== "string" || !SAFE_TABLE_NAME.test(body.table_name)) {
+    return c.json({ error: "table_name must match [a-zA-Z_][a-zA-Z0-9_]*" }, 400);
+  }
+  if (
+    body.http_method !== undefined &&
+    !VALID_HTTP_METHODS.includes(body.http_method as (typeof VALID_HTTP_METHODS)[number])
+  ) {
+    return c.json({ error: "http_method must be GET or POST" }, 400);
+  }
+  if (
+    body.format !== undefined &&
+    !VALID_FORMATS.includes(body.format as (typeof VALID_FORMATS)[number])
+  ) {
+    return c.json({ error: "format must be json, ndjson, csv, or parquet" }, 400);
+  }
+  let updated: Awaited<ReturnType<typeof updateLoadJob>>;
+  try {
+    updated = await updateLoadJob(c.env.DB, c.get("userId"), c.req.param("id"), {
+      name: body.name,
+      credential_id: body.credential_id,
+      storage_backend_id: body.storage_backend_id,
+      table_name: body.table_name,
+      table_path: typeof body.table_path === "string" ? body.table_path : "",
+      http_path: typeof body.http_path === "string" ? body.http_path : "/",
+      http_method: typeof body.http_method === "string" ? body.http_method : "GET",
+      format: typeof body.format === "string" ? body.format : "ndjson",
+      cron_schedule: typeof body.cron_schedule === "string" ? body.cron_schedule : "0 * * * *",
+    });
+  } catch (err) {
+    if (err instanceof Error && err.message.startsWith("Invalid cron_schedule")) {
+      return c.json({ error: err.message }, 400);
+    }
+    throw err;
+  }
+  if (!updated) return new Response("Not Found", { status: 404 });
+  return c.json(updated);
+});
+
+app.delete("/api/load-jobs/:id", requireAuth, async (c) => {
+  const deleted = await deleteLoadJob(c.env.DB, c.get("userId"), c.req.param("id"));
+  if (!deleted) return new Response("Not Found", { status: 404 });
+  return new Response(null, { status: 204 });
+});
+
+app.post("/api/load-jobs/:id/trigger", requireAuth, async (c) => {
+  const job = await getLoadJob(c.env.DB, c.get("userId"), c.req.param("id"));
+  if (!job) return new Response("Not Found", { status: 404 });
+  await c.env.LOAD_JOB_QUEUE.send({ jobId: job.id });
+  return c.json({ queued: true }, 202);
+});
+
 // ── Root ─────────────────────────────────────────────────────────────────
 
 app.get("/", (c) => c.text("data-shack worker"));
 
-export default app;
+export default {
+  fetch: app.fetch,
+
+  async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
+    const now = Date.now();
+    const jobs = await listDueLoadJobs(env.DB, now);
+    ctx.waitUntil(
+      Promise.all(
+        jobs.flatMap((j) => {
+          const nextRunAt = new Cron(j.cron_schedule).nextRun()?.getTime() ?? null;
+          return [
+            advanceNextRunAt(env.DB, j.id, nextRunAt, now),
+            env.LOAD_JOB_QUEUE.send({ jobId: j.id }),
+          ];
+        }),
+      ),
+    );
+  },
+
+  async queue(batch: MessageBatch<{ jobId: string }>, env: Env) {
+    await Promise.allSettled(
+      batch.messages.map(async (msg) => {
+        const job = await getLoadJobById(env.DB, msg.body.jobId);
+        if (!job) {
+          msg.ack();
+          return;
+        }
+        try {
+          await runHttpLoadJob(job, env);
+        } catch (err) {
+          const lastError = String(err);
+          console.error(`Load job ${job.id} (${job.name}) failed:`, err);
+          await updateLoadJobOutcome(env.DB, job.id, Date.now(), job.next_run_at, lastError);
+          msg.retry();
+          return;
+        }
+        const nextRunAt = new Cron(job.cron_schedule).nextRun()?.getTime() ?? null;
+        await updateLoadJobOutcome(env.DB, job.id, Date.now(), nextRunAt);
+        msg.ack();
+      }),
+    );
+  },
+};

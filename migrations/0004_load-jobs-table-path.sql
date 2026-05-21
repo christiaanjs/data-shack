@@ -1,0 +1,1 @@
+ALTER TABLE load_jobs ADD COLUMN table_path TEXT NOT NULL DEFAULT '';

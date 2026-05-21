@@ -20,8 +20,10 @@ A personal data integration platform built on Cloudflare that brings your data t
 | Catalog Durable Object: tables, snapshots, commits; per-user DO isolation | ✅ Done |
 | Catalog UI: commit snapshots, edit URI/format, URI convention docs | ✅ Done |
 | Browser auto-registers DuckDB views from catalog on startup | ✅ Done |
+| Load jobs: cron-triggered HTTP→R2/S3 ETL with catalog commit, Queue-based execution | ✅ Done |
+| Load Jobs UI: create/edit/delete jobs, "Run now" trigger, last-run status | ✅ Done |
 | Session Durable Object + MCP server | Not started |
-| ETL workers (Akahu, Google Sheets) | Not started |
+| Transform jobs (compaction) | Not started |
 | Dashboarding platform | Not started |
 
 See [`build-plan.md`](./build-plan.md) for the full sequenced plan.
@@ -108,6 +110,23 @@ External HTTP APIs can be queried directly from DuckDB using the `http` credenti
    SELECT * FROM read_json('http-ds://cred_abc123/accounts') LIMIT 10
    ```
    The worker resolves the URI to a short-lived signed proxy URL. DuckDB fetches through the Worker, which injects the configured auth headers before forwarding to the API.
+
+### Scheduled data ingestion (load jobs)
+
+The **Load Jobs** tab lets you define cron-triggered jobs that pull from an HTTP API and write the response to a storage backend, committing a new snapshot URI to the catalog.
+
+1. Go to **Settings → Storage Backends** and add an `r2-bound` backend (bucket = `data-shack-storage`) if you want to write to the primary R2 bucket.
+2. Go to **Settings → Credentials** and add an `http` credential for your API.
+3. Open the **Load Jobs** tab and click **New job**:
+   - **Table name** — SQL identifier for the catalog table (e.g. `accounts`)
+   - **Storage path** — optional custom directory within the backend (defaults to table name). For `r2-bound`, this is relative to your user namespace; for `r2-s3compat`, relative to the bucket root.
+   - **HTTP credential** — the credential to use for the upstream API call
+   - **Storage backend** — where to write the output file
+   - **HTTP Path** — path appended to the credential's base URL (e.g. `/v1/accounts`)
+   - **Format** — `ndjson`, `json`, `csv`, or `parquet`
+   - **Cron schedule** — standard 5-field cron expression (e.g. `0 * * * *` = hourly)
+4. Click **Run now** to trigger an immediate run without waiting for the cron. The job fetches the API response, streams it to storage (using `FixedLengthStream` when `Content-Length` is available, buffering otherwise), and commits the file URI to the catalog.
+5. Each run creates a new timestamped file (`{tableDir}/load-{timestamp}.{ext}`). Old files are retained; the catalog always points to the latest snapshot.
 
 The **Settings** tab also stores storage backend configs (encrypted in D1). The `r2-s3compat` backend type is fully dispatched — both read and write URI resolution looks up config from D1 and signs requests with SigV4 accordingly. The `r2://` backend uses the Worker's bound R2 binding directly (no D1 lookup needed at resolve time). Full dispatch for `s3`, `gcs`, and `azure` backend types is deferred to a later stage.
 

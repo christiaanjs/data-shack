@@ -52,24 +52,28 @@ case "$ENV" in
     CF_ENV_ARGS=()
     DB_NAME="data-shack-db"
     DB_TOML_PLACEHOLDER="REPLACE_WITH_YOUR_DB_ID"
+    QUEUE_NAME="data-shack-load-jobs"
     DEFAULT_WORKER_URL="https://data-shack.workers.dev"
     ;;
   staging)
     CF_ENV_ARGS=(--env staging)
     DB_NAME="data-shack-db-staging"
     DB_TOML_PLACEHOLDER="REPLACE_WITH_YOUR_STAGING_DB_ID"
+    QUEUE_NAME="data-shack-load-jobs-staging"
     DEFAULT_WORKER_URL="https://data-shack-staging.workers.dev"
     ;;
   local)
     CF_ENV_ARGS=()
     DB_NAME="data-shack-db"
     DB_TOML_PLACEHOLDER=""
+    QUEUE_NAME=""
     DEFAULT_WORKER_URL="http://localhost:8787"
     ;;
   *)
     CF_ENV_ARGS=(--env "$ENV")
     DB_NAME="data-shack-db-$ENV"
     DB_TOML_PLACEHOLDER=""
+    QUEUE_NAME="data-shack-load-jobs-$ENV"
     DEFAULT_WORKER_URL="https://data-shack-$ENV.workers.dev"
     ;;
 esac
@@ -202,7 +206,33 @@ info "Applying migrations…"
 $W d1 migrations apply "$DB_NAME" "${CF_ENV_ARGS[@]+${CF_ENV_ARGS[@]}}"
 ok "Migrations applied"
 
-# ── Step 2: Google OAuth 2.0 client ───────────────────────────────────────────
+# ── Step 2: Cloudflare Queue ──────────────────────────────────────────────────
+
+step "Cloudflare Queue"
+
+if [[ -n "$QUEUE_NAME" ]]; then
+  QUEUE_EXISTS=$(
+    $W queues list 2>/dev/null \
+    | grep -F "$QUEUE_NAME" || true
+  )
+  if [[ -n "$QUEUE_EXISTS" ]]; then
+    ok "Queue '$QUEUE_NAME' already exists — skipping create"
+  else
+    info "Creating queue '$QUEUE_NAME'…"
+    CREATE_QUEUE_OUT=$($W queues create "$QUEUE_NAME" 2>&1 || true)
+    if echo "$CREATE_QUEUE_OUT" | grep -qi "already exists"; then
+      ok "Queue '$QUEUE_NAME' already exists"
+    elif echo "$CREATE_QUEUE_OUT" | grep -qi "error\|failed"; then
+      die "Failed to create queue '$QUEUE_NAME':\n$CREATE_QUEUE_OUT"
+    else
+      ok "Created queue '$QUEUE_NAME'"
+    fi
+  fi
+else
+  warn "No queue name set for env '$ENV' — skipping"
+fi
+
+# ── Step 3: Google OAuth 2.0 client ───────────────────────────────────────────
 
 step "Google OAuth credentials"
 info ""
@@ -233,13 +263,13 @@ echo
 [[ -n "$GOOGLE_CLIENT_SECRET" ]] || die "Client Secret cannot be empty"
 ok "Google credentials captured"
 
-# ── Step 3: JWT secret ────────────────────────────────────────────────────────
+# ── Step 4: JWT secret ────────────────────────────────────────────────────────
 
 step "JWT secret"
 JWT_SECRET=$(openssl rand -base64 48 | tr -d '\n=')
 ok "Generated ($(echo -n "$JWT_SECRET" | wc -c | tr -d ' ') chars)"
 
-# ── Step 4: Push secrets to Cloudflare ────────────────────────────────────────
+# ── Step 5: Push secrets to Cloudflare ────────────────────────────────────────
 
 step "Pushing secrets to Cloudflare (env: $ENV)"
 
@@ -253,7 +283,7 @@ push_secret GOOGLE_CLIENT_ID     "$GOOGLE_CLIENT_ID"
 push_secret GOOGLE_CLIENT_SECRET "$GOOGLE_CLIENT_SECRET"
 push_secret JWT_SECRET           "$JWT_SECRET"
 
-# ── Step 5: Optional deploy ───────────────────────────────────────────────────
+# ── Step 6: Optional deploy ───────────────────────────────────────────────────
 
 if $DEPLOY; then
   step "Deploying worker ($ENV)"
