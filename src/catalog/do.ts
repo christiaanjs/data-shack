@@ -163,6 +163,12 @@ export class CatalogDO implements DurableObject {
       .toArray();
     if (rows.length === 0) return new Response("Not Found", { status: 404 });
 
+    if ("uri" in body) {
+      if (typeof body.uri !== "string")
+        return new Response("uri must be a string", { status: 400 });
+      this.ctx.storage.sql.exec("UPDATE snapshots SET uri = ? WHERE id = ?", body.uri, snapshotId);
+    }
+
     if ("format" in body) {
       const format =
         body.format === null ? null : typeof body.format === "string" ? body.format : undefined;
