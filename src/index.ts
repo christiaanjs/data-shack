@@ -553,6 +553,15 @@ app.patch("/catalog/snapshots/:id", requireAuth, async (c) => {
   return new Response(res.body, { status: res.status });
 });
 
+app.delete("/catalog/tables/:table", requireAuth, async (c) => {
+  const table = c.req.param("table");
+  const res = await catalogStub(c.env, c.get("userId")).fetch(
+    `http://do/tables/${encodeURIComponent(table)}`,
+    { method: "DELETE" },
+  );
+  return new Response(res.body, { status: res.status, headers: res.headers });
+});
+
 app.post("/catalog/commit", requireAuth, async (c) => {
   const body = await c.req.json();
   const res = await catalogStub(c.env, c.get("userId")).fetch("http://do/commit", {

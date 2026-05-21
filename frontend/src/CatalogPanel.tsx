@@ -68,6 +68,11 @@ export function CatalogPanel({ workerBase, getAuthHeaders }: CatalogPanelProps) 
   const [patching, setPatching] = useState(false);
   const [patchError, setPatchError] = useState<string | null>(null);
 
+  // Delete
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
   const load = useCallback(async () => {
     setLoading(true);
     setLoadError(null);
@@ -148,6 +153,28 @@ export function CatalogPanel({ workerBase, getAuthHeaders }: CatalogPanelProps) 
       setCommitError(err instanceof Error ? err.message : "Commit failed");
     } finally {
       setCommitting(false);
+    }
+  }
+
+  async function handleDelete(tableId: string) {
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      const headers = await getAuthHeaders();
+      const res = await fetch(`${workerBase}/catalog/tables/${tableId}`, {
+        method: "DELETE",
+        headers,
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(text || String(res.status));
+      }
+      setConfirmDeleteId(null);
+      await load();
+    } catch (err) {
+      setDeleteError(err instanceof Error ? err.message : "Delete failed");
+    } finally {
+      setDeleting(false);
     }
   }
 
@@ -323,6 +350,11 @@ export function CatalogPanel({ workerBase, getAuthHeaders }: CatalogPanelProps) 
               <span>{loadError}</span>
             </div>
           )}
+          {deleteError && (
+            <div role="alert" class="alert alert-error py-2 text-sm">
+              <span>{deleteError}</span>
+            </div>
+          )}
           {!loading && tables.length === 0 && !loadError && (
             <p class="text-sm text-base-content/50">No tables yet. Commit a snapshot above.</p>
           )}
@@ -402,14 +434,51 @@ export function CatalogPanel({ workerBase, getAuthHeaders }: CatalogPanelProps) 
                               {snap ? formatLabel(snap.format, snap.uri) : "—"}
                             </td>
                             <td class="align-top pt-2">
-                              {snap && (
-                                <button
-                                  type="button"
-                                  class="btn btn-xs btn-ghost"
-                                  onClick={() => startEdit(snap)}
-                                >
-                                  Edit
-                                </button>
+                              {confirmDeleteId === t.id ? (
+                                <div class="flex gap-1">
+                                  <button
+                                    type="button"
+                                    class="btn btn-xs btn-error"
+                                    onClick={() => handleDelete(t.id)}
+                                    disabled={deleting}
+                                  >
+                                    {deleting ? (
+                                      <span class="loading loading-spinner loading-xs" />
+                                    ) : (
+                                      "Confirm"
+                                    )}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    class="btn btn-xs btn-ghost"
+                                    onClick={() => setConfirmDeleteId(null)}
+                                    disabled={deleting}
+                                  >
+                                    Cancel
+                                  </button>
+                                </div>
+                              ) : (
+                                <div class="flex gap-1">
+                                  {snap && (
+                                    <button
+                                      type="button"
+                                      class="btn btn-xs btn-ghost"
+                                      onClick={() => startEdit(snap)}
+                                    >
+                                      Edit
+                                    </button>
+                                  )}
+                                  <button
+                                    type="button"
+                                    class="btn btn-xs btn-ghost text-error/70 hover:text-error"
+                                    onClick={() => {
+                                      setConfirmDeleteId(t.id);
+                                      setEditingSnapId(null);
+                                    }}
+                                  >
+                                    Delete
+                                  </button>
+                                </div>
                               )}
                             </td>
                           </>

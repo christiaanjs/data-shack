@@ -53,6 +53,13 @@ export class CatalogDO implements DurableObject {
     } catch {
       // Column already exists — nothing to do.
     }
+
+    // Add deleted_at for soft-delete support.
+    try {
+      ctx.storage.sql.exec("ALTER TABLE tables ADD COLUMN deleted_at INTEGER");
+    } catch {
+      // Column already exists — nothing to do.
+    }
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -79,12 +86,19 @@ export class CatalogDO implements DurableObject {
       return this.patchSnapshot(snapshotId, body);
     }
 
+    if (request.method === "DELETE" && pathname.startsWith("/tables/")) {
+      const tableRef = decodeURIComponent(pathname.slice("/tables/".length));
+      return this.deleteTable(tableRef);
+    }
+
     return new Response("Not Found", { status: 404 });
   }
 
   private getTables(): Response {
     const rows = this.ctx.storage.sql
-      .exec("SELECT id, name, description, created_at FROM tables ORDER BY name")
+      .exec(
+        "SELECT id, name, description, created_at FROM tables WHERE deleted_at IS NULL ORDER BY name",
+      )
       .toArray();
     return Response.json({ tables: rows });
   }
@@ -92,11 +106,11 @@ export class CatalogDO implements DurableObject {
   private getSnapshots(tableRef: string): Response {
     // Prefer an exact name match; fall back to id lookup so callers can use either.
     let tableRows = this.ctx.storage.sql
-      .exec("SELECT id FROM tables WHERE name = ?", tableRef)
+      .exec("SELECT id FROM tables WHERE name = ? AND deleted_at IS NULL", tableRef)
       .toArray();
     if (tableRows.length === 0) {
       tableRows = this.ctx.storage.sql
-        .exec("SELECT id FROM tables WHERE id = ?", tableRef)
+        .exec("SELECT id FROM tables WHERE id = ? AND deleted_at IS NULL", tableRef)
         .toArray();
     }
     const table = tableRows[0];
@@ -134,13 +148,18 @@ export class CatalogDO implements DurableObject {
     const commitId = genId("commit");
 
     const tableId = this.ctx.storage.transactionSync(() => {
+      // Include soft-deleted rows so we can restore them on re-commit.
       const tableRows = this.ctx.storage.sql
-        .exec("SELECT id FROM tables WHERE name = ?", table)
+        .exec("SELECT id, deleted_at FROM tables WHERE name = ?", table)
         .toArray();
 
       let resolvedId: string;
       if (tableRows.length > 0) {
         resolvedId = tableRows[0]!.id as string;
+        if (tableRows[0]!.deleted_at !== null) {
+          // Restore soft-deleted table on re-commit.
+          this.ctx.storage.sql.exec("UPDATE tables SET deleted_at = NULL WHERE id = ?", resolvedId);
+        }
       } else {
         resolvedId = genId("tbl");
         this.ctx.storage.sql.exec(
@@ -175,6 +194,26 @@ export class CatalogDO implements DurableObject {
     });
 
     return Response.json({ tableId, snapshotId, commitId }, { status: 201 });
+  }
+
+  private deleteTable(tableRef: string): Response {
+    // Prefer name match; fall back to id.
+    let tableRows = this.ctx.storage.sql
+      .exec("SELECT id FROM tables WHERE name = ? AND deleted_at IS NULL", tableRef)
+      .toArray();
+    if (tableRows.length === 0) {
+      tableRows = this.ctx.storage.sql
+        .exec("SELECT id FROM tables WHERE id = ? AND deleted_at IS NULL", tableRef)
+        .toArray();
+    }
+    if (tableRows.length === 0) return new Response("Not Found", { status: 404 });
+
+    this.ctx.storage.sql.exec(
+      "UPDATE tables SET deleted_at = ? WHERE id = ?",
+      Date.now(),
+      tableRows[0]!.id as string,
+    );
+    return new Response(null, { status: 204 });
   }
 
   private patchSnapshot(snapshotId: string, body: Record<string, unknown>): Response {

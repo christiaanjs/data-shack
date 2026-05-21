@@ -326,3 +326,118 @@ describe("POST /catalog/commit validation", () => {
     expect(res.status).toBe(400);
   });
 });
+
+describe("DELETE /catalog/tables/:table", () => {
+  it("returns 401 without auth", async () => {
+    const res = await SELF.fetch("http://localhost/catalog/tables/no_such_table", {
+      method: "DELETE",
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it("returns 404 for an unknown table", async () => {
+    const res = await SELF.fetch("http://localhost/catalog/tables/no_such_table", {
+      method: "DELETE",
+      headers: DEV_HEADERS,
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it("soft-deletes a table: 204 response and absent from GET /catalog/tables", async () => {
+    await SELF.fetch("http://localhost/catalog/commit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({
+        table: "to_delete",
+        uri: "r2://bucket/data.parquet",
+        storageBackend: "primary-r2",
+      }),
+    });
+
+    const del = await SELF.fetch("http://localhost/catalog/tables/to_delete", {
+      method: "DELETE",
+      headers: DEV_HEADERS,
+    });
+    expect(del.status).toBe(204);
+
+    const list = await SELF.fetch("http://localhost/catalog/tables", { headers: DEV_HEADERS });
+    const { tables } = (await list.json()) as { tables: Array<{ name: string }> };
+    expect(tables.find((t) => t.name === "to_delete")).toBeUndefined();
+  });
+
+  it("snapshots of a soft-deleted table return 404", async () => {
+    await SELF.fetch("http://localhost/catalog/commit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({
+        table: "deleted_snaps",
+        uri: "r2://bucket/data.parquet",
+        storageBackend: "primary-r2",
+      }),
+    });
+    await SELF.fetch("http://localhost/catalog/tables/deleted_snaps", {
+      method: "DELETE",
+      headers: DEV_HEADERS,
+    });
+
+    const res = await SELF.fetch("http://localhost/catalog/snapshots/deleted_snaps", {
+      headers: DEV_HEADERS,
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it("can delete by table id as well as name", async () => {
+    const commitRes = await SELF.fetch("http://localhost/catalog/commit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({
+        table: "delete_by_id",
+        uri: "r2://bucket/data.parquet",
+        storageBackend: "primary-r2",
+      }),
+    });
+    const { tableId } = (await commitRes.json()) as { tableId: string };
+
+    const del = await SELF.fetch(`http://localhost/catalog/tables/${tableId}`, {
+      method: "DELETE",
+      headers: DEV_HEADERS,
+    });
+    expect(del.status).toBe(204);
+
+    const list = await SELF.fetch("http://localhost/catalog/tables", { headers: DEV_HEADERS });
+    const { tables } = (await list.json()) as { tables: Array<{ name: string }> };
+    expect(tables.find((t) => t.name === "delete_by_id")).toBeUndefined();
+  });
+
+  it("committing to a soft-deleted table name restores it", async () => {
+    await SELF.fetch("http://localhost/catalog/commit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({
+        table: "restore_me",
+        uri: "r2://bucket/v1.parquet",
+        storageBackend: "primary-r2",
+      }),
+    });
+    await SELF.fetch("http://localhost/catalog/tables/restore_me", {
+      method: "DELETE",
+      headers: DEV_HEADERS,
+    });
+
+    // Re-commit should restore the table.
+    const recommit = await SELF.fetch("http://localhost/catalog/commit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({
+        table: "restore_me",
+        uri: "r2://bucket/v2.parquet",
+        storageBackend: "primary-r2",
+      }),
+    });
+    expect(recommit.status).toBe(201);
+
+    const list = await SELF.fetch("http://localhost/catalog/tables", { headers: DEV_HEADERS });
+    const { tables } = (await list.json()) as { tables: Array<{ name: string }> };
+    expect(tables.find((t) => t.name === "restore_me")).toBeDefined();
+  });
+});
