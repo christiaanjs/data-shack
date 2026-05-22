@@ -11,6 +11,11 @@ database_id = "b5f7796d-323f-49d0-aca1-e39a64bdb55b"
 binding = "R2"
 bucket_name = "data-shack-storage"
 
+# Create with: wrangler kv:namespace create PROXY_CREDS_KV
+[[kv_namespaces]]
+binding = "PROXY_CREDS_KV"
+id = "00000000-0000-0000-0000-000000000000"
+
 [[durable_objects.bindings]]
 name = "CATALOG"
 class_name = "CatalogDO"
@@ -56,6 +61,11 @@ database_id = "1910faa5-f94e-4e15-aedd-648e604a6915"
 [[env.staging.r2_buckets]]
 binding = "R2"
 bucket_name = "data-shack-storage-staging"
+
+# Create with: wrangler kv:namespace create PROXY_CREDS_KV --env staging
+[[env.staging.kv_namespaces]]
+binding = "PROXY_CREDS_KV"
+id = "00000000-0000-0000-0000-000000000001"
 
 [[env.staging.durable_objects.bindings]]
 name = "CATALOG"

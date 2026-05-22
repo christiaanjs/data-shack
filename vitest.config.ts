@@ -23,6 +23,7 @@ export default defineConfig(async () => {
             TEST_MIGRATIONS: migrations,
           },
           r2Buckets: ["R2"],
+          kvNamespaces: ["PROXY_CREDS_KV"],
         },
       }),
     ],

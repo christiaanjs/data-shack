@@ -1,6 +1,7 @@
 import type { AsyncDuckDB } from "@duckdb/duckdb-wasm";
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import { initDuckDB, runQuery } from "./duckdb.ts";
+import { acquireProxyCred, buildS3Secret, parseStorageUri } from "./storage.ts";
 
 interface CatalogTable {
   id: string;
@@ -38,11 +39,6 @@ interface QueryPanelProps {
   getAuthHeaders: () => Promise<Record<string, string>>;
 }
 
-interface ResolvedUri {
-  uri: string;
-  url: string;
-}
-
 interface QueryResult {
   columns: string[];
   rows: unknown[][];
@@ -54,8 +50,9 @@ interface CredentialRow {
   type: string;
 }
 
+// Matches all storage URIs in SQL text
 const STORAGE_URI_REGEX = /(?:r2-s3compat|r2|http-ds):\/\/[^\s'"]+/g;
-// Matches storage URIs that appear after a SQL TO keyword (COPY TO write destinations)
+// Matches storage URIs that appear after a SQL TO keyword (write destinations)
 const WRITE_URI_REGEX = /\bTO\s+['"]?((?:r2-s3compat|r2):\/\/[^\s'"]+)/gi;
 const PLACEHOLDER_SQL = "SELECT * FROM read_json('r2://data-shack-storage/sample.ndjson') LIMIT 10";
 
@@ -63,11 +60,6 @@ export function QueryPanel({ workerBase, getAuthHeaders }: QueryPanelProps) {
   const [dbReady, setDbReady] = useState(false);
   const [dbError, setDbError] = useState<string | null>(null);
   const dbRef = useRef<AsyncDuckDB | null>(null);
-
-  const [uriInput, setUriInput] = useState("");
-  const [resolvedUris, setResolvedUris] = useState<ResolvedUri[]>([]);
-  const [resolveError, setResolveError] = useState<string | null>(null);
-  const [resolving, setResolving] = useState(false);
 
   const [sql, setSql] = useState("");
   const [queryResult, setQueryResult] = useState<QueryResult | null>(null);
@@ -133,37 +125,47 @@ export function QueryPanel({ workerBase, getAuthHeaders }: QueryPanelProps) {
 
       if (withSnaps.length === 0) return;
 
-      const uriRequests = withSnaps.map(({ snapshot }) => ({
-        uri: snapshot.uri,
-        method: "GET" as const,
-      }));
-      const resolveRes = await fetch(`${workerBase}/api/storage/resolve`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...headers },
-        body: JSON.stringify({ uris: uriRequests }),
-      });
-      if (!resolveRes.ok) throw new Error(`URI resolution failed: ${resolveRes.status}`);
-      const { urls } = (await resolveRes.json()) as { urls: Record<string, string> };
-
       const db = dbRef.current;
       if (!db) return;
 
+      // Acquire one proxy credential per backend (cached)
+      const secretsByBackend = new Map<string, string>();
       const failed: string[] = [];
+
       for (const { table, snapshot } of withSnaps) {
-        const url = urls[snapshot.uri];
-        if (!url) {
+        const parsed = parseStorageUri(snapshot.uri);
+        if (!parsed) {
           failed.push(table.name);
           continue;
         }
-        const reader = readerFn(snapshot.uri, snapshot.format);
-        // Escape the identifier (double-quote) and the URL string literal (single-quote).
+        const { backendId, key } = parsed;
+
+        if (!secretsByBackend.has(backendId)) {
+          try {
+            const cred = await acquireProxyCred(backendId, "", workerBase, getAuthHeaders);
+            secretsByBackend.set(backendId, buildS3Secret(cred));
+          } catch {
+            failed.push(table.name);
+            continue;
+          }
+        }
+
+        const preamble = secretsByBackend.get(backendId);
+        if (!preamble) {
+          failed.push(table.name);
+          continue;
+        }
+
+        // Partitioned tables (URI ends with /) use glob pattern; single files use exact path.
+        const readExpr = key.endsWith("/")
+          ? `read_parquet('s3://${backendId}/${key}**/*.parquet', hive_partitioning=true)`
+          : `${readerFn(snapshot.uri, snapshot.format)}('s3://${backendId}/${key}')`;
+
         const safeId = table.name.replace(/"/g, '""');
-        const safeUrl = url.replace(/'/g, "''");
         try {
-          await runQuery(
-            db,
-            `CREATE OR REPLACE VIEW "${safeId}" AS SELECT * FROM ${reader}('${safeUrl}')`,
-          );
+          await runQuery(db, `CREATE OR REPLACE VIEW "${safeId}" AS SELECT * FROM ${readExpr}`, [
+            preamble,
+          ]);
         } catch {
           failed.push(table.name);
         }
@@ -216,31 +218,6 @@ export function QueryPanel({ workerBase, getAuthHeaders }: QueryPanelProps) {
     }
   }
 
-  async function handleResolve() {
-    const uris = uriInput
-      .split("\n")
-      .map((s) => s.trim())
-      .filter(Boolean);
-    if (!uris.length) return;
-    setResolving(true);
-    setResolveError(null);
-    try {
-      const headers = await getAuthHeaders();
-      const res = await fetch(`${workerBase}/api/storage/resolve`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...headers },
-        body: JSON.stringify({ uris: uris.map((uri) => ({ uri, method: "GET" })) }),
-      });
-      if (!res.ok) throw new Error(`Resolve failed: ${res.status}`);
-      const data = (await res.json()) as { urls: Record<string, string> };
-      setResolvedUris(uris.map((uri) => ({ uri, url: data.urls[uri] ?? "" })));
-    } catch (err) {
-      setResolveError(err instanceof Error ? err.message : "Resolve failed");
-    } finally {
-      setResolving(false);
-    }
-  }
-
   async function handleRunQuery() {
     const db = dbRef.current;
     if (!db) return;
@@ -254,110 +231,73 @@ export function QueryPanel({ workerBase, getAuthHeaders }: QueryPanelProps) {
         ...new Set([...rawSql.matchAll(WRITE_URI_REGEX)].map((m) => m[1] as string)),
       ];
       const allUris = Array.from(new Set(rawSql.match(STORAGE_URI_REGEX) ?? []));
-      const readUris = allUris.filter((u) => !writeUris.includes(u));
 
-      // DuckDB WASM httpfs doesn't support HTTP PUT, so write URIs are redirected
-      // to a virtual FS temp path; we upload the buffer ourselves after the query.
-      const writeTempMap: Record<string, { tempPath: string; resolvedUrl: string }> = {};
+      if (allUris.length === 0) {
+        const result = await runQuery(db, rawSql);
+        setQueryResult(result);
+        return;
+      }
 
-      let resolvedSql = rawSql;
+      // Separate S3-proxied URIs (r2://, r2-s3compat://) from token-resolved (http-ds://)
+      const s3Uris = allUris.filter((u) => !u.startsWith("http-ds://"));
+      const httpDsUris = allUris.filter((u) => u.startsWith("http-ds://"));
 
-      if (allUris.length > 0) {
-        const uriRequests = [
-          ...readUris.map((uri) => ({ uri, method: "GET" as const })),
-          ...writeUris.map((uri) => ({ uri, method: "PUT" as const })),
-        ];
-        const headers = await getAuthHeaders();
+      // Acquire proxy credentials per backend (read scope for all; writes go natively via DuckDB)
+      const secretsByBackend = new Map<string, string>();
+      const s3UriMap = new Map<string, string>(); // original URI → s3:// URI
+
+      for (const uri of s3Uris) {
+        const parsed = parseStorageUri(uri);
+        if (!parsed) continue;
+        const { backendId, key } = parsed;
+
+        if (!secretsByBackend.has(backendId)) {
+          const cred = await acquireProxyCred(backendId, "", workerBase, getAuthHeaders);
+          secretsByBackend.set(backendId, buildS3Secret(cred));
+        }
+
+        s3UriMap.set(uri, `s3://${backendId}/${key}`);
+      }
+
+      // Resolve http-ds:// URIs via token endpoint
+      const httpDsUrlMap = new Map<string, string>();
+      if (httpDsUris.length > 0) {
+        const authHeaders = await getAuthHeaders();
         const res = await fetch(`${workerBase}/api/storage/resolve`, {
           method: "POST",
-          headers: { "Content-Type": "application/json", ...headers },
-          body: JSON.stringify({ uris: uriRequests }),
+          headers: { "Content-Type": "application/json", ...authHeaders },
+          body: JSON.stringify({ uris: httpDsUris.map((uri) => ({ uri, method: "GET" })) }),
         });
         if (!res.ok) throw new Error(`URI resolution failed: ${res.status}`);
         const data = (await res.json()) as { urls: Record<string, string> };
-
-        writeUris.forEach((uri, i) => {
-          const ext = uri.split(".").pop() ?? "parquet";
-          writeTempMap[uri] = {
-            tempPath: `/tmp/ds_write_${i}.${ext}`,
-            resolvedUrl: data.urls[uri] ?? "",
-          };
-        });
-
-        // Sort longest-first so a URI that is a prefix of another doesn't
-        // corrupt the longer one during substitution.
-        for (const uri of [...allUris].sort((a, b) => b.length - a.length)) {
-          const write = writeTempMap[uri];
-          if (write) {
-            resolvedSql = resolvedSql.replaceAll(uri, write.tempPath);
-          } else {
-            const url = data.urls[uri];
-            if (url) resolvedSql = resolvedSql.replaceAll(uri, url);
-          }
+        for (const uri of httpDsUris) {
+          const url = data.urls[uri];
+          if (url) httpDsUrlMap.set(uri, url);
         }
-
-        const result = await runQuery(db, resolvedSql);
-        setQueryResult(result);
-
-        // Upload files DuckDB wrote to virtual FS (r2-bound writes), then clean up
-        for (const [uri, { tempPath, resolvedUrl }] of Object.entries(writeTempMap)) {
-          if (!resolvedUrl) continue;
-
-          // Partitioned writes (e.g. PARTITION_BY parquet) produce multiple files
-          // under tempPath/ rather than a single file at tempPath.
-          const partitionFiles = await db.globFiles(`${tempPath}/**`);
-
-          if (partitionFiles.length > 0) {
-            // Resolve upload URLs for each partition file in one batch request.
-            const partUris = partitionFiles.map((f) => ({
-              uri: `${uri}/${f.fileName.slice(tempPath.length + 1)}`,
-              method: "PUT" as const,
-            }));
-            const headers = await getAuthHeaders();
-            const partRes = await fetch(`${workerBase}/api/storage/resolve`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json", ...headers },
-              body: JSON.stringify({ uris: partUris }),
-            });
-            if (!partRes.ok) throw new Error(`URI resolution failed: ${partRes.status}`);
-            const partData = (await partRes.json()) as { urls: Record<string, string> };
-            for (let i = 0; i < partitionFiles.length; i++) {
-              const partUrl = partData.urls[partUris[i].uri];
-              if (!partUrl) throw new Error(`No URL resolved for partition: ${partUris[i].uri}`);
-              const buffer = await db.copyFileToBuffer(partitionFiles[i].fileName);
-              const uploadRes = await fetch(partUrl, {
-                method: "PUT",
-                headers: { "Content-Type": "application/vnd.apache.parquet" },
-                body: buffer.buffer as ArrayBuffer,
-              });
-              if (!uploadRes.ok) throw new Error(`Storage upload failed: ${uploadRes.status}`);
-            }
-            await db.dropFiles(partitionFiles.map((f) => f.fileName));
-          } else {
-            // Single-file write (original path).
-            const ext = tempPath.split(".").pop() ?? "";
-            const contentType =
-              ext === "parquet"
-                ? "application/vnd.apache.parquet"
-                : ext === "csv"
-                  ? "text/csv"
-                  : ext === "json" || ext === "ndjson"
-                    ? "application/json"
-                    : "application/octet-stream";
-            const buffer = await db.copyFileToBuffer(tempPath);
-            const uploadRes = await fetch(resolvedUrl, {
-              method: "PUT",
-              headers: { "Content-Type": contentType },
-              body: buffer.buffer as ArrayBuffer,
-            });
-            if (!uploadRes.ok) throw new Error(`Storage upload failed: ${uploadRes.status}`);
-            await db.dropFile(tempPath);
-          }
-        }
-      } else {
-        const result = await runQuery(db, resolvedSql);
-        setQueryResult(result);
       }
+
+      // Rewrite SQL — longest URIs first to avoid prefix-clobber
+      let resolvedSql = rawSql;
+      for (const uri of [...allUris].sort((a, b) => b.length - a.length)) {
+        const s3Uri = s3UriMap.get(uri);
+        if (s3Uri) {
+          resolvedSql = resolvedSql.replaceAll(uri, s3Uri);
+        } else {
+          const tokenUrl = httpDsUrlMap.get(uri);
+          if (tokenUrl) resolvedSql = resolvedSql.replaceAll(uri, tokenUrl);
+        }
+      }
+
+      const preamble = [...secretsByBackend.values()];
+
+      // Write URIs are rewritten to s3:// — DuckDB's httpfs handles PUT natively via the proxy.
+      // No manual buffer-copy needed; the proxy endpoint accepts AWS Sig V4 PUT requests.
+      if (writeUris.length > 0 && s3Uris.some((u) => writeUris.includes(u))) {
+        // Ensure write-destination backends have a credential in the preamble (already acquired above)
+      }
+
+      const result = await runQuery(db, resolvedSql, preamble.length > 0 ? preamble : undefined);
+      setQueryResult(result);
     } catch (err) {
       setQueryError(err instanceof Error ? err.message : "Query failed");
     } finally {
@@ -444,56 +384,6 @@ export function QueryPanel({ workerBase, getAuthHeaders }: QueryPanelProps) {
               {failedViews.length === catalogTables.length ? "No" : "Some"} views could not be
               registered — the snapshot file may not exist in storage yet.
             </p>
-          )}
-        </div>
-      </div>
-
-      {/* URI resolver */}
-      <div class="card bg-base-200">
-        <div class="card-body gap-3">
-          <h2 class="card-title text-base">Resolve Storage URIs</h2>
-          <textarea
-            class="textarea textarea-bordered font-mono text-sm w-full"
-            placeholder={"Storage URIs (one per line)\ne.g. r2://data-shack-storage/sample.ndjson"}
-            rows={3}
-            value={uriInput}
-            onInput={(e) => setUriInput((e.target as HTMLTextAreaElement).value)}
-          />
-          <div>
-            <button
-              type="button"
-              class="btn btn-sm btn-outline"
-              onClick={handleResolve}
-              disabled={resolving || !uriInput.trim()}
-            >
-              {resolving && <span class="loading loading-spinner loading-xs" />}
-              {resolving ? "Resolving…" : "Resolve"}
-            </button>
-          </div>
-          {resolveError && (
-            <div role="alert" class="alert alert-error py-2 text-sm">
-              <span>{resolveError}</span>
-            </div>
-          )}
-          {resolvedUris.length > 0 && (
-            <div class="overflow-x-auto">
-              <table class="table table-xs">
-                <thead>
-                  <tr>
-                    <th>URI</th>
-                    <th>Resolved URL</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {resolvedUris.map(({ uri, url }) => (
-                    <tr key={uri}>
-                      <td class="font-mono">{uri}</td>
-                      <td class="font-mono text-base-content/60 max-w-xs truncate">{url}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
           )}
         </div>
       </div>

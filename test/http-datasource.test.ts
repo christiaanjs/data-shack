@@ -150,7 +150,7 @@ describe("POST /api/storage/resolve with http-ds:// URIs", () => {
     expect(data.urls[uri]).toBeUndefined();
   });
 
-  it("mixes r2:// and http-ds:// URIs in one request", async () => {
+  it("silently omits r2:// URIs (now handled by proxy-credentials, not resolve)", async () => {
     const id = await createCredential("http", LOOPBACK_CONFIG);
     const r2Uri = "r2://data-shack-storage/sample.ndjson";
     const dsUri = `http-ds://${id}/`;
@@ -167,7 +167,8 @@ describe("POST /api/storage/resolve with http-ds:// URIs", () => {
     });
     expect(res.status).toBe(200);
     const data = (await res.json()) as { urls: Record<string, string> };
-    expect(data.urls[r2Uri]).toContain("/api/storage/obj/");
+    // r2:// URIs are no longer handled by /api/storage/resolve
+    expect(data.urls[r2Uri]).toBeUndefined();
     expect(data.urls[dsUri]).toContain("/api/data-sources/obj/");
   });
 });

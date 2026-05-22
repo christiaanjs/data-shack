@@ -33,15 +33,11 @@ import { validateDateRangeConfig, validatePaginationConfig } from "./loaders/con
 import { runHttpLoadJob } from "./loaders/http.ts";
 import {
   parseHttpDsUri,
-  parseR2S3CompatUri,
-  resolveUri,
+  parseS3AuthCredential,
+  r2BoundKey,
   signDataSourceToken,
-  signR2S3CompatToken,
-  signS3PresignedPutUrl,
   signS3Request,
   verifyDataSourceToken,
-  verifyR2S3CompatToken,
-  verifyStorageToken,
 } from "./storage/resolve.ts";
 import type { Env } from "./types.ts";
 
@@ -72,7 +68,14 @@ app.use("*", (c, next) => {
         ? origin
         : null,
     allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowHeaders: ["Content-Type", "Authorization", "X-Dev-Token", "Range"],
+    allowHeaders: [
+      "Content-Type",
+      "Authorization",
+      "X-Dev-Token",
+      "Range",
+      "X-Amz-Date",
+      "X-Amz-Content-SHA256",
+    ],
     exposeHeaders: ["Content-Length", "Content-Range", "Accept-Ranges"],
     maxAge: 86400,
   })(c, next);
@@ -93,97 +96,7 @@ app.route("/", oauthRouter);
 
 app.get("/me", requireAuth, (c) => c.json({ userId: c.get("userId") }));
 
-// ── Storage endpoints ─────────────────────────────────────────────────────
-
-app.post("/api/storage/resolve", requireAuth, async (c) => {
-  const body = await c.req.json<{ uris?: unknown }>();
-  if (!Array.isArray(body.uris)) return c.json({ error: "uris must be an array" }, 400);
-  const workerOrigin = new URL(c.req.url).origin;
-  const userId = c.get("userId");
-  const urls: Record<string, string> = {};
-  for (const item of body.uris) {
-    if (typeof item !== "object" || item === null) continue;
-    const { uri, method: rawMethod } = item as Record<string, unknown>;
-    if (typeof uri !== "string") continue;
-    const method: "GET" | "PUT" = rawMethod === "PUT" ? "PUT" : "GET";
-    try {
-      if (uri.startsWith("http-ds://")) {
-        if (method === "GET") urls[uri] = await resolveHttpDsUri(uri, c.env, userId, workerOrigin);
-      } else if (uri.startsWith("r2-s3compat://")) {
-        const result = await resolveR2S3CompatUri(uri, c.env, userId, workerOrigin, method);
-        urls[uri] = result.url;
-      } else {
-        urls[uri] = await resolveUri(uri, c.env, userId, workerOrigin, method);
-      }
-    } catch (err) {
-      console.error(err);
-    }
-  }
-  return c.json({ urls });
-});
-
-app.on(["GET", "HEAD"], "/api/storage/obj/:token", async (c) => {
-  const token = c.req.param("token");
-  const payload = await verifyStorageToken(token, c.env.JWT_SECRET);
-  if (!payload || payload.method !== "GET") return new Response("Unauthorized", { status: 401 });
-
-  const isHead = c.req.method === "HEAD";
-
-  if (isHead) {
-    const meta = await c.env.R2.head(payload.k);
-    if (!meta) return new Response("Not Found", { status: 404 });
-    const headers = new Headers();
-    headers.set("Content-Length", String(meta.size));
-    headers.set("Accept-Ranges", "bytes");
-    if (meta.httpMetadata?.contentType) headers.set("Content-Type", meta.httpMetadata.contentType);
-    return new Response(null, { headers });
-  }
-
-  const rangeHeader = c.req.header("Range");
-  let r2Options: R2GetOptions | undefined;
-  if (rangeHeader) {
-    const match = rangeHeader.match(/^bytes=(\d+)-(\d*)$/);
-    if (match) {
-      const offset = Number(match[1]);
-      const endStr = match[2];
-      const length = endStr ? Number(endStr) - offset + 1 : undefined;
-      r2Options = length !== undefined ? { range: { offset, length } } : { range: { offset } };
-    }
-  }
-
-  const obj = await c.env.R2.get(payload.k, r2Options);
-  if (!obj) return new Response("Not Found", { status: 404 });
-
-  const headers = new Headers();
-  headers.set("Content-Length", String(obj.size));
-  headers.set("Accept-Ranges", "bytes");
-  if (obj.httpMetadata?.contentType) headers.set("Content-Type", obj.httpMetadata.contentType);
-
-  if (rangeHeader && obj.range) {
-    const range = obj.range as { offset: number; length: number };
-    headers.set(
-      "Content-Range",
-      `bytes ${range.offset}-${range.offset + range.length - 1}/${obj.size}`,
-    );
-    return new Response(obj.body, { status: 206, headers });
-  }
-  return new Response(obj.body, { headers });
-});
-
-app.put("/api/storage/obj/:token", async (c) => {
-  const token = c.req.param("token");
-  const payload = await verifyStorageToken(token, c.env.JWT_SECRET);
-  if (!payload || payload.method !== "PUT") return new Response("Unauthorized", { status: 401 });
-
-  const body = c.req.raw.body;
-  if (!body) return new Response("Bad Request", { status: 400 });
-
-  const contentType = c.req.header("Content-Type") ?? "application/octet-stream";
-  await c.env.R2.put(payload.k, body, { httpMetadata: { contentType } });
-  return new Response(null, { status: 204 });
-});
-
-// ── R2 S3-compatible helpers ──────────────────────────────────────────────
+// ── R2 S3-compatible backend config helper ────────────────────────────────
 
 async function decryptR2S3CompatConfig(
   encryptedConfig: string,
@@ -226,78 +139,231 @@ async function decryptR2S3CompatConfig(
   }
 }
 
-async function resolveR2S3CompatUri(
-  uri: string,
-  env: Env,
-  userId: string,
-  workerOrigin: string,
-  method: "GET" | "PUT" = "GET",
-): Promise<{ url: string }> {
-  const parsed = parseR2S3CompatUri(uri);
-  if (!parsed) throw new Error(`Invalid r2-s3compat URI: ${uri}`);
+// ── S3 proxy helpers ──────────────────────────────────────────────────────
 
-  const row = await getStorageBackendConfig(env.DB, parsed.backendId, userId);
-  if (!row || row.type !== "r2-s3compat")
-    throw new Error(`r2-s3compat backend not found: ${parsed.backendId}`);
-
-  const config = await decryptR2S3CompatConfig(row.encrypted_config, env.JWT_SECRET);
-  if (!config) throw new Error(`Invalid r2-s3compat backend config: ${parsed.backendId}`);
-
-  if (method === "PUT") {
-    const presignedUrl = await signS3PresignedPutUrl({
-      endpoint: config.endpoint,
-      bucket: config.bucket,
-      key: parsed.key,
-      region: config.region,
-      accessKeyId: config.accessKeyId,
-      secretAccessKey: config.secretAccessKey,
-      expiresSeconds: 900,
-    });
-    return { url: presignedUrl };
-  }
-
-  const now = Math.floor(Date.now() / 1000);
-  const token = await signR2S3CompatToken(
-    {
-      sub: "r2-s3compat",
-      aud: "r2-s3compat",
-      iat: now,
-      exp: now + 3600,
-      jti: crypto.randomUUID(),
-      d: parsed.backendId,
-      k: parsed.key,
-      u: userId,
-      method: "GET",
-    },
-    env.JWT_SECRET,
-  );
-
-  return { url: `${workerOrigin}/api/storage/r2s3compat/obj/${token}` };
+function escXml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-// Proxies R2 S3-compatible requests for DuckDB httpfs — token is the auth mechanism.
-app.on(["GET", "HEAD"], "/api/storage/r2s3compat/obj/:token", async (c) => {
-  const token = c.req.param("token");
-  const payload = await verifyR2S3CompatToken(token, c.env.JWT_SECRET);
-  if (!payload || payload.method !== "GET") return new Response("Unauthorized", { status: 401 });
+function buildListXml(
+  bucket: string,
+  prefix: string,
+  objects: Array<{ key: string; size: number }>,
+): string {
+  const contents = objects
+    .map((o) => `<Contents><Key>${escXml(o.key)}</Key><Size>${o.size}</Size></Contents>`)
+    .join("");
+  return `<?xml version="1.0" encoding="UTF-8"?><ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Name>${escXml(bucket)}</Name><Prefix>${escXml(prefix)}</Prefix><KeyCount>${objects.length}</KeyCount><MaxKeys>1000</MaxKeys><IsTruncated>false</IsTruncated>${contents}</ListBucketResult>`;
+}
 
-  const isHead = c.req.method === "HEAD";
+// ── Proxy credential vending ──────────────────────────────────────────────
 
-  const row = await getStorageBackendConfig(c.env.DB, payload.d, payload.u);
+app.post("/api/storage/proxy-credentials", requireAuth, async (c) => {
+  const body = await c.req.json<Record<string, unknown>>();
+  if (typeof body.backendId !== "string" || !body.backendId)
+    return c.json({ error: "backendId is required" }, 400);
+  if (typeof body.pathPrefix !== "string") return c.json({ error: "pathPrefix is required" }, 400);
+
+  const userId = c.get("userId");
+  const backendId = body.backendId;
+  const pathPrefix = body.pathPrefix;
+  const ttlSeconds =
+    typeof body.ttlSeconds === "number" && body.ttlSeconds > 0
+      ? Math.min(body.ttlSeconds, 3600)
+      : 3600;
+
+  if (backendId !== "r2-bound") {
+    const row = await getStorageBackendConfig(c.env.DB, backendId, userId);
+    if (!row) return c.json({ error: "storage backend not found" }, 404);
+  }
+
+  const accessKeyId = `pxy_${crypto.randomUUID().replace(/-/g, "")}`;
+  const secret = crypto.randomUUID();
+
+  await c.env.PROXY_CREDS_KV.put(accessKeyId, JSON.stringify({ userId, backendId, pathPrefix }), {
+    expirationTtl: ttlSeconds,
+  });
+
+  // Read-back loop: confirm KV write is visible before returning to the client
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const check = await c.env.PROXY_CREDS_KV.get(accessKeyId);
+    if (check !== null) break;
+    if (attempt < 4) await new Promise<void>((r) => setTimeout(r, 50 * (attempt + 1)));
+  }
+
+  const workerOrigin = new URL(c.req.url).origin;
+  return c.json({
+    accessKeyId,
+    secret,
+    endpoint: `${workerOrigin}/api/storage/s3proxy`,
+    region: "auto",
+    bucket: backendId,
+  });
+});
+
+// ── S3-compatible proxy (accessKeyId IS the auth — no requireAuth) ────────
+
+app.on(["GET", "HEAD", "PUT"], "/api/storage/s3proxy/*", async (c) => {
+  const reqUrl = new URL(c.req.url);
+  const afterProxy = reqUrl.pathname.slice("/api/storage/s3proxy/".length);
+  const slashIdx = afterProxy.indexOf("/");
+  const bucket = slashIdx === -1 ? afterProxy : afterProxy.slice(0, slashIdx);
+  const key = slashIdx === -1 ? "" : afterProxy.slice(slashIdx + 1);
+  const method = c.req.method as "GET" | "HEAD" | "PUT";
+
+  const authHeader = c.req.header("Authorization") ?? "";
+  const accessKeyId = parseS3AuthCredential(authHeader);
+  if (!accessKeyId) return new Response("Unauthorized", { status: 401 });
+
+  // KV lookup with one retry in case of propagation lag
+  let credJson = await c.env.PROXY_CREDS_KV.get(accessKeyId);
+  if (credJson === null) {
+    await new Promise<void>((r) => setTimeout(r, 100));
+    credJson = await c.env.PROXY_CREDS_KV.get(accessKeyId);
+  }
+  if (credJson === null) return new Response("Unauthorized", { status: 401 });
+
+  const cred = JSON.parse(credJson) as { userId: string; backendId: string; pathPrefix: string };
+
+  if (bucket !== cred.backendId) return new Response("Forbidden", { status: 403 });
+
+  const isList = method === "GET" && key === "" && reqUrl.searchParams.get("list-type") === "2";
+  const checkPath = isList ? (reqUrl.searchParams.get("prefix") ?? "") : key;
+  if (!checkPath.startsWith(cred.pathPrefix)) return new Response("Forbidden", { status: 403 });
+
+  const { userId, backendId } = cred;
+
+  // ── r2-bound ──────────────────────────────────────────────────────────
+
+  if (backendId === "r2-bound") {
+    if (isList) {
+      const listPrefix = reqUrl.searchParams.get("prefix") ?? "";
+      const r2Prefix = r2BoundKey(userId, listPrefix);
+      const listed = await c.env.R2.list({ prefix: r2Prefix });
+      const userPrefixLen = `users/${userId}/`.length;
+      const objects = listed.objects.map((o) => ({
+        key: o.key.slice(userPrefixLen),
+        size: o.size,
+      }));
+      return new Response(buildListXml(bucket, listPrefix, objects), {
+        headers: { "Content-Type": "application/xml" },
+      });
+    }
+
+    const r2Key = r2BoundKey(userId, key);
+
+    if (method === "PUT") {
+      const body = c.req.raw.body;
+      if (!body) return new Response("Bad Request", { status: 400 });
+      const contentType = c.req.header("Content-Type") ?? "application/octet-stream";
+      await c.env.R2.put(r2Key, body, { httpMetadata: { contentType } });
+      return new Response(null, { status: 204 });
+    }
+
+    const isHead = method === "HEAD";
+    if (isHead) {
+      const meta = await c.env.R2.head(r2Key);
+      if (!meta) return new Response("Not Found", { status: 404 });
+      const headers = new Headers();
+      headers.set("Content-Length", String(meta.size));
+      headers.set("Accept-Ranges", "bytes");
+      if (meta.httpMetadata?.contentType)
+        headers.set("Content-Type", meta.httpMetadata.contentType);
+      return new Response(null, { headers });
+    }
+
+    const rangeHeader = c.req.header("Range");
+    let r2Options: R2GetOptions | undefined;
+    if (rangeHeader) {
+      const match = rangeHeader.match(/^bytes=(\d+)-(\d*)$/);
+      if (match) {
+        const offset = Number(match[1]);
+        const endStr = match[2];
+        const length = endStr ? Number(endStr) - offset + 1 : undefined;
+        r2Options = length !== undefined ? { range: { offset, length } } : { range: { offset } };
+      }
+    }
+
+    const obj = await c.env.R2.get(r2Key, r2Options);
+    if (!obj) return new Response("Not Found", { status: 404 });
+
+    const headers = new Headers();
+    headers.set("Content-Length", String(obj.size));
+    headers.set("Accept-Ranges", "bytes");
+    if (obj.httpMetadata?.contentType) headers.set("Content-Type", obj.httpMetadata.contentType);
+
+    if (rangeHeader && obj.range) {
+      const range = obj.range as { offset: number; length: number };
+      headers.set(
+        "Content-Range",
+        `bytes ${range.offset}-${range.offset + range.length - 1}/${obj.size}`,
+      );
+      return new Response(obj.body, { status: 206, headers });
+    }
+    return new Response(obj.body, { headers });
+  }
+
+  // ── r2-s3compat ───────────────────────────────────────────────────────
+
+  const row = await getStorageBackendConfig(c.env.DB, backendId, userId);
   if (!row || row.type !== "r2-s3compat") return new Response("Not Found", { status: 404 });
-
   const config = await decryptR2S3CompatConfig(row.encrypted_config, c.env.JWT_SECRET);
   if (!config) return new Response("Bad Gateway", { status: 502 });
 
+  if (isList) {
+    const queryParams: Record<string, string> = { "list-type": "2" };
+    for (const [k, v] of reqUrl.searchParams) {
+      if (k !== "list-type") queryParams[k] = v;
+    }
+    const { url, headers } = await signS3Request({
+      method: "GET",
+      endpoint: config.endpoint,
+      bucket: config.bucket,
+      key: "",
+      region: config.region,
+      accessKeyId: config.accessKeyId,
+      secretAccessKey: config.secretAccessKey,
+      queryParams,
+    });
+    let upstream: Response;
+    try {
+      upstream = await fetch(url, { method: "GET", headers });
+    } catch {
+      return new Response("Bad Gateway", { status: 502 });
+    }
+    return new Response(upstream.body, {
+      status: upstream.status,
+      headers: { "Content-Type": "application/xml" },
+    });
+  }
+
+  const isHead = method === "HEAD";
   const { url, headers } = await signS3Request({
-    method: isHead ? "HEAD" : "GET",
+    method: isHead ? "HEAD" : method,
     endpoint: config.endpoint,
     bucket: config.bucket,
-    key: payload.k,
+    key,
     region: config.region,
     accessKeyId: config.accessKeyId,
     secretAccessKey: config.secretAccessKey,
   });
+
+  if (method === "PUT") {
+    const putBody = c.req.raw.body;
+    if (!putBody) return new Response("Bad Request", { status: 400 });
+    const contentType = c.req.header("Content-Type") ?? "application/octet-stream";
+    let upstream: Response;
+    try {
+      upstream = await fetch(url, {
+        method: "PUT",
+        headers: { ...headers, "Content-Type": contentType },
+        body: putBody,
+      });
+    } catch {
+      return new Response("Bad Gateway", { status: 502 });
+    }
+    return new Response(null, { status: upstream.status });
+  }
 
   const rangeHeader = c.req.header("Range");
   if (rangeHeader) headers.Range = rangeHeader;
@@ -426,6 +492,30 @@ app.post("/api/data-sources/:id/fetch", requireAuth, async (c) => {
       "Content-Type": upstream.headers.get("Content-Type") ?? "application/octet-stream",
     },
   });
+});
+
+// ── HTTP data source resolve (legacy — still used by http-ds:// URIs in queries) ──
+
+app.post("/api/storage/resolve", requireAuth, async (c) => {
+  const body = await c.req.json<{ uris?: unknown }>();
+  if (!Array.isArray(body.uris)) return c.json({ error: "uris must be an array" }, 400);
+  const workerOrigin = new URL(c.req.url).origin;
+  const userId = c.get("userId");
+  const urls: Record<string, string> = {};
+  for (const item of body.uris) {
+    if (typeof item !== "object" || item === null) continue;
+    const { uri, method: rawMethod } = item as Record<string, unknown>;
+    if (typeof uri !== "string") continue;
+    const method: "GET" | "PUT" = rawMethod === "PUT" ? "PUT" : "GET";
+    try {
+      if (uri.startsWith("http-ds://") && method === "GET") {
+        urls[uri] = await resolveHttpDsUri(uri, c.env, userId, workerOrigin);
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  }
+  return c.json({ urls });
 });
 
 // ── Credentials endpoints ─────────────────────────────────────────────────

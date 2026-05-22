@@ -2,6 +2,7 @@ declare namespace Cloudflare {
   interface Env {
     DB: D1Database;
     R2: R2Bucket;
+    PROXY_CREDS_KV: KVNamespace;
     CATALOG: DurableObjectNamespace;
     LOAD_JOB_QUEUE: Queue<{ jobId: string }>;
     DEV_TOKEN: string;
