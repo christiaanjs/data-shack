@@ -62,10 +62,9 @@ database_id = "1910faa5-f94e-4e15-aedd-648e604a6915"
 binding = "R2"
 bucket_name = "data-shack-storage-staging"
 
-# Create with: wrangler kv:namespace create PROXY_CREDS_KV --env staging
 [[env.staging.kv_namespaces]]
 binding = "PROXY_CREDS_KV"
-id = "00000000-0000-0000-0000-000000000001"
+id = "122d990587e9476e95dedb426b5fbf37"
 
 [[env.staging.durable_objects.bindings]]
 name = "CATALOG"
