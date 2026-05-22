@@ -15,6 +15,7 @@ import {
   getIdentity,
   getUser,
   getUserByEmail,
+  isEmailAllowed,
   linkIdentity,
   updateUserEmail,
 } from "../db/queries.ts";
@@ -38,6 +39,8 @@ interface ProviderIdentity {
   providerId: string;
   verifiedEmail: string | null;
 }
+
+class ForbiddenError extends Error {}
 
 function issuerFromRequest(request: Request): string {
   const url = new URL(request.url);
@@ -243,6 +246,10 @@ async function resolveUserId(
     }
   }
 
+  if (!verifiedEmail || !(await isEmailAllowed(db, verifiedEmail))) {
+    throw new ForbiddenError("Email not permitted to sign up");
+  }
+
   return createUserWithIdentity(db, provider, providerId, verifiedEmail);
 }
 
@@ -274,7 +281,10 @@ export async function handleCallback(request: Request, env: Env): Promise<Respon
   let userId: string;
   try {
     userId = await resolveUserId(env.DB, provider, providerId, verifiedEmail);
-  } catch {
+  } catch (err) {
+    if (err instanceof ForbiddenError) {
+      return new Response("Access denied: email not permitted to sign up", { status: 403 });
+    }
     const retried = await resolveUserId(env.DB, provider, providerId, verifiedEmail);
     userId = retried;
   }

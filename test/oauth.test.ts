@@ -136,6 +136,12 @@ async function doCallback(internalState: string): Promise<Response> {
   });
 }
 
+async function allowEmail(email: string): Promise<void> {
+  await env.DB.prepare("INSERT OR IGNORE INTO allowed_emails (email) VALUES (?)")
+    .bind(email.toLowerCase())
+    .run();
+}
+
 async function fullOAuthFlow(googleUserId: string, email: string | null, emailVerified = true) {
   const { clientId, verifier, internalState } = await beginAuthorizeFlow();
   mockGoogleApis(googleUserId, email, emailVerified);
@@ -655,6 +661,7 @@ describe("GET /oauth/callback", () => {
   afterEach(() => vi.restoreAllMocks());
 
   it("creates a new user and redirects back with an auth code", async () => {
+    await allowEmail("user1001@example.com");
     const { internalState } = await beginAuthorizeFlow();
     mockGoogleApis("g1001", "user1001@example.com");
     const res = await doCallback(internalState);
@@ -665,27 +672,49 @@ describe("GET /oauth/callback", () => {
     expect(loc.searchParams.get("state")).toBe("cs"); // original client state forwarded
   });
 
-  it("creates a user without email when email_verified=false", async () => {
+  it("returns 403 when email is not verified (new user cannot be created)", async () => {
     const { internalState } = await beginAuthorizeFlow();
     mockGoogleApis("g1002", "unverified@example.com", false);
     const res = await doCallback(internalState);
-    expect(res.status).toBe(302);
-    expect(new URL(res.headers.get("Location")!).searchParams.get("code")).toBeTruthy();
+    expect(res.status).toBe(403);
+  });
+
+  it("returns 403 when email is not in the allowlist", async () => {
+    const { internalState } = await beginAuthorizeFlow();
+    mockGoogleApis("g1002b", "notallowed@example.com");
+    const res = await doCallback(internalState);
+    expect(res.status).toBe(403);
   });
 
   it("returns the same user on repeated login with the same Google identity", async () => {
+    await allowEmail("user1003@example.com");
     const { sub: sub1 } = await fullOAuthFlow("g1003", "user1003@example.com");
     const { sub: sub2 } = await fullOAuthFlow("g1003", "user1003@example.com");
     expect(sub1).toBe(sub2);
   });
 
   it("back-fills email on an existing user that had none", async () => {
-    const { sub: sub1 } = await fullOAuthFlow("g1004", null); // no email on first login
-    const { sub: sub2 } = await fullOAuthFlow("g1004", "user1004@example.com");
-    expect(sub1).toBe(sub2); // same user, email was back-filled
+    await allowEmail("user1004@example.com");
+    const userId = crypto.randomUUID();
+    const now = Date.now();
+    await env.DB.prepare("INSERT INTO users (id, email, created_at) VALUES (?, NULL, ?)")
+      .bind(userId, now)
+      .run();
+    await env.DB.prepare(
+      "INSERT INTO oauth_identities (provider, provider_id, user_id, created_at) VALUES (?, ?, ?, ?)",
+    )
+      .bind("google", "g1004", userId, now)
+      .run();
+    const { sub } = await fullOAuthFlow("g1004", "user1004@example.com");
+    expect(sub).toBe(userId);
+    const user = await env.DB.prepare("SELECT email FROM users WHERE id = ?")
+      .bind(userId)
+      .first<{ email: string }>();
+    expect(user?.email).toBe("user1004@example.com");
   });
 
   it("links a new identity to an existing account with a matching verified email", async () => {
+    await allowEmail("shared1005@example.com");
     const sharedEmail = "shared1005@example.com";
     const { sub: originalSub } = await fullOAuthFlow("g1005a", sharedEmail);
     const { sub: linkedSub } = await fullOAuthFlow("g1005b", sharedEmail); // different sub, same email
@@ -704,6 +733,7 @@ describe("end-to-end: OAuth JWT → /me", () => {
   afterEach(() => vi.restoreAllMocks());
 
   it("Google access token authenticates /me", async () => {
+    await allowEmail("user2001@example.com");
     const { tokens } = await fullOAuthFlow("g2001", "user2001@example.com");
     const res = await SELF.fetch("http://localhost/me", {
       headers: { Authorization: `Bearer ${tokens.access_token}` },
@@ -714,6 +744,7 @@ describe("end-to-end: OAuth JWT → /me", () => {
   });
 
   it("refresh token flow works end-to-end", async () => {
+    await allowEmail("user2002@example.com");
     const { clientId, tokens } = await fullOAuthFlow("g2002", "user2002@example.com");
     const res = await tokenRequest({
       grant_type: "refresh_token",
