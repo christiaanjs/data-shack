@@ -55,40 +55,60 @@ async function writePaginatedToR2(
   r2Key: string,
 ): Promise<void> {
   const enc = new TextEncoder();
-  const chunks: Uint8Array[] = [];
-  let totalSize = 0;
+  const MIN_PART = 5 * 1024 * 1024;
+
+  const upload = await r2.createMultipartUpload(r2Key);
+  const parts: R2UploadedPart[] = [];
+  let partNum = 0;
+  let buf: Uint8Array[] = [];
+  let bufSize = 0;
   let first = true;
 
-  function push(s: string): void {
+  function enqueue(s: string): void {
     const chunk = enc.encode(s);
-    chunks.push(chunk);
-    totalSize += chunk.length;
+    buf.push(chunk);
+    bufSize += chunk.length;
   }
 
-  if (format === "json") push("[");
-
-  for await (const items of pages) {
-    for (const item of items) {
-      if (format === "ndjson") {
-        push(`${JSON.stringify(item)}\n`);
-      } else {
-        if (!first) push(",");
-        push(JSON.stringify(item));
-        first = false;
-      }
+  async function flushPart(isLast: boolean): Promise<void> {
+    if (buf.length === 0) return;
+    if (!isLast && bufSize < MIN_PART) return;
+    partNum++;
+    const combined = new Uint8Array(bufSize);
+    let offset = 0;
+    for (const chunk of buf) {
+      combined.set(chunk, offset);
+      offset += chunk.length;
     }
+    buf = [];
+    bufSize = 0;
+    parts.push(await upload.uploadPart(partNum, combined));
   }
 
-  if (format === "json") push("]");
+  try {
+    if (format === "json") enqueue("[");
 
-  const body = new Uint8Array(totalSize);
-  let offset = 0;
-  for (const chunk of chunks) {
-    body.set(chunk, offset);
-    offset += chunk.length;
+    for await (const items of pages) {
+      for (const item of items) {
+        if (format === "ndjson") {
+          enqueue(`${JSON.stringify(item)}\n`);
+        } else {
+          if (!first) enqueue(",");
+          enqueue(JSON.stringify(item));
+          first = false;
+        }
+      }
+      await flushPart(false);
+    }
+
+    if (format === "json") enqueue("]");
+    await flushPart(true);
+  } catch (err) {
+    await upload.abort();
+    throw err;
   }
 
-  await r2.put(r2Key, body);
+  await upload.complete(parts);
 }
 
 async function writePaginatedToS3Multipart(
