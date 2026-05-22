@@ -343,10 +343,7 @@ describe("runHttpLoadJob cursor pagination r2-bound", () => {
   it("fetches a single page when no cursor returned and writes all items as ndjson", async () => {
     const savedFetch = globalThis.fetch;
     globalThis.fetch = async () =>
-      new Response(
-        JSON.stringify({ items: [{ id: 1 }, { id: 2 }], cursor: {} }),
-        { status: 200 },
-      );
+      new Response(JSON.stringify({ items: [{ id: 1 }, { id: 2 }], cursor: {} }), { status: 200 });
     try {
       const job = {
         ...makeJob(credId, backendId, "pg_r2_single"),
@@ -384,16 +381,14 @@ describe("runHttpLoadJob cursor pagination r2-bound", () => {
       capturedUrls.push(url);
       callCount++;
       if (callCount === 1) {
-        return new Response(
-          JSON.stringify({ items: [{ id: 1 }], cursor: { next: "tok2" } }),
-          { status: 200 },
-        );
+        return new Response(JSON.stringify({ items: [{ id: 1 }], cursor: { next: "tok2" } }), {
+          status: 200,
+        });
       }
       if (callCount === 2) {
-        return new Response(
-          JSON.stringify({ items: [{ id: 2 }], cursor: { next: "tok3" } }),
-          { status: 200 },
-        );
+        return new Response(JSON.stringify({ items: [{ id: 2 }], cursor: { next: "tok3" } }), {
+          status: 200,
+        });
       }
       return new Response(JSON.stringify({ items: [{ id: 3 }], cursor: {} }), { status: 200 });
     };
@@ -431,10 +426,7 @@ describe("runHttpLoadJob cursor pagination r2-bound", () => {
     globalThis.fetch = async () => {
       callCount++;
       const cursor = callCount === 1 ? { next: "tok2" } : {};
-      return new Response(
-        JSON.stringify({ items: [{ id: callCount }], cursor }),
-        { status: 200 },
-      );
+      return new Response(JSON.stringify({ items: [{ id: callCount }], cursor }), { status: 200 });
     };
     try {
       const job = {
@@ -507,10 +499,9 @@ describe("runHttpLoadJob cursor pagination r2-bound", () => {
   it("throws when pagination exceeds MAX_PAGINATION_PAGES", async () => {
     const savedFetch = globalThis.fetch;
     globalThis.fetch = async () =>
-      new Response(
-        JSON.stringify({ items: [{ id: 1 }], cursor: { next: "always" } }),
-        { status: 200 },
-      );
+      new Response(JSON.stringify({ items: [{ id: 1 }], cursor: { next: "always" } }), {
+        status: 200,
+      });
     try {
       const job = {
         ...makeJob(credId, backendId, "pg_r2_limit"),
@@ -579,10 +570,9 @@ describe("runHttpLoadJob cursor pagination r2-s3compat multipart", () => {
       // Upstream pages
       upstreamCallCount++;
       const cursor = upstreamCallCount === 1 ? { next: "tok2" } : {};
-      return new Response(
-        JSON.stringify({ items: [{ id: upstreamCallCount }], cursor }),
-        { status: 200 },
-      );
+      return new Response(JSON.stringify({ items: [{ id: upstreamCallCount }], cursor }), {
+        status: 200,
+      });
     };
 
     try {
@@ -641,10 +631,9 @@ describe("runHttpLoadJob cursor pagination r2-s3compat multipart", () => {
       if (url.includes("cursor=")) {
         return new Response("Service Unavailable", { status: 503 });
       }
-      return new Response(
-        JSON.stringify({ items: [{ id: 1 }], cursor: { next: "tok2" } }),
-        { status: 200 },
-      );
+      return new Response(JSON.stringify({ items: [{ id: 1 }], cursor: { next: "tok2" } }), {
+        status: 200,
+      });
     };
 
     try {

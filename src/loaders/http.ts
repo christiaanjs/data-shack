@@ -2,9 +2,9 @@ import { decryptConfig } from "../crypto.ts";
 import type { LoadJob } from "../db/load-jobs.ts";
 import { getCredentialConfig, getStorageBackendConfig } from "../db/settings.ts";
 import { decryptHttpConfig, resolveHeaderTemplates } from "../http-config.ts";
-import type { DateRangeConfig, PaginationConfig } from "./config-types.ts";
 import { r2BoundKey, signS3Request } from "../storage/resolve.ts";
 import type { Env } from "../types.ts";
+import type { DateRangeConfig, PaginationConfig } from "./config-types.ts";
 
 function getAtPath(obj: unknown, path: string): unknown {
   return path
@@ -54,35 +54,41 @@ async function writePaginatedToR2(
   r2: R2Bucket,
   r2Key: string,
 ): Promise<void> {
-  const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
-  const writer = writable.getWriter();
   const enc = new TextEncoder();
-
-  const r2WritePromise = r2.put(r2Key, readable);
-
+  const chunks: Uint8Array[] = [];
+  let totalSize = 0;
   let first = true;
-  try {
-    if (format === "json") await writer.write(enc.encode("["));
 
-    for await (const items of pages) {
-      for (const item of items) {
-        if (format === "ndjson") {
-          await writer.write(enc.encode(`${JSON.stringify(item)}\n`));
-        } else {
-          if (!first) await writer.write(enc.encode(","));
-          await writer.write(enc.encode(JSON.stringify(item)));
-          first = false;
-        }
+  function push(s: string): void {
+    const chunk = enc.encode(s);
+    chunks.push(chunk);
+    totalSize += chunk.length;
+  }
+
+  if (format === "json") push("[");
+
+  for await (const items of pages) {
+    for (const item of items) {
+      if (format === "ndjson") {
+        push(`${JSON.stringify(item)}\n`);
+      } else {
+        if (!first) push(",");
+        push(JSON.stringify(item));
+        first = false;
       }
     }
-
-    if (format === "json") await writer.write(enc.encode("]"));
-    await writer.close();
-  } catch (err) {
-    await writer.abort(err);
-    throw err;
   }
-  await r2WritePromise;
+
+  if (format === "json") push("]");
+
+  const body = new Uint8Array(totalSize);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.length;
+  }
+
+  await r2.put(r2Key, body);
 }
 
 async function writePaginatedToS3Multipart(
@@ -188,14 +194,9 @@ async function writePaginatedToS3Multipart(
 
   // 3. Complete multipart upload
   const xmlParts = parts
-    .map(
-      (p) =>
-        `<Part><PartNumber>${p.partNumber}</PartNumber><ETag>${p.etag}</ETag></Part>`,
-    )
+    .map((p) => `<Part><PartNumber>${p.partNumber}</PartNumber><ETag>${p.etag}</ETag></Part>`)
     .join("");
-  const completeXml = enc.encode(
-    `<CompleteMultipartUpload>${xmlParts}</CompleteMultipartUpload>`,
-  );
+  const completeXml = enc.encode(`<CompleteMultipartUpload>${xmlParts}</CompleteMultipartUpload>`);
   const { url: completeUrl, headers: completeHeaders } = await signS3Request({
     method: "POST",
     ...s3Config,
@@ -208,7 +209,9 @@ async function writePaginatedToS3Multipart(
     body: completeXml,
   });
   if (!completeRes.ok) {
-    throw new Error(`S3 multipart complete failed: ${completeRes.status} ${completeRes.statusText}`);
+    throw new Error(
+      `S3 multipart complete failed: ${completeRes.status} ${completeRes.statusText}`,
+    );
   }
 }
 
@@ -262,7 +265,7 @@ export async function runHttpLoadJob(job: LoadJob, env: Env): Promise<{ uri: str
 
   if (paginationCfg) {
     // Paginated path — iterate pages, write to storage
-    const maxPages = Math.max(1, parseInt(env.MAX_PAGINATION_PAGES ?? "45", 10));
+    const maxPages = Math.max(1, Number.parseInt(env.MAX_PAGINATION_PAGES ?? "45", 10));
 
     async function* fetchPages(): AsyncGenerator<unknown[]> {
       let cursor: string | undefined;
@@ -298,8 +301,7 @@ export async function runHttpLoadJob(job: LoadJob, env: Env): Promise<{ uri: str
         pageCount++;
         if (pageCount >= maxPages) {
           throw new Error(
-            `Pagination exceeded MAX_PAGINATION_PAGES (${maxPages}). ` +
-              "Increase MAX_PAGINATION_PAGES env var or reduce the lookback window.",
+            `Pagination exceeded MAX_PAGINATION_PAGES (${maxPages}). Increase MAX_PAGINATION_PAGES env var or reduce the lookback window.`,
           );
         }
         cursor = nextCursor;
@@ -309,9 +311,9 @@ export async function runHttpLoadJob(job: LoadJob, env: Env): Promise<{ uri: str
     if (backendRow.type === "r2-bound") {
       let raw: { bucket: string };
       try {
-        raw = JSON.parse(
-          await decryptConfig(backendRow.encrypted_config, env.JWT_SECRET),
-        ) as { bucket: string };
+        raw = JSON.parse(await decryptConfig(backendRow.encrypted_config, env.JWT_SECRET)) as {
+          bucket: string;
+        };
       } catch {
         throw new Error(`Invalid storage backend config for: ${job.storage_backend_id}`);
       }
@@ -355,9 +357,9 @@ export async function runHttpLoadJob(job: LoadJob, env: Env): Promise<{ uri: str
     if (backendRow.type === "r2-bound") {
       let raw: { bucket: string };
       try {
-        raw = JSON.parse(
-          await decryptConfig(backendRow.encrypted_config, env.JWT_SECRET),
-        ) as { bucket: string };
+        raw = JSON.parse(await decryptConfig(backendRow.encrypted_config, env.JWT_SECRET)) as {
+          bucket: string;
+        };
       } catch {
         throw new Error(`Invalid storage backend config for: ${job.storage_backend_id}`);
       }
