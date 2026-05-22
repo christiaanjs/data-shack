@@ -219,6 +219,8 @@ describe("S3 proxy r2-bound GET/PUT", () => {
     );
     expect(getRes.status).toBe(200);
     expect(await getRes.text()).toBe(content);
+    // Verify CORS headers are present on GET response
+    expect(getRes.headers.get("Access-Control-Allow-Origin")).toBe("*");
   });
 
   it("scopes writes to the authenticated user", async () => {
@@ -274,5 +276,38 @@ describe("S3 proxy r2-bound LIST", () => {
       { headers: { Authorization: fakeS3Auth(accessKeyId) } },
     );
     expect(res.status).toBe(403);
+  });
+});
+
+// ── r2-bound OPTIONS ──────────────────────────────────────────────────────
+
+describe("S3 proxy r2-bound OPTIONS", () => {
+  it("returns S3-compatible CORS headers without authentication", async () => {
+    const res = await SELF.fetch("http://localhost/api/storage/s3proxy/r2-bound/test.parquet", {
+      method: "OPTIONS",
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBe("*");
+    expect(res.headers.get("Access-Control-Allow-Methods")).toBe("GET, PUT, HEAD, OPTIONS");
+    expect(res.headers.get("Access-Control-Allow-Headers")).toContain("Authorization");
+    expect(res.headers.get("Access-Control-Allow-Headers")).toContain("Content-Type");
+    expect(res.headers.get("Access-Control-Allow-Headers")).toContain("X-Host-Override");
+    expect(res.headers.get("Access-Control-Max-Age")).toBe("86400");
+    expect(res.headers.get("Allow")).toBe("GET, PUT, HEAD, OPTIONS");
+    expect(await res.text()).toBe(""); // No body
+  });
+
+  it("OPTIONS works even with invalid credentials (CORS preflight)", async () => {
+    const res = await SELF.fetch(
+      "http://localhost/api/storage/s3proxy/r2-bound/any/path/test.parquet",
+      {
+        method: "OPTIONS",
+        headers: { Authorization: fakeS3Auth("pxy_invalid_credential") },
+      },
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBe("*");
   });
 });

@@ -15,7 +15,7 @@ export async function initDuckDB(): Promise<duckdb.AsyncDuckDB> {
     new Blob([`importScripts("${bundle.mainWorker}");`], { type: "text/javascript" }),
   );
   const worker = new Worker(blobUrl);
-  const logger = new duckdb.ConsoleLogger(duckdb.LogLevel.WARNING);
+  const logger = new duckdb.ConsoleLogger(duckdb.LogLevel.INFO);
   const db = new duckdb.AsyncDuckDB(logger, worker);
   await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
   URL.revokeObjectURL(blobUrl);

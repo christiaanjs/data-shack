@@ -61,6 +61,10 @@ type Variables = { userId: string };
 const app = new Hono<{ Bindings: Env; Variables: Variables }>();
 
 app.use("*", (c, next) => {
+  // Skip CORS middleware for s3proxy - it handles its own CORS
+  if (c.req.path.startsWith("/api/storage/s3proxy")) {
+    return next();
+  }
   const env = c.env;
   return cors({
     origin: (origin) =>
@@ -203,13 +207,35 @@ app.post("/api/storage/proxy-credentials", requireAuth, async (c) => {
 
 // ── S3-compatible proxy (accessKeyId IS the auth — no requireAuth) ────────
 
-app.on(["GET", "HEAD", "PUT"], "/api/storage/s3proxy/*", async (c) => {
+function addS3ProxyCorsHeaders(headers: Headers): void {
+  headers.set("Access-Control-Allow-Origin", "*");
+  headers.set("Access-Control-Allow-Methods", "GET, PUT, HEAD, OPTIONS");
+  headers.set(
+    "Access-Control-Allow-Headers",
+    "Authorization, Content-Type, Range, X-Amz-Date, X-Amz-Content-SHA256, X-Host-Override",
+  );
+  headers.set("Access-Control-Max-Age", "86400");
+  headers.set(
+    "Access-Control-Expose-Headers",
+    "Content-Length, Content-Range, Accept-Ranges, ETag",
+  );
+}
+
+app.on(["GET", "HEAD", "PUT", "OPTIONS"], "/api/storage/s3proxy/*", async (c) => {
   const reqUrl = new URL(c.req.url);
   const afterProxy = reqUrl.pathname.slice("/api/storage/s3proxy/".length);
   const slashIdx = afterProxy.indexOf("/");
   const bucket = slashIdx === -1 ? afterProxy : afterProxy.slice(0, slashIdx);
   const key = slashIdx === -1 ? "" : afterProxy.slice(slashIdx + 1);
-  const method = c.req.method as "GET" | "HEAD" | "PUT";
+  const method = c.req.method as "GET" | "HEAD" | "PUT" | "OPTIONS";
+
+  // Handle OPTIONS (CORS preflight) without authentication
+  if (method === "OPTIONS") {
+    const headers = new Headers();
+    addS3ProxyCorsHeaders(headers);
+    headers.set("Allow", "GET, PUT, HEAD, OPTIONS");
+    return new Response(null, { status: 200, headers });
+  }
 
   const authHeader = c.req.header("Authorization") ?? "";
   const accessKeyId = parseS3AuthCredential(authHeader);
@@ -223,7 +249,11 @@ app.on(["GET", "HEAD", "PUT"], "/api/storage/s3proxy/*", async (c) => {
   }
   if (credJson === null) return new Response("Unauthorized", { status: 401 });
 
-  const cred = JSON.parse(credJson) as { userId: string; backendId: string; pathPrefix: string };
+  const cred = JSON.parse(credJson) as {
+    userId: string;
+    backendId: string;
+    pathPrefix: string;
+  };
 
   if (bucket !== cred.backendId) return new Response("Forbidden", { status: 403 });
 
@@ -245,9 +275,9 @@ app.on(["GET", "HEAD", "PUT"], "/api/storage/s3proxy/*", async (c) => {
         key: o.key.slice(userPrefixLen),
         size: o.size,
       }));
-      return new Response(buildListXml(bucket, listPrefix, objects), {
-        headers: { "Content-Type": "application/xml" },
-      });
+      const headers = new Headers({ "Content-Type": "application/xml" });
+      addS3ProxyCorsHeaders(headers);
+      return new Response(buildListXml(bucket, listPrefix, objects), { headers });
     }
 
     const r2Key = r2BoundKey(userId, key);
@@ -257,7 +287,9 @@ app.on(["GET", "HEAD", "PUT"], "/api/storage/s3proxy/*", async (c) => {
       if (!body) return new Response("Bad Request", { status: 400 });
       const contentType = c.req.header("Content-Type") ?? "application/octet-stream";
       await c.env.R2.put(r2Key, body, { httpMetadata: { contentType } });
-      return new Response(null, { status: 204 });
+      const headers = new Headers();
+      addS3ProxyCorsHeaders(headers);
+      return new Response(null, { status: 204, headers });
     }
 
     const isHead = method === "HEAD";
@@ -269,6 +301,7 @@ app.on(["GET", "HEAD", "PUT"], "/api/storage/s3proxy/*", async (c) => {
       headers.set("Accept-Ranges", "bytes");
       if (meta.httpMetadata?.contentType)
         headers.set("Content-Type", meta.httpMetadata.contentType);
+      addS3ProxyCorsHeaders(headers);
       return new Response(null, { headers });
     }
 
@@ -291,6 +324,7 @@ app.on(["GET", "HEAD", "PUT"], "/api/storage/s3proxy/*", async (c) => {
     headers.set("Content-Length", String(obj.size));
     headers.set("Accept-Ranges", "bytes");
     if (obj.httpMetadata?.contentType) headers.set("Content-Type", obj.httpMetadata.contentType);
+    addS3ProxyCorsHeaders(headers);
 
     if (rangeHeader && obj.range) {
       const range = obj.range as { offset: number; length: number };
@@ -331,9 +365,11 @@ app.on(["GET", "HEAD", "PUT"], "/api/storage/s3proxy/*", async (c) => {
     } catch {
       return new Response("Bad Gateway", { status: 502 });
     }
+    const listHeaders = new Headers({ "Content-Type": "application/xml" });
+    addS3ProxyCorsHeaders(listHeaders);
     return new Response(upstream.body, {
       status: upstream.status,
-      headers: { "Content-Type": "application/xml" },
+      headers: listHeaders,
     });
   }
 
@@ -362,7 +398,9 @@ app.on(["GET", "HEAD", "PUT"], "/api/storage/s3proxy/*", async (c) => {
     } catch {
       return new Response("Bad Gateway", { status: 502 });
     }
-    return new Response(null, { status: upstream.status });
+    const putHeaders = new Headers();
+    addS3ProxyCorsHeaders(putHeaders);
+    return new Response(null, { status: upstream.status, headers: putHeaders });
   }
 
   const rangeHeader = c.req.header("Range");
@@ -383,6 +421,7 @@ app.on(["GET", "HEAD", "PUT"], "/api/storage/s3proxy/*", async (c) => {
   const contentRange = upstream.headers.get("Content-Range");
   if (contentRange) responseHeaders.set("Content-Range", contentRange);
   responseHeaders.set("Accept-Ranges", "bytes");
+  addS3ProxyCorsHeaders(responseHeaders);
 
   return new Response(isHead ? null : upstream.body, {
     status: upstream.status,
@@ -464,7 +503,10 @@ app.post("/api/data-sources/:id/fetch", requireAuth, async (c) => {
   if (!row) return c.json({ error: "not_found", error_description: "Credential not found" }, 404);
   if (row.type !== "http") {
     return c.json(
-      { error: "invalid_type", error_description: "Credential is not an http data source" },
+      {
+        error: "invalid_type",
+        error_description: "Credential is not an http data source",
+      },
       400,
     );
   }
@@ -526,7 +568,11 @@ app.get("/api/credentials", requireAuth, async (c) => {
 });
 
 app.post("/api/credentials", requireAuth, async (c) => {
-  const body = await c.req.json<{ name?: unknown; type?: unknown; config?: unknown }>();
+  const body = await c.req.json<{
+    name?: unknown;
+    type?: unknown;
+    config?: unknown;
+  }>();
   if (typeof body.name !== "string" || typeof body.type !== "string" || !body.config) {
     return c.json({ error: "name, type, and config are required" }, 400);
   }
@@ -554,7 +600,11 @@ app.get("/api/storage-backends", requireAuth, async (c) => {
 });
 
 app.post("/api/storage-backends", requireAuth, async (c) => {
-  const body = await c.req.json<{ name?: unknown; type?: unknown; config?: unknown }>();
+  const body = await c.req.json<{
+    name?: unknown;
+    type?: unknown;
+    config?: unknown;
+  }>();
   if (typeof body.name !== "string" || typeof body.type !== "string" || !body.config) {
     return c.json({ error: "name, type, and config are required" }, 400);
   }

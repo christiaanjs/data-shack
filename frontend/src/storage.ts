@@ -36,7 +36,11 @@ export async function acquireProxyCred(
     bucket: string;
   };
 
-  const cred: ProxyCred = { ...data, expiresAt: Date.now() + (ttlSeconds - 60) * 1000 };
+  const cred: ProxyCred = {
+    ...data,
+    endpoint: data.endpoint.replace(/^https?:\/\//, ""),
+    expiresAt: Date.now() + (ttlSeconds - 60) * 1000,
+  };
   credCache.set(cacheKey, cred);
   return cred;
 }
