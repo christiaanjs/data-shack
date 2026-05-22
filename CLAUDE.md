@@ -22,15 +22,19 @@ Requires: `wrangler` (or npx), `openssl`, `jq`.
 
 ## Pre-commit checklist
 
-Before every commit, run all three checks from the repo root:
+**Always run all three checks before every commit** — CI enforces the same checks and will fail otherwise:
 
 ```bash
-npm test          # 136 vitest tests across 6 test files via @cloudflare/vitest-pool-workers
+npm test          # 152 vitest tests across 6 test files via @cloudflare/vitest-pool-workers
 npm run typecheck # tsc for worker + tsc -p test/tsconfig.json
 npm run lint      # biome check . (lint + format + import order)
 ```
 
-To auto-fix most lint/format issues: `npx biome check --fix --unsafe .`
+**Never skip `npm run lint`.** Biome enforces formatting, import order, and lint rules across both the worker (`src/`) and frontend (`frontend/src/`). A clean lint check is required before every commit without exception. If lint fails, fix it first — auto-fix covers most issues:
+
+```bash
+npx biome check --fix --unsafe .
+```
 
 Frontend has its own typecheck (no test suite yet):
 

@@ -416,9 +416,7 @@ export function LoadJobsPanel({ workerBase, getAuthHeaders }: LoadJobsPanelProps
                     type="checkbox"
                     class="checkbox checkbox-sm"
                     checked={formDrEnabled}
-                    onChange={(e) =>
-                      setFormDrEnabled((e.target as HTMLInputElement).checked)
-                    }
+                    onChange={(e) => setFormDrEnabled((e.target as HTMLInputElement).checked)}
                   />
                   <span class="text-sm font-medium">Date range windowing</span>
                 </label>
@@ -431,9 +429,7 @@ export function LoadJobsPanel({ workerBase, getAuthHeaders }: LoadJobsPanelProps
                         required
                         class="input input-bordered input-sm w-full font-mono"
                         value={formDrParamFrom}
-                        onInput={(e) =>
-                          setFormDrParamFrom((e.target as HTMLInputElement).value)
-                        }
+                        onInput={(e) => setFormDrParamFrom((e.target as HTMLInputElement).value)}
                         placeholder="start_date"
                       />
                     </fieldset>
@@ -444,9 +440,7 @@ export function LoadJobsPanel({ workerBase, getAuthHeaders }: LoadJobsPanelProps
                         required
                         class="input input-bordered input-sm w-full font-mono"
                         value={formDrParamTo}
-                        onInput={(e) =>
-                          setFormDrParamTo((e.target as HTMLInputElement).value)
-                        }
+                        onInput={(e) => setFormDrParamTo((e.target as HTMLInputElement).value)}
                         placeholder="end_date"
                       />
                     </fieldset>
@@ -455,9 +449,7 @@ export function LoadJobsPanel({ workerBase, getAuthHeaders }: LoadJobsPanelProps
                       <select
                         class="select select-bordered select-sm w-full"
                         value={formDrFormat}
-                        onChange={(e) =>
-                          setFormDrFormat((e.target as HTMLSelectElement).value)
-                        }
+                        onChange={(e) => setFormDrFormat((e.target as HTMLSelectElement).value)}
                       >
                         <option value="iso">iso (full ISO 8601)</option>
                         <option value="iso_date">iso_date (YYYY-MM-DD)</option>
@@ -473,9 +465,7 @@ export function LoadJobsPanel({ workerBase, getAuthHeaders }: LoadJobsPanelProps
                         min="1"
                         class="input input-bordered input-sm w-full"
                         value={formDrLookbackDays}
-                        onInput={(e) =>
-                          setFormDrLookbackDays((e.target as HTMLInputElement).value)
-                        }
+                        onInput={(e) => setFormDrLookbackDays((e.target as HTMLInputElement).value)}
                       />
                     </fieldset>
                   </div>
@@ -508,9 +498,7 @@ export function LoadJobsPanel({ workerBase, getAuthHeaders }: LoadJobsPanelProps
                         required
                         class="input input-bordered input-sm w-full font-mono"
                         value={formPagCursorParam}
-                        onInput={(e) =>
-                          setFormPagCursorParam((e.target as HTMLInputElement).value)
-                        }
+                        onInput={(e) => setFormPagCursorParam((e.target as HTMLInputElement).value)}
                         placeholder="cursor"
                       />
                     </fieldset>
@@ -521,9 +509,7 @@ export function LoadJobsPanel({ workerBase, getAuthHeaders }: LoadJobsPanelProps
                         required
                         class="input input-bordered input-sm w-full font-mono"
                         value={formPagCursorPath}
-                        onInput={(e) =>
-                          setFormPagCursorPath((e.target as HTMLInputElement).value)
-                        }
+                        onInput={(e) => setFormPagCursorPath((e.target as HTMLInputElement).value)}
                         placeholder="cursor.next"
                       />
                       <p class="text-xs text-base-content/50 mt-1">
@@ -532,21 +518,18 @@ export function LoadJobsPanel({ workerBase, getAuthHeaders }: LoadJobsPanelProps
                     </fieldset>
                     <fieldset class="fieldset sm:col-span-2">
                       <legend class="fieldset-legend">
-                        Data path{" "}
-                        <span class="text-base-content/40 font-normal">(optional)</span>
+                        Data path <span class="text-base-content/40 font-normal">(optional)</span>
                       </legend>
                       <input
                         type="text"
                         class="input input-bordered input-sm w-full font-mono"
                         value={formPagDataPath}
-                        onInput={(e) =>
-                          setFormPagDataPath((e.target as HTMLInputElement).value)
-                        }
+                        onInput={(e) => setFormPagDataPath((e.target as HTMLInputElement).value)}
                         placeholder="items"
                       />
                       <p class="text-xs text-base-content/50 mt-1">
-                        Dot-notation path to the data array. If omitted, the entire response body
-                        is used.
+                        Dot-notation path to the data array. If omitted, the entire response body is
+                        used.
                       </p>
                     </fieldset>
                   </div>
