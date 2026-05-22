@@ -1,7 +1,8 @@
 interface ProxyCred {
   accessKeyId: string;
   secret: string;
-  endpoint: string;
+  endpoint: string; // hostname[:port][/path] — protocol stripped
+  useSSL: boolean;
   region: string;
   bucket: string;
   expiresAt: number;
@@ -39,6 +40,7 @@ export async function acquireProxyCred(
   const cred: ProxyCred = {
     ...data,
     endpoint: data.endpoint.replace(/^https?:\/\//, ""),
+    useSSL: data.endpoint.startsWith("https://"),
     expiresAt: Date.now() + (ttlSeconds - 60) * 1000,
   };
   credCache.set(cacheKey, cred);
@@ -54,6 +56,7 @@ export function buildS3Secret(cred: ProxyCred): string {
     `(TYPE s3, ENDPOINT '${cred.endpoint}', ` +
     `KEY_ID '${cred.accessKeyId}', SECRET '${cred.secret}', ` +
     `REGION '${cred.region}', URL_STYLE 'path', ` +
+    `USE_SSL ${cred.useSSL ? "true" : "false"}, ` +
     `SCOPE 's3://${cred.bucket}/')`
   );
 }
