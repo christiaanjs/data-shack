@@ -112,27 +112,25 @@ export function LoadJobsPanel({ workerBase, getAuthHeaders }: LoadJobsPanelProps
     setFormCron(job.cron_schedule);
     setFormError(null);
 
-    const dr = job.date_range_config
-      ? (JSON.parse(job.date_range_config) as {
-          param_from: string;
-          param_to: string;
-          format: string;
-          lookback_days: number;
-        })
-      : null;
+    let dr: { param_from: string; param_to: string; format: string; lookback_days: number } | null =
+      null;
+    try {
+      dr = job.date_range_config ? JSON.parse(job.date_range_config) : null;
+    } catch {
+      /* leave dr null — form shows disabled with defaults */
+    }
     setFormDrEnabled(dr !== null);
     setFormDrParamFrom(dr?.param_from ?? "start");
     setFormDrParamTo(dr?.param_to ?? "end");
     setFormDrFormat(dr?.format ?? "iso_date");
     setFormDrLookbackDays(String(dr?.lookback_days ?? 7));
 
-    const pag = job.pagination_config
-      ? (JSON.parse(job.pagination_config) as {
-          cursor_param: string;
-          cursor_path: string;
-          data_path?: string;
-        })
-      : null;
+    let pag: { cursor_param: string; cursor_path: string; data_path?: string } | null = null;
+    try {
+      pag = job.pagination_config ? JSON.parse(job.pagination_config) : null;
+    } catch {
+      /* leave pag null — form shows disabled with defaults */
+    }
     setFormPagEnabled(pag !== null);
     setFormPagCursorParam(pag?.cursor_param ?? "cursor");
     setFormPagCursorPath(pag?.cursor_path ?? "cursor.next");

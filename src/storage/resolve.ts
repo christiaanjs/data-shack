@@ -264,7 +264,7 @@ export async function signS3Request(opts: {
   const canonicalQueryString = opts.queryParams
     ? Object.entries(opts.queryParams)
         .sort(([a], [b]) => a.localeCompare(b))
-        .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+        .map(([k, v]) => `${s3EncodeSegment(k)}=${s3EncodeSegment(v)}`)
         .join("&")
     : "";
   const url = canonicalQueryString

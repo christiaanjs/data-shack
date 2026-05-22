@@ -4,7 +4,12 @@ import { getCredentialConfig, getStorageBackendConfig } from "../db/settings.ts"
 import { decryptHttpConfig, resolveHeaderTemplates } from "../http-config.ts";
 import { r2BoundKey, signS3Request } from "../storage/resolve.ts";
 import type { Env } from "../types.ts";
-import type { DateRangeConfig, PaginationConfig } from "./config-types.ts";
+import {
+  type DateRangeConfig,
+  type PaginationConfig,
+  validateDateRangeConfig,
+  validatePaginationConfig,
+} from "./config-types.ts";
 
 function getAtPath(obj: unknown, path: string): unknown {
   return path
@@ -28,6 +33,8 @@ function formatDate(date: Date, fmt: DateRangeConfig["format"]): string {
       return String(Math.floor(date.getTime() / 1000));
     case "unix_ms":
       return String(date.getTime());
+    default:
+      throw new Error(`Unknown date format: ${fmt as string}`);
   }
 }
 
@@ -254,9 +261,15 @@ export async function runHttpLoadJob(job: LoadJob, env: Env): Promise<{ uri: str
   const urlObj = new URL(httpConfig.baseUrl.replace(/\/$/, "") + path);
 
   // Apply date range params if configured
-  const dateRangeCfg: DateRangeConfig | null = job.date_range_config
-    ? (JSON.parse(job.date_range_config) as DateRangeConfig)
-    : null;
+  let dateRangeCfg: DateRangeConfig | null = null;
+  if (job.date_range_config) {
+    try {
+      dateRangeCfg = validateDateRangeConfig(JSON.parse(job.date_range_config));
+    } catch {
+      /* fall through to null */
+    }
+    if (!dateRangeCfg) throw new Error(`Invalid date_range_config for job: ${job.id}`);
+  }
   if (dateRangeCfg) {
     const now = new Date();
     const start = new Date(now.getTime() - dateRangeCfg.lookback_days * 86_400_000);
@@ -277,15 +290,22 @@ export async function runHttpLoadJob(job: LoadJob, env: Env): Promise<{ uri: str
   }
 
   // 5. Execute: paginated or single-request
-  const paginationCfg: PaginationConfig | null = job.pagination_config
-    ? (JSON.parse(job.pagination_config) as PaginationConfig)
-    : null;
+  let paginationCfg: PaginationConfig | null = null;
+  if (job.pagination_config) {
+    try {
+      paginationCfg = validatePaginationConfig(JSON.parse(job.pagination_config));
+    } catch {
+      /* fall through to null */
+    }
+    if (!paginationCfg) throw new Error(`Invalid pagination_config for job: ${job.id}`);
+  }
 
   let uri: string;
 
   if (paginationCfg) {
     // Paginated path — iterate pages, write to storage
-    const maxPages = Math.max(1, Number.parseInt(env.MAX_PAGINATION_PAGES ?? "45", 10));
+    const rawMaxPages = Number.parseInt(env.MAX_PAGINATION_PAGES ?? "45", 10);
+    const maxPages = Number.isFinite(rawMaxPages) && rawMaxPages > 0 ? rawMaxPages : 45;
 
     async function* fetchPages(): AsyncGenerator<unknown[]> {
       let cursor: string | undefined;
