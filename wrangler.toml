@@ -11,10 +11,9 @@ database_id = "b5f7796d-323f-49d0-aca1-e39a64bdb55b"
 binding = "R2"
 bucket_name = "data-shack-storage"
 
-# Create with: wrangler kv:namespace create PROXY_CREDS_KV
 [[kv_namespaces]]
 binding = "PROXY_CREDS_KV"
-id = "00000000-0000-0000-0000-000000000000"
+id = "bead93e6e210407094d6fa99327784b5"
 
 [[durable_objects.bindings]]
 name = "CATALOG"

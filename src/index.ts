@@ -286,8 +286,9 @@ app.on(["GET", "HEAD", "PUT", "OPTIONS"], "/api/storage/s3proxy/*", async (c) =>
       const body = c.req.raw.body;
       if (!body) return new Response("Bad Request", { status: 400 });
       const contentType = c.req.header("Content-Type") ?? "application/octet-stream";
-      await c.env.R2.put(r2Key, body, { httpMetadata: { contentType } });
+      const result = await c.env.R2.put(r2Key, body, { httpMetadata: { contentType } });
       const headers = new Headers();
+      if (result.httpEtag) headers.set("ETag", result.httpEtag);
       addS3ProxyCorsHeaders(headers);
       return new Response(null, { status: 204, headers });
     }
@@ -301,6 +302,7 @@ app.on(["GET", "HEAD", "PUT", "OPTIONS"], "/api/storage/s3proxy/*", async (c) =>
       headers.set("Accept-Ranges", "bytes");
       if (meta.httpMetadata?.contentType)
         headers.set("Content-Type", meta.httpMetadata.contentType);
+      if (meta.httpEtag) headers.set("ETag", meta.httpEtag);
       addS3ProxyCorsHeaders(headers);
       return new Response(null, { headers });
     }
@@ -324,6 +326,7 @@ app.on(["GET", "HEAD", "PUT", "OPTIONS"], "/api/storage/s3proxy/*", async (c) =>
     headers.set("Content-Length", String(obj.size));
     headers.set("Accept-Ranges", "bytes");
     if (obj.httpMetadata?.contentType) headers.set("Content-Type", obj.httpMetadata.contentType);
+    if (obj.httpEtag) headers.set("ETag", obj.httpEtag);
     addS3ProxyCorsHeaders(headers);
 
     if (rangeHeader && obj.range) {
@@ -399,6 +402,8 @@ app.on(["GET", "HEAD", "PUT", "OPTIONS"], "/api/storage/s3proxy/*", async (c) =>
       return new Response("Bad Gateway", { status: 502 });
     }
     const putHeaders = new Headers();
+    const etag = upstream.headers.get("ETag");
+    if (etag) putHeaders.set("ETag", etag);
     addS3ProxyCorsHeaders(putHeaders);
     return new Response(null, { status: upstream.status, headers: putHeaders });
   }
@@ -420,6 +425,8 @@ app.on(["GET", "HEAD", "PUT", "OPTIONS"], "/api/storage/s3proxy/*", async (c) =>
   if (contentType) responseHeaders.set("Content-Type", contentType);
   const contentRange = upstream.headers.get("Content-Range");
   if (contentRange) responseHeaders.set("Content-Range", contentRange);
+  const etag = upstream.headers.get("ETag");
+  if (etag) responseHeaders.set("ETag", etag);
   responseHeaders.set("Accept-Ranges", "bytes");
   addS3ProxyCorsHeaders(responseHeaders);
 

@@ -206,6 +206,9 @@ describe("S3 proxy r2-bound GET/PUT", () => {
       },
     );
     expect(putRes.status).toBe(204);
+    // Verify PUT returns ETag
+    expect(putRes.headers.get("ETag")).toBeTruthy();
+    const etag = putRes.headers.get("ETag");
 
     // Verify stored under user-scoped R2 key
     const stored = await env.R2.get("users/usr_test/proxy-write-test.txt");
@@ -221,6 +224,8 @@ describe("S3 proxy r2-bound GET/PUT", () => {
     expect(await getRes.text()).toBe(content);
     // Verify CORS headers are present on GET response
     expect(getRes.headers.get("Access-Control-Allow-Origin")).toBe("*");
+    // Verify GET returns the same ETag
+    expect(getRes.headers.get("ETag")).toBe(etag);
   });
 
   it("scopes writes to the authenticated user", async () => {
