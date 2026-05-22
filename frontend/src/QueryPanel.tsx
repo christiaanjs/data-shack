@@ -300,25 +300,59 @@ export function QueryPanel({ workerBase, getAuthHeaders }: QueryPanelProps) {
         setQueryResult(result);
 
         // Upload files DuckDB wrote to virtual FS (r2-bound writes), then clean up
-        for (const { tempPath, resolvedUrl } of Object.values(writeTempMap)) {
+        for (const [uri, { tempPath, resolvedUrl }] of Object.entries(writeTempMap)) {
           if (!resolvedUrl) continue;
-          const ext = tempPath.split(".").pop() ?? "";
-          const contentType =
-            ext === "parquet"
-              ? "application/vnd.apache.parquet"
-              : ext === "csv"
-                ? "text/csv"
-                : ext === "json" || ext === "ndjson"
-                  ? "application/json"
-                  : "application/octet-stream";
-          const buffer = await db.copyFileToBuffer(tempPath);
-          const uploadRes = await fetch(resolvedUrl, {
-            method: "PUT",
-            headers: { "Content-Type": contentType },
-            body: buffer.buffer as ArrayBuffer,
-          });
-          if (!uploadRes.ok) throw new Error(`Storage upload failed: ${uploadRes.status}`);
-          await db.dropFile(tempPath);
+
+          // Partitioned writes (e.g. PARTITION_BY parquet) produce multiple files
+          // under tempPath/ rather than a single file at tempPath.
+          const partitionFiles = await db.globFiles(`${tempPath}/**`);
+
+          if (partitionFiles.length > 0) {
+            // Resolve upload URLs for each partition file in one batch request.
+            const partUris = partitionFiles.map((f) => ({
+              uri: `${uri}/${f.fileName.slice(tempPath.length + 1)}`,
+              method: "PUT" as const,
+            }));
+            const headers = await getAuthHeaders();
+            const partRes = await fetch(`${workerBase}/api/storage/resolve`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", ...headers },
+              body: JSON.stringify({ uris: partUris }),
+            });
+            if (!partRes.ok) throw new Error(`URI resolution failed: ${partRes.status}`);
+            const partData = (await partRes.json()) as { urls: Record<string, string> };
+            for (let i = 0; i < partitionFiles.length; i++) {
+              const partUrl = partData.urls[partUris[i].uri];
+              if (!partUrl) throw new Error(`No URL resolved for partition: ${partUris[i].uri}`);
+              const buffer = await db.copyFileToBuffer(partitionFiles[i].fileName);
+              const uploadRes = await fetch(partUrl, {
+                method: "PUT",
+                headers: { "Content-Type": "application/vnd.apache.parquet" },
+                body: buffer.buffer as ArrayBuffer,
+              });
+              if (!uploadRes.ok) throw new Error(`Storage upload failed: ${uploadRes.status}`);
+            }
+            await db.dropFiles(partitionFiles.map((f) => f.fileName));
+          } else {
+            // Single-file write (original path).
+            const ext = tempPath.split(".").pop() ?? "";
+            const contentType =
+              ext === "parquet"
+                ? "application/vnd.apache.parquet"
+                : ext === "csv"
+                  ? "text/csv"
+                  : ext === "json" || ext === "ndjson"
+                    ? "application/json"
+                    : "application/octet-stream";
+            const buffer = await db.copyFileToBuffer(tempPath);
+            const uploadRes = await fetch(resolvedUrl, {
+              method: "PUT",
+              headers: { "Content-Type": contentType },
+              body: buffer.buffer as ArrayBuffer,
+            });
+            if (!uploadRes.ok) throw new Error(`Storage upload failed: ${uploadRes.status}`);
+            await db.dropFile(tempPath);
+          }
         }
       } else {
         const result = await runQuery(db, resolvedSql);
