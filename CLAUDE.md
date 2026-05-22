@@ -25,7 +25,7 @@ Requires: `wrangler` (or npx), `openssl`, `jq`.
 **Always run all three checks before every commit** — CI enforces the same checks and will fail otherwise:
 
 ```bash
-npm test          # 152 vitest tests across 6 test files via @cloudflare/vitest-pool-workers
+npm test          # 164 vitest tests across 8 test files via @cloudflare/vitest-pool-workers
 npm run typecheck # tsc for worker + tsc -p test/tsconfig.json
 npm run lint      # biome check . (lint + format + import order)
 ```
@@ -41,6 +41,8 @@ Frontend has its own typecheck (no test suite yet):
 ```bash
 cd frontend && npm run typecheck
 ```
+
+`aws4fetch` is a dev dependency used only in `test/proxy-s3client.test.ts` — it is not imported by any worker source file and will never appear in the Wrangler bundle.
 
 ## Repository structure
 
@@ -69,6 +71,8 @@ They have separate `node_modules`, `package.json`, and `tsconfig.json`. The work
 **Key D1 tables:** `users`, `oauth_identities`, `oauth_states`, `oauth_clients`, `oauth_codes`, `oauth_refresh_tokens`, `credentials`, `storage_backends`, `load_jobs`. All timestamp columns are Unix milliseconds (`Date.now()`).
 
 **Load jobs:** Cron-triggered HTTP→storage ETL jobs. The `scheduled()` handler queries D1 for due jobs and enqueues `{ jobId }` messages to `LOAD_JOB_QUEUE`. The `queue()` consumer fetches the job, runs `runHttpLoadJob` from `src/loaders/http.ts` (HTTP fetch → R2/S3 write → catalog commit), then updates `last_run_at`/`last_error`/`next_run_at` in D1. On failure, the job error is persisted and the message is retried (up to `max_retries = 3`). `POST /api/load-jobs/:id/trigger` enqueues directly for on-demand runs.
+
+**S3-compatible storage proxy:** `POST /api/storage/proxy-credentials` (behind `requireAuth`) vends a short-lived `{ accessKeyId, secret, endpoint, region, bucket }` credential stored in `PROXY_CREDS_KV` with TTL. `GET|HEAD|PUT|OPTIONS /api/storage/s3proxy/:bucket/*key` (no `requireAuth` — the `accessKeyId` from the AWS4 `Authorization` header is the auth) forwards to the real backend: R2 binding for `r2-bound`, re-signed upstream S3 request for `r2-s3compat`. A `GET` with `?list-type=2` triggers `R2.list()` and returns S3 `ListBucketResult` XML. All responses carry CORS headers. The frontend (`frontend/src/storage.ts`) calls `acquireProxyCred()` and `buildS3Secret()` to configure DuckDB's httpfs via `CREATE OR REPLACE SECRET`.
 
 ## Frontend architecture
 
@@ -102,6 +106,7 @@ npm run migrate:local  # Apply migrations to local D1
 # Required frontend/.env.local (gitignored):
 # VITE_WORKER_URL=http://localhost:8787
 # VITE_DEV_TOKEN=some-local-secret   # optional, skips OAuth
+# VITE_DUCKDB_LOG_LEVEL=DEBUG        # optional: DEBUG|INFO|WARNING|ERROR (default: INFO in dev, WARNING in prod)
 
 cd frontend && npm run dev  # SPA on http://localhost:5173
 ```
@@ -138,7 +143,9 @@ The `TEST_MIGRATIONS` binding in `vitest.config.ts` is populated from the `migra
 **Test files:**
 - `test/oauth.test.ts` — OAuth flow, auth middleware
 - `test/http-datasource.test.ts` — `http` credential type and `http-ds://` proxy
-- `test/storage.test.ts` — R2 and r2-s3compat URI resolution, storage backends CRUD
+- `test/storage.test.ts` — Credentials and storage backends CRUD
+- `test/proxy.test.ts` — S3 proxy: credential vending, GET/HEAD/PUT/LIST/OPTIONS, path enforcement, CORS, ETags
+- `test/proxy-s3client.test.ts` — Functional S3 client tests using `aws4fetch` against Miniflare; exercises the full Sig V4 → proxy → R2 round-trip
 - `test/catalog.test.ts` — Catalog DO: tables, snapshots, commits
 - `test/load-jobs.test.ts` — Load jobs CRUD, trigger endpoint, scheduler/consumer helpers
 - `test/loader.test.ts` — `runHttpLoadJob` unit tests (mocked fetch, both backend types)

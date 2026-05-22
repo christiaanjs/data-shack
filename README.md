@@ -9,8 +9,8 @@ A personal data integration platform built on Cloudflare that brings your data t
 | OAuth 2.0 worker (Google, PKCE, DCR, JWT, refresh rotation) | ✅ Done |
 | D1 schema: users, oauth tables, credentials, storage_backends | ✅ Done |
 | Credential + storage backend vault (AES-GCM encrypted in D1) | ✅ Done |
-| R2 storage proxy: URI resolution, signed tokens, Range streaming | ✅ Done |
-| Storage write path: `COPY TO 'r2://…'` and `COPY TO 'r2-s3compat://…'` from DuckDB WASM | ✅ Done |
+| S3-compatible storage proxy: KV-backed proxy credentials, GET/HEAD/PUT/LIST/OPTIONS with CORS and ETags | ✅ Done |
+| Partitioned writes and hive-partitioned reads: DuckDB `COPY TO … PARTITION_BY` and `read_parquet('…/**/*.parquet', hive_partitioning=true)` | ✅ Done |
 | DuckDB-WASM query engine in the browser | ✅ Done |
 | Query UI: URI resolver + SQL editor + results table | ✅ Done |
 | Settings UI: manage credentials and storage backends | ✅ Done |
@@ -30,39 +30,41 @@ See [`build-plan.md`](./build-plan.md) for the full sequenced plan.
 
 ## Current capability
 
-### Querying object storage (R2)
+### Querying object storage (R2 and S3-compatible)
 
-A signed-in user can write files to the R2 bucket and query them with SQL directly in the browser:
+A signed-in user can query files in R2 or any S3-compatible backend from DuckDB running in the browser. The frontend requests short-lived proxy credentials from the worker (`POST /api/storage/proxy-credentials`), configures DuckDB's httpfs with a `CREATE SECRET`, and all storage traffic flows through `/api/storage/s3proxy` on the worker.
 
-1. Upload a file to R2:
-   ```
-   wrangler r2 object put data-shack-storage/sample.ndjson --file sample.ndjson
-   ```
-2. Open the **Query** tab and run:
-   ```sql
-   SELECT * FROM read_json('r2://data-shack-storage/sample.ndjson') LIMIT 100
-   ```
-   The worker resolves the `r2://` URI to a short-lived signed URL and DuckDB reads the file directly.
+Seed a file to try it:
+```
+wrangler r2 object put data-shack-storage/sample.ndjson --file sample.ndjson
+```
+
+Then query it from the **Query** tab:
+```sql
+-- Single file
+SELECT * FROM read_json('r2://data-shack-storage/sample.ndjson') LIMIT 100
+
+-- Hive-partitioned dataset (worker serves the ListObjectsV2 DuckDB needs to discover partitions)
+SELECT * FROM read_parquet('r2-s3compat://sb_abc123/data/**/*.parquet', hive_partitioning=true)
+```
+
+The `r2://` and `r2-s3compat://` URI schemes are automatically translated to `s3://backendId/key` and backed by the proxy; DuckDB never sees raw storage credentials.
 
 ### Writing query results to storage
 
-DuckDB can write query results directly to the R2 bucket or an r2-s3compat backend using `COPY TO`:
+DuckDB writes natively to the S3 proxy using the same proxy credential as reads. Partitioned writes work because DuckDB drives every `PUT` through the credential — no special setup required:
 
 ```sql
--- Write to the bound R2 bucket
-COPY (SELECT * FROM read_json('r2://data-shack-storage/raw.ndjson')) TO 'r2://data-shack-storage/output.parquet' (FORMAT PARQUET)
+-- Single file
+COPY (SELECT * FROM read_json('r2://data-shack-storage/raw.ndjson'))
+TO 'r2://data-shack-storage/output.parquet' (FORMAT PARQUET)
 
--- Write to an r2-s3compat backend (storage backend ID from Settings)
-COPY (SELECT 1 AS id, 'hello' AS msg) TO 'r2-s3compat://sb_abc123/output.parquet' (FORMAT PARQUET)
+-- Partitioned by column — DuckDB generates one file per partition automatically
+COPY (SELECT date_trunc('month', created_at) AS month, amount FROM transactions)
+TO 'r2-s3compat://sb_abc123/data/spending' (FORMAT PARQUET, PARTITION_BY (month), OVERWRITE_OR_IGNORE true)
 ```
 
-For `r2://` writes, the frontend resolves a short-lived PUT token, DuckDB writes to its virtual FS, and JS uploads the buffer via `fetch`. For `r2-s3compat://` writes, the worker returns S3 credentials directly and DuckDB writes natively via its built-in S3 httpfs — to enable this, apply the included CORS policy to your R2 bucket:
-
-```bash
-wrangler r2 bucket cors set <bucket-name> --file r2-cors.json
-```
-
-The `POST /api/storage/resolve` endpoint handles both read and write URI resolution via a `method: "GET" | "PUT"` field per URI — no separate endpoint needed.
+No CORS policy is needed on the upstream bucket. All storage traffic goes through the worker proxy endpoint, which re-signs requests to the real backend before forwarding.
 
 ### Catalog: tracking and querying tables
 
@@ -134,7 +136,7 @@ The **Settings** tab also stores storage backend configs (encrypted in D1). The 
 
 The system is built on Cloudflare's stack (Workers, D1, R2, Durable Objects, Pages) with OAuth 2.0 (Google) and JWT-based authentication. SQL execution happens in a **browser-local DuckDB-WASM instance** rather than on the server. The server orchestrates; your browser computes.
 
-The key structural insight is a clean split between the **control plane** (all traffic through the Worker proxy) and the **data plane** (browser reads and writes object storage directly via Worker-resolved URLs). Large Parquet files never pass through a Worker. Storage backends are pluggable — the catalog records URIs, the Worker proxy resolves them to HTTPS URLs at access time, and DuckDB's `httpfs` is unaware of which backend it's talking to.
+The Worker proxy acts as an S3-compatible endpoint: the browser requests short-lived proxy credentials from `POST /api/storage/proxy-credentials`, configures DuckDB's httpfs with a `CREATE OR REPLACE SECRET`, and all subsequent storage operations (GET, HEAD, PUT, ListObjectsV2) flow through `/api/storage/s3proxy` on the Worker. Storage backends are pluggable — the Worker translates the S3 protocol to R2 binding calls (for `r2-bound`) or re-signed upstream S3 requests (for `r2-s3compat`), and DuckDB is unaware of which backend it's talking to.
 
 ## Core Components
 
@@ -224,22 +226,19 @@ Dashboards are React artifacts with props bound to SQL queries. The authoring wo
 
 Storage backends are configured in D1's `storage_backends` table and referenced by ID in catalog snapshot records. The catalog stores URIs (`r2://bucket/key`, `s3://bucket/key`, `https://…`); the Worker proxy resolves them to plain HTTPS URLs at access time. DuckDB's `httpfs` is unaware of which backend it is reading from.
 
-| Backend type | Mechanism | Notes |
+| Backend type | Proxy mechanism | Notes |
 |---|---|---|
-| `r2-bound` | R2 Worker binding → signed URL | Primary bucket in same Cloudflare account |
-| `s3` | SigV4-signed URL | AWS S3 or any S3-compatible endpoint |
-| `r2-s3compat` | SigV4-signed URL (R2 S3 endpoint) | R2 in another account |
-| `gcs` | Signed URL via service account | Google Cloud Storage |
-| `azure` | SAS token URL | Azure Blob Storage |
+| `r2-bound` | S3 proxy → R2 Worker binding | Primary bucket in same Cloudflare account |
+| `r2-s3compat` | S3 proxy → re-signed upstream S3 request | R2 in another account, or any S3-compatible service |
+| `s3`, `gcs`, `azure` | Not yet implemented | Deferred to a later stage |
 | `https` | Passthrough (domain allowlist check) | Publicly accessible data |
 
-| Operation | Mechanism | Reason |
-|---|---|---|
-| ETL Worker writes (primary R2) | Native Worker binding | Direct R2 access; no credentials exposed |
-| ETL Worker writes (other backends) | `fetch()` with credentials from D1 | Binding only works for same-account R2 |
-| Browser reads Parquet/NDJSON | Worker-resolved HTTPS URL | Files can be large; avoids Worker memory limits |
-| Browser writes compacted Parquet | Worker-resolved writable URL | Same; Worker validates URI prefix before resolving |
-| Catalog and credential operations | Proxied through Worker | Small payloads; centralised auth check is valuable |
+| Operation | Mechanism |
+|---|---|
+| ETL Worker writes (primary R2) | Native Worker binding — direct R2 access |
+| ETL Worker writes (other backends) | `fetch()` with credentials from D1 |
+| Browser reads / writes / lists storage | S3 proxy (`/api/storage/s3proxy`) with KV-backed proxy credentials; Worker forwards to real backend |
+| Catalog and credential operations | Proxied through Worker; small payloads |
 
 Writable URLs are only resolved for URIs matching the user's namespace and expected schema. The Worker rejects out-of-namespace requests before resolving. Adding a new storage backend requires a resolver case in the Worker proxy and a row in `storage_backends` — no catalog schema changes or browser changes required.
 
