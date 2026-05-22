@@ -41,7 +41,7 @@ export async function acquireProxyCred(
     ...data,
     endpoint: data.endpoint.replace(/^https?:\/\//, ""),
     useSSL: data.endpoint.startsWith("https://"),
-    expiresAt: Date.now() + (ttlSeconds - 60) * 1000,
+    expiresAt: Date.now() + (Math.min(ttlSeconds, 3600) - 60) * 1000,
   };
   credCache.set(cacheKey, cred);
   return cred;

@@ -182,6 +182,8 @@ app.post("/api/storage/proxy-credentials", requireAuth, async (c) => {
   }
 
   const accessKeyId = `pxy_${crypto.randomUUID().replace(/-/g, "")}`;
+  // secret is a dummy value — DuckDB requires it for Sig V4 computation but the proxy
+  // never validates the signature. accessKeyId is the effective bearer token.
   const secret = crypto.randomUUID();
 
   await c.env.PROXY_CREDS_KV.put(accessKeyId, JSON.stringify({ userId, backendId, pathPrefix }), {
@@ -189,11 +191,13 @@ app.post("/api/storage/proxy-credentials", requireAuth, async (c) => {
   });
 
   // Read-back loop: confirm KV write is visible before returning to the client
+  let kvReady = false;
   for (let attempt = 0; attempt < 5; attempt++) {
     const check = await c.env.PROXY_CREDS_KV.get(accessKeyId);
-    if (check !== null) break;
+    if (check !== null) { kvReady = true; break; }
     if (attempt < 4) await new Promise<void>((r) => setTimeout(r, 50 * (attempt + 1)));
   }
+  if (!kvReady) return c.json({ error: "credential store not ready, please retry" }, 502);
 
   const workerOrigin = new URL(c.req.url).origin;
   return c.json({
@@ -239,15 +243,24 @@ app.on(["GET", "HEAD", "PUT", "OPTIONS"], "/api/storage/s3proxy/*", async (c) =>
 
   const authHeader = c.req.header("Authorization") ?? "";
   const accessKeyId = parseS3AuthCredential(authHeader);
-  if (!accessKeyId) return new Response("Unauthorized", { status: 401 });
+  if (!accessKeyId) {
+    const h = new Headers({ "Content-Type": "text/plain" });
+    addS3ProxyCorsHeaders(h);
+    return new Response("Unauthorized", { status: 401, headers: h });
+  }
 
+  // Sig V4 signature is intentionally not verified — accessKeyId lookup in KV is the auth gate.
   // KV lookup with one retry in case of propagation lag
   let credJson = await c.env.PROXY_CREDS_KV.get(accessKeyId);
   if (credJson === null) {
     await new Promise<void>((r) => setTimeout(r, 100));
     credJson = await c.env.PROXY_CREDS_KV.get(accessKeyId);
   }
-  if (credJson === null) return new Response("Unauthorized", { status: 401 });
+  if (credJson === null) {
+    const h = new Headers({ "Content-Type": "text/plain" });
+    addS3ProxyCorsHeaders(h);
+    return new Response("Unauthorized", { status: 401, headers: h });
+  }
 
   const cred = JSON.parse(credJson) as {
     userId: string;
@@ -255,11 +268,24 @@ app.on(["GET", "HEAD", "PUT", "OPTIONS"], "/api/storage/s3proxy/*", async (c) =>
     pathPrefix: string;
   };
 
-  if (bucket !== cred.backendId) return new Response("Forbidden", { status: 403 });
+  if (bucket !== cred.backendId) {
+    const h = new Headers({ "Content-Type": "text/plain" });
+    addS3ProxyCorsHeaders(h);
+    return new Response("Forbidden", { status: 403, headers: h });
+  }
 
+  // Normalize pathPrefix to end with "/" so "allowed" can't be bypassed with "allowed-extra/..."
+  const effectivePrefix =
+    cred.pathPrefix !== "" && !cred.pathPrefix.endsWith("/")
+      ? `${cred.pathPrefix}/`
+      : cred.pathPrefix;
   const isList = method === "GET" && key === "" && reqUrl.searchParams.get("list-type") === "2";
   const checkPath = isList ? (reqUrl.searchParams.get("prefix") ?? "") : key;
-  if (!checkPath.startsWith(cred.pathPrefix)) return new Response("Forbidden", { status: 403 });
+  if (!checkPath.startsWith(effectivePrefix)) {
+    const h = new Headers({ "Content-Type": "text/plain" });
+    addS3ProxyCorsHeaders(h);
+    return new Response("Forbidden", { status: 403, headers: h });
+  }
 
   const { userId, backendId } = cred;
 
@@ -323,7 +349,6 @@ app.on(["GET", "HEAD", "PUT", "OPTIONS"], "/api/storage/s3proxy/*", async (c) =>
     if (!obj) return new Response("Not Found", { status: 404 });
 
     const headers = new Headers();
-    headers.set("Content-Length", String(obj.size));
     headers.set("Accept-Ranges", "bytes");
     if (obj.httpMetadata?.contentType) headers.set("Content-Type", obj.httpMetadata.contentType);
     if (obj.httpEtag) headers.set("ETag", obj.httpEtag);
@@ -331,12 +356,14 @@ app.on(["GET", "HEAD", "PUT", "OPTIONS"], "/api/storage/s3proxy/*", async (c) =>
 
     if (rangeHeader && obj.range) {
       const range = obj.range as { offset: number; length: number };
+      headers.set("Content-Length", String(range.length));
       headers.set(
         "Content-Range",
         `bytes ${range.offset}-${range.offset + range.length - 1}/${obj.size}`,
       );
       return new Response(obj.body, { status: 206, headers });
     }
+    headers.set("Content-Length", String(obj.size));
     return new Response(obj.body, { headers });
   }
 
