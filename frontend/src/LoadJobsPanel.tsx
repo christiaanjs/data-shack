@@ -32,6 +32,8 @@ interface LoadJob {
   last_run_at: number | null;
   last_error: string | null;
   enabled: number;
+  date_range_config: string | null;
+  pagination_config: string | null;
 }
 
 function formatTs(ms: number | null): string {
@@ -48,7 +50,7 @@ export function LoadJobsPanel({ workerBase, getAuthHeaders }: LoadJobsPanelProps
   const [triggerResults, setTriggerResults] = useState<Record<string, string>>({});
   const [formMode, setFormMode] = useState<null | "create" | LoadJob>(null);
 
-  // Form state
+  // Core form state
   const [formName, setFormName] = useState("");
   const [formCredId, setFormCredId] = useState("");
   const [formSbId, setFormSbId] = useState("");
@@ -60,6 +62,19 @@ export function LoadJobsPanel({ workerBase, getAuthHeaders }: LoadJobsPanelProps
   const [formCron, setFormCron] = useState("0 * * * *");
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+
+  // Date range config state
+  const [formDrEnabled, setFormDrEnabled] = useState(false);
+  const [formDrParamFrom, setFormDrParamFrom] = useState("start");
+  const [formDrParamTo, setFormDrParamTo] = useState("end");
+  const [formDrFormat, setFormDrFormat] = useState("iso_date");
+  const [formDrLookbackDays, setFormDrLookbackDays] = useState("7");
+
+  // Pagination config state
+  const [formPagEnabled, setFormPagEnabled] = useState(false);
+  const [formPagCursorParam, setFormPagCursorParam] = useState("cursor");
+  const [formPagCursorPath, setFormPagCursorPath] = useState("cursor.next");
+  const [formPagDataPath, setFormPagDataPath] = useState("");
 
   function openCreate() {
     setFormMode("create");
@@ -73,6 +88,15 @@ export function LoadJobsPanel({ workerBase, getAuthHeaders }: LoadJobsPanelProps
     setFormFormat("ndjson");
     setFormCron("0 * * * *");
     setFormError(null);
+    setFormDrEnabled(false);
+    setFormDrParamFrom("start");
+    setFormDrParamTo("end");
+    setFormDrFormat("iso_date");
+    setFormDrLookbackDays("7");
+    setFormPagEnabled(false);
+    setFormPagCursorParam("cursor");
+    setFormPagCursorPath("cursor.next");
+    setFormPagDataPath("");
   }
 
   function openEdit(job: LoadJob) {
@@ -87,6 +111,30 @@ export function LoadJobsPanel({ workerBase, getAuthHeaders }: LoadJobsPanelProps
     setFormFormat(job.format);
     setFormCron(job.cron_schedule);
     setFormError(null);
+
+    let dr: { param_from: string; param_to: string; format: string; lookback_days: number } | null =
+      null;
+    try {
+      dr = job.date_range_config ? JSON.parse(job.date_range_config) : null;
+    } catch {
+      /* leave dr null — form shows disabled with defaults */
+    }
+    setFormDrEnabled(dr !== null);
+    setFormDrParamFrom(dr?.param_from ?? "start");
+    setFormDrParamTo(dr?.param_to ?? "end");
+    setFormDrFormat(dr?.format ?? "iso_date");
+    setFormDrLookbackDays(String(dr?.lookback_days ?? 7));
+
+    let pag: { cursor_param: string; cursor_path: string; data_path?: string } | null = null;
+    try {
+      pag = job.pagination_config ? JSON.parse(job.pagination_config) : null;
+    } catch {
+      /* leave pag null — form shows disabled with defaults */
+    }
+    setFormPagEnabled(pag !== null);
+    setFormPagCursorParam(pag?.cursor_param ?? "cursor");
+    setFormPagCursorPath(pag?.cursor_path ?? "cursor.next");
+    setFormPagDataPath(pag?.data_path ?? "");
   }
 
   const fetchAll = useCallback(async () => {
@@ -174,6 +222,22 @@ export function LoadJobsPanel({ workerBase, getAuthHeaders }: LoadJobsPanelProps
           http_method: formMethod,
           format: formFormat,
           cron_schedule: formCron,
+          date_range_config: formDrEnabled
+            ? {
+                param_from: formDrParamFrom,
+                param_to: formDrParamTo,
+                format: formDrFormat,
+                lookback_days: Number(formDrLookbackDays),
+              }
+            : null,
+          pagination_config: formPagEnabled
+            ? {
+                type: "cursor",
+                cursor_param: formPagCursorParam,
+                cursor_path: formPagCursorPath,
+                ...(formPagDataPath ? { data_path: formPagDataPath } : {}),
+              }
+            : null,
         }),
       });
       if (!res.ok) {
@@ -323,8 +387,12 @@ export function LoadJobsPanel({ workerBase, getAuthHeaders }: LoadJobsPanelProps
                   >
                     <option value="ndjson">ndjson</option>
                     <option value="json">json</option>
-                    <option value="csv">csv</option>
-                    <option value="parquet">parquet</option>
+                    <option value="csv" disabled={formPagEnabled}>
+                      csv{formPagEnabled ? " (unavailable with pagination)" : ""}
+                    </option>
+                    <option value="parquet" disabled={formPagEnabled}>
+                      parquet{formPagEnabled ? " (unavailable with pagination)" : ""}
+                    </option>
                   </select>
                 </fieldset>
                 <fieldset class="fieldset">
@@ -338,6 +406,134 @@ export function LoadJobsPanel({ workerBase, getAuthHeaders }: LoadJobsPanelProps
                   />
                 </fieldset>
               </div>
+
+              {/* Date range config */}
+              <div class="border border-base-300 rounded-box p-3 space-y-3">
+                <label class="flex items-center gap-2 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    class="checkbox checkbox-sm"
+                    checked={formDrEnabled}
+                    onChange={(e) => setFormDrEnabled((e.target as HTMLInputElement).checked)}
+                  />
+                  <span class="text-sm font-medium">Date range windowing</span>
+                </label>
+                {formDrEnabled && (
+                  <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 pl-6">
+                    <fieldset class="fieldset">
+                      <legend class="fieldset-legend">From param</legend>
+                      <input
+                        type="text"
+                        required
+                        class="input input-bordered input-sm w-full font-mono"
+                        value={formDrParamFrom}
+                        onInput={(e) => setFormDrParamFrom((e.target as HTMLInputElement).value)}
+                        placeholder="start_date"
+                      />
+                    </fieldset>
+                    <fieldset class="fieldset">
+                      <legend class="fieldset-legend">To param</legend>
+                      <input
+                        type="text"
+                        required
+                        class="input input-bordered input-sm w-full font-mono"
+                        value={formDrParamTo}
+                        onInput={(e) => setFormDrParamTo((e.target as HTMLInputElement).value)}
+                        placeholder="end_date"
+                      />
+                    </fieldset>
+                    <fieldset class="fieldset">
+                      <legend class="fieldset-legend">Date format</legend>
+                      <select
+                        class="select select-bordered select-sm w-full"
+                        value={formDrFormat}
+                        onChange={(e) => setFormDrFormat((e.target as HTMLSelectElement).value)}
+                      >
+                        <option value="iso">iso (full ISO 8601)</option>
+                        <option value="iso_date">iso_date (YYYY-MM-DD)</option>
+                        <option value="unix">unix (seconds)</option>
+                        <option value="unix_ms">unix_ms (milliseconds)</option>
+                      </select>
+                    </fieldset>
+                    <fieldset class="fieldset">
+                      <legend class="fieldset-legend">Lookback days</legend>
+                      <input
+                        type="number"
+                        required
+                        min="1"
+                        class="input input-bordered input-sm w-full"
+                        value={formDrLookbackDays}
+                        onInput={(e) => setFormDrLookbackDays((e.target as HTMLInputElement).value)}
+                      />
+                    </fieldset>
+                  </div>
+                )}
+              </div>
+
+              {/* Cursor pagination config */}
+              <div class="border border-base-300 rounded-box p-3 space-y-3">
+                <label class="flex items-center gap-2 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    class="checkbox checkbox-sm"
+                    checked={formPagEnabled}
+                    onChange={(e) => {
+                      const enabled = (e.target as HTMLInputElement).checked;
+                      setFormPagEnabled(enabled);
+                      if (enabled && formFormat !== "json" && formFormat !== "ndjson") {
+                        setFormFormat("ndjson");
+                      }
+                    }}
+                  />
+                  <span class="text-sm font-medium">Cursor pagination</span>
+                </label>
+                {formPagEnabled && (
+                  <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 pl-6">
+                    <fieldset class="fieldset">
+                      <legend class="fieldset-legend">Cursor param</legend>
+                      <input
+                        type="text"
+                        required
+                        class="input input-bordered input-sm w-full font-mono"
+                        value={formPagCursorParam}
+                        onInput={(e) => setFormPagCursorParam((e.target as HTMLInputElement).value)}
+                        placeholder="cursor"
+                      />
+                    </fieldset>
+                    <fieldset class="fieldset">
+                      <legend class="fieldset-legend">Cursor path</legend>
+                      <input
+                        type="text"
+                        required
+                        class="input input-bordered input-sm w-full font-mono"
+                        value={formPagCursorPath}
+                        onInput={(e) => setFormPagCursorPath((e.target as HTMLInputElement).value)}
+                        placeholder="cursor.next"
+                      />
+                      <p class="text-xs text-base-content/50 mt-1">
+                        Dot-notation path in the response for the next cursor value
+                      </p>
+                    </fieldset>
+                    <fieldset class="fieldset sm:col-span-2">
+                      <legend class="fieldset-legend">
+                        Data path <span class="text-base-content/40 font-normal">(optional)</span>
+                      </legend>
+                      <input
+                        type="text"
+                        class="input input-bordered input-sm w-full font-mono"
+                        value={formPagDataPath}
+                        onInput={(e) => setFormPagDataPath((e.target as HTMLInputElement).value)}
+                        placeholder="items"
+                      />
+                      <p class="text-xs text-base-content/50 mt-1">
+                        Dot-notation path to the data array. If omitted, the entire response body is
+                        used.
+                      </p>
+                    </fieldset>
+                  </div>
+                )}
+              </div>
+
               <button
                 type="submit"
                 class="btn btn-sm btn-primary"

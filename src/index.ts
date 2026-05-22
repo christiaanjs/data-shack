@@ -29,6 +29,7 @@ import {
   listStorageBackends,
 } from "./db/settings.ts";
 import { decryptHttpConfig, resolveHeaderTemplates } from "./http-config.ts";
+import { validateDateRangeConfig, validatePaginationConfig } from "./loaders/config-types.ts";
 import { runHttpLoadJob } from "./loaders/http.ts";
 import {
   parseHttpDsUri,
@@ -572,6 +573,23 @@ app.post("/api/load-jobs", requireAuth, async (c) => {
   ) {
     return c.json({ error: "format must be json, ndjson, csv, or parquet" }, 400);
   }
+  let dateRangeConfig: string | null = null;
+  if (body.date_range_config !== undefined && body.date_range_config !== null) {
+    const parsed = validateDateRangeConfig(body.date_range_config);
+    if (!parsed) return c.json({ error: "invalid date_range_config" }, 400);
+    dateRangeConfig = JSON.stringify(parsed);
+  }
+  let paginationConfig: string | null = null;
+  if (body.pagination_config !== undefined && body.pagination_config !== null) {
+    const parsed = validatePaginationConfig(body.pagination_config);
+    if (!parsed) return c.json({ error: "invalid pagination_config" }, 400);
+    const fmt = typeof body.format === "string" ? body.format : "ndjson";
+    if (!["json", "ndjson"].includes(fmt)) {
+      return c.json({ error: "pagination_config requires output format json or ndjson" }, 400);
+    }
+    paginationConfig = JSON.stringify(parsed);
+  }
+
   let job: Awaited<ReturnType<typeof insertLoadJob>>;
   try {
     job = await insertLoadJob(c.env.DB, c.get("userId"), {
@@ -584,6 +602,8 @@ app.post("/api/load-jobs", requireAuth, async (c) => {
       http_method: typeof body.http_method === "string" ? body.http_method : undefined,
       format: typeof body.format === "string" ? body.format : undefined,
       cron_schedule: typeof body.cron_schedule === "string" ? body.cron_schedule : undefined,
+      date_range_config: dateRangeConfig,
+      pagination_config: paginationConfig,
     });
   } catch (err) {
     if (err instanceof Error && err.message.startsWith("Invalid cron_schedule")) {
@@ -620,6 +640,23 @@ app.patch("/api/load-jobs/:id", requireAuth, async (c) => {
   ) {
     return c.json({ error: "format must be json, ndjson, csv, or parquet" }, 400);
   }
+  let patchDateRangeConfig: string | null = null;
+  if (body.date_range_config !== undefined && body.date_range_config !== null) {
+    const parsed = validateDateRangeConfig(body.date_range_config);
+    if (!parsed) return c.json({ error: "invalid date_range_config" }, 400);
+    patchDateRangeConfig = JSON.stringify(parsed);
+  }
+  let patchPaginationConfig: string | null = null;
+  if (body.pagination_config !== undefined && body.pagination_config !== null) {
+    const parsed = validatePaginationConfig(body.pagination_config);
+    if (!parsed) return c.json({ error: "invalid pagination_config" }, 400);
+    const fmt = typeof body.format === "string" ? body.format : "ndjson";
+    if (!["json", "ndjson"].includes(fmt)) {
+      return c.json({ error: "pagination_config requires output format json or ndjson" }, 400);
+    }
+    patchPaginationConfig = JSON.stringify(parsed);
+  }
+
   let updated: Awaited<ReturnType<typeof updateLoadJob>>;
   try {
     updated = await updateLoadJob(c.env.DB, c.get("userId"), c.req.param("id"), {
@@ -632,6 +669,8 @@ app.patch("/api/load-jobs/:id", requireAuth, async (c) => {
       http_method: typeof body.http_method === "string" ? body.http_method : "GET",
       format: typeof body.format === "string" ? body.format : "ndjson",
       cron_schedule: typeof body.cron_schedule === "string" ? body.cron_schedule : "0 * * * *",
+      date_range_config: patchDateRangeConfig,
+      pagination_config: patchPaginationConfig,
     });
   } catch (err) {
     if (err instanceof Error && err.message.startsWith("Invalid cron_schedule")) {

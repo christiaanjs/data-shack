@@ -239,13 +239,14 @@ function s3EncodeKey(key: string): string {
 }
 
 export async function signS3Request(opts: {
-  method: "GET" | "HEAD" | "PUT";
+  method: "GET" | "HEAD" | "PUT" | "POST" | "DELETE";
   endpoint: string;
   bucket: string;
   key: string;
   region: string;
   accessKeyId: string;
   secretAccessKey: string;
+  queryParams?: Record<string, string>;
 }): Promise<{ url: string; headers: Record<string, string> }> {
   const now = new Date();
   const pad2 = (n: number) => String(n).padStart(2, "0");
@@ -258,7 +259,17 @@ export async function signS3Request(opts: {
     endpointUrl.pathname === "/" ? "" : endpointUrl.pathname.replace(/\/$/, "");
   const encodedKey = s3EncodeKey(opts.key);
   const path = `${endpointPathPrefix}/${opts.bucket}/${encodedKey}`;
-  const url = `${endpointUrl.origin}${path}`;
+
+  // Build canonical query string (params sorted alphabetically, both key and value URI-encoded)
+  const canonicalQueryString = opts.queryParams
+    ? Object.entries(opts.queryParams)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([k, v]) => `${s3EncodeSegment(k)}=${s3EncodeSegment(v)}`)
+        .join("&")
+    : "";
+  const url = canonicalQueryString
+    ? `${endpointUrl.origin}${path}?${canonicalQueryString}`
+    : `${endpointUrl.origin}${path}`;
 
   const payloadHash = "UNSIGNED-PAYLOAD";
   const canonicalHeaders = `host:${host}\nx-amz-content-sha256:${payloadHash}\nx-amz-date:${amzDate}\n`;
@@ -267,7 +278,7 @@ export async function signS3Request(opts: {
   const canonicalRequest = [
     opts.method,
     path,
-    "",
+    canonicalQueryString,
     canonicalHeaders,
     signedHeaders,
     payloadHash,
