@@ -3,5 +3,6 @@ dist/
 .wrangler/
 .dev.vars
 *.local
-.claude/
+.claude/*
+!.claude/commands/
 worker-configuration.d.ts

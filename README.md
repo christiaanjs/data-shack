@@ -23,8 +23,9 @@ A personal data integration platform built on Cloudflare that brings your data t
 | Browser auto-registers DuckDB views from catalog on startup | ✅ Done |
 | Load jobs: cron-triggered HTTP→R2/S3 ETL with catalog commit, Queue-based execution | ✅ Done |
 | Load Jobs UI: create/edit/delete jobs, "Run now" trigger, last-run status | ✅ Done |
-| Session Durable Object + MCP server | Not started |
-| Transform jobs (compaction) | Not started |
+| Session Durable Object: WebSocket hibernation, MCP query relay, transform job dispatch on connect | ✅ Done |
+| MCP server: Streamable HTTP (2025-03-26), `get_warehouse_schema` / `run_query` / `read_data` tools | ✅ Done |
+| Transform jobs + triggers: catalog DO queue, session DO dispatch, browser DuckDB execution | ✅ Done |
 | Dashboarding platform | Not started |
 
 See [`build-plan.md`](./build-plan.md) for the full sequenced plan.

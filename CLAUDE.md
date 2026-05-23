@@ -25,7 +25,7 @@ Requires: `wrangler` (or npx), `openssl`, `jq`.
 **Always run all three checks before every commit** — CI enforces the same checks and will fail otherwise:
 
 ```bash
-npm test          # 166 vitest tests across 8 test files via @cloudflare/vitest-pool-workers
+npm test          # 186 vitest tests across 9 test files via @cloudflare/vitest-pool-workers
 npm run typecheck # tsc for worker + tsc -p test/tsconfig.json
 npm run lint      # biome check . (lint + format + import order)
 ```
@@ -72,6 +72,12 @@ They have separate `node_modules`, `package.json`, and `tsconfig.json`. The work
 
 **Load jobs:** Cron-triggered HTTP→storage ETL jobs. The `scheduled()` handler queries D1 for due jobs and enqueues `{ jobId }` messages to `LOAD_JOB_QUEUE`. The `queue()` consumer fetches the job, runs `runHttpLoadJob` from `src/loaders/http.ts` (HTTP fetch → R2/S3 write → catalog commit), then updates `last_run_at`/`last_error`/`next_run_at` in D1. On failure, the job error is persisted and the message is retried (up to `max_retries = 3`). `POST /api/load-jobs/:id/trigger` enqueues directly for on-demand runs.
 
+**Session DO:** `src/session/do.ts` — pairs MCP query requests with an active browser tab. Uses `ctx.acceptWebSocket(server, [userId])` (hibernation API) so the DO sleeps between events. An in-memory `pendingQueries` map (keyed by `queryId`) holds `{ resolve, reject }` closures while awaiting a browser response — safe because active `POST /query` fetch handlers prevent hibernation. On browser connect, dispatches any pending transform jobs via `dispatchPendingJobs` (fetches `GET /jobs/pending` from catalog DO, sends each as `{ type: "transform_job", ... }` over the socket). On socket close, resets any `running` transform jobs back to `pending` via `POST /jobs/reset-pending`. `GET /session/status` returns the count of connected sockets; `POST /dispatch-jobs` can be called by the Worker to push freshly triggered jobs.
+
+**MCP server:** `src/mcp/server.ts` — Streamable HTTP transport (MCP 2025-03-26 spec), mounted at `/mcp` on the main Hono app behind `requireAuth`. Three tools: `get_warehouse_schema` (fetches tables + snapshots from catalog DO — no browser session required), `run_query` and `read_data` (both POST to the session DO's `/query` endpoint and await a DuckDB result from the browser).
+
+**Transform jobs and triggers:** Managed entirely inside the catalog DO's SQLite. `transform_jobs` tracks `id, name, sql, output_table, output_uri, output_backend, format, status, requires_browser`. `triggers` maps a watched table name to a job. Status lifecycle: `idle → pending → running → done/failed`. On every `POST /commit`, the catalog DO queries triggers matching the committed table and moves qualifying jobs to `pending`, returning `{ triggeredJobIds }`. The Worker's commit relay picks up `triggeredJobIds` in a `waitUntil` and calls `POST /dispatch-jobs` on the session DO. Worker REST API: `GET/POST/DELETE /api/transform-jobs`, `GET/POST/DELETE /api/triggers`. Browser execution lives in `frontend/src/sessionWs.ts`: receives `transform_job`, sends `job_claimed`, runs the COPY TO SQL in DuckDB (acquiring proxy credentials for the output backend first), commits the output URI to the catalog, then sends `job_complete` or `job_error`.
+
 **S3-compatible storage proxy:** All storage routes live in `src/storage/router.ts` (a Hono sub-router mounted at `/api/storage` in `src/index.ts`). `POST /api/storage/proxy-credentials` (behind `requireAuth`) vends a short-lived `{ accessKeyId, secret, endpoint, region, bucket }` credential stored in `PROXY_CREDS_KV` with TTL. `GET|HEAD|PUT|OPTIONS /api/storage/s3proxy/:bucket/*key` (no `requireAuth` — the `accessKeyId` from the AWS4 `Authorization` header is the auth) forwards to the real backend: R2 binding for `r2-bound`, re-signed upstream S3 request for `r2-s3compat`. A `GET` with `?list-type=2` triggers `R2.list()` and returns S3 `ListBucketResult` XML. All responses carry CORS headers. The frontend (`frontend/src/storage.ts`) calls `acquireProxyCred()` and `buildS3Secret()` to configure DuckDB's httpfs via `CREATE OR REPLACE SECRET`.
 
 **URI scheme:** `r2://backendName/key` is the universal URI for both backend types. `r2-s3compat://id/key` still works for backwards compatibility. The Worker resolves the bucket segment (backend name or ID) to a storage backend via `getStorageBackendByNameOrId` in `src/db/settings.ts` (name lookup first, ID fallback). Special names `r2-bound` and `data-shack` map to the Worker's R2 binding directly. The `bucket` field returned in proxy credentials is the backend name (not ID), so DuckDB can scope multiple `CREATE SECRET` entries when a query touches several backends. A `UNIQUE(user_id, name)` constraint (migration 0006) ensures name-based resolution is unambiguous. Keys from DuckDB are `decodeURIComponent`-decoded before R2/upstream dispatch to handle percent-encoded characters in Hive partition paths (e.g. `created_date%3D2026-05-21` → `created_date=2026-05-21`).
@@ -85,6 +91,8 @@ Single-file auth client in `frontend/src/auth.ts` — handles DCR (Dynamic Clien
 `frontend/src/App.tsx` is an auth state machine: `null` (loading) → `false` (login screen) → `true` (authenticated). On load it either handles the `/callback` route (token exchange) or checks for an existing access token. After authentication it calls `GET /me` to resolve `userId`.
 
 `VITE_DEV_TOKEN` in the frontend environment skips OAuth entirely — the token is sent as `X-Dev-Token` on every request.
+
+`frontend/src/sessionWs.ts` — connects to the session DO WebSocket (`GET /session/ws`) after auth. Handles three inbound message types: `query` (runs SQL in DuckDB, streams row batches back), `transform_job` (acknowledges with `job_claimed`, acquires proxy credentials, runs COPY TO SQL, commits output URI to catalog, sends `job_complete` or `job_error`). Status indicators surface in App.tsx.
 
 ## Local development
 
@@ -150,6 +158,7 @@ The `TEST_MIGRATIONS` binding in `vitest.config.ts` is populated from the `migra
 - `test/storage.test.ts` — Credentials and storage backends CRUD
 - `test/proxy.test.ts` — S3 proxy: credential vending, GET/HEAD/PUT/LIST/OPTIONS, path enforcement, CORS, ETags
 - `test/proxy-s3client.test.ts` — Functional S3 client tests using `aws4fetch` against Miniflare; exercises the full Sig V4 → proxy → R2 round-trip
-- `test/catalog.test.ts` — Catalog DO: tables, snapshots, commits
+- `test/catalog.test.ts` — Catalog DO: tables, snapshots, commits, transform jobs, triggers
+- `test/session.test.ts` — Session DO: WebSocket upgrade, status endpoint, MCP query relay, transform job dispatch
 - `test/load-jobs.test.ts` — Load jobs CRUD, trigger endpoint, scheduler/consumer helpers
 - `test/loader.test.ts` — `runHttpLoadJob` unit tests (mocked fetch, both backend types)
