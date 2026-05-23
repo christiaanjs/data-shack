@@ -29,7 +29,7 @@ new_sqlite_classes = ["CatalogDO"]
 
 [[migrations]]
 tag = "v2"
-new_classes = ["SessionDO"]
+new_sqlite_classes = ["SessionDO"]
 
 [[queues.producers]]
 binding = "LOAD_JOB_QUEUE"
