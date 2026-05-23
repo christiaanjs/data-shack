@@ -138,19 +138,19 @@ export function QueryPanel({ workerBase, getAuthHeaders }: QueryPanelProps) {
           failed.push(table.name);
           continue;
         }
-        const { backendId, key } = parsed;
+        const { backend, key } = parsed;
 
-        if (!secretsByBackend.has(backendId)) {
+        if (!secretsByBackend.has(backend)) {
           try {
-            const cred = await acquireProxyCred(backendId, "", workerBase, getAuthHeaders);
-            secretsByBackend.set(backendId, buildS3Secret(cred));
+            const cred = await acquireProxyCred(backend, "", workerBase, getAuthHeaders);
+            secretsByBackend.set(backend, buildS3Secret(cred));
           } catch {
             failed.push(table.name);
             continue;
           }
         }
 
-        const preamble = secretsByBackend.get(backendId);
+        const preamble = secretsByBackend.get(backend);
         if (!preamble) {
           failed.push(table.name);
           continue;
@@ -158,8 +158,8 @@ export function QueryPanel({ workerBase, getAuthHeaders }: QueryPanelProps) {
 
         // Partitioned tables (URI ends with /) use glob pattern; single files use exact path.
         const readExpr = key.endsWith("/")
-          ? `read_parquet('s3://${backendId}/${key}**/*.parquet', hive_partitioning=true)`
-          : `${readerFn(snapshot.uri, snapshot.format)}('s3://${backendId}/${key}')`;
+          ? `read_parquet('s3://${backend}/${key}**/*.parquet', hive_partitioning=true)`
+          : `${readerFn(snapshot.uri, snapshot.format)}('s3://${backend}/${key}')`;
 
         const safeId = table.name.replace(/"/g, '""');
         try {
@@ -249,14 +249,14 @@ export function QueryPanel({ workerBase, getAuthHeaders }: QueryPanelProps) {
       for (const uri of s3Uris) {
         const parsed = parseStorageUri(uri);
         if (!parsed) continue;
-        const { backendId, key } = parsed;
+        const { backend, key } = parsed;
 
-        if (!secretsByBackend.has(backendId)) {
-          const cred = await acquireProxyCred(backendId, "", workerBase, getAuthHeaders);
-          secretsByBackend.set(backendId, buildS3Secret(cred));
+        if (!secretsByBackend.has(backend)) {
+          const cred = await acquireProxyCred(backend, "", workerBase, getAuthHeaders);
+          secretsByBackend.set(backend, buildS3Secret(cred));
         }
 
-        s3UriMap.set(uri, `s3://${backendId}/${key}`);
+        s3UriMap.set(uri, `s3://${backend}/${key}`);
       }
 
       // Resolve http-ds:// URIs via token endpoint

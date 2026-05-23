@@ -6,7 +6,7 @@ import { authenticate } from "./auth/middleware.ts";
 import { oauthRouter } from "./auth/oauth.ts";
 import { CatalogDO } from "./catalog/do.ts";
 export { CatalogDO };
-import { encryptConfig } from "./crypto.ts";
+import { decryptConfig, encryptConfig } from "./crypto.ts";
 import {
   advanceNextRunAt,
   deleteLoadJob,
@@ -22,10 +22,12 @@ import {
   deleteCredential,
   deleteStorageBackend,
   getCredentialConfig,
+  getStorageBackendConfig,
   insertCredential,
   insertStorageBackend,
   listCredentials,
   listStorageBackends,
+  updateStorageBackend,
 } from "./db/settings.ts";
 import { decryptHttpConfig, resolveHeaderTemplates } from "./http-config.ts";
 import { validateDateRangeConfig, validatePaginationConfig } from "./loaders/config-types.ts";
@@ -289,6 +291,54 @@ app.post("/api/storage-backends", requireAuth, async (c) => {
       encryptedConfig,
     });
     return c.json({ id: result.id }, 201);
+  } catch (err) {
+    if (err instanceof Error && err.message.includes("UNIQUE constraint failed")) {
+      return c.json({ error: "a storage backend with that name already exists" }, 409);
+    }
+    throw err;
+  }
+});
+
+app.get("/api/storage-backends/:id", requireAuth, async (c) => {
+  const row = await getStorageBackendConfig(c.env.DB, c.req.param("id"), c.get("userId"));
+  if (!row) return c.json({ error: "not found" }, 404);
+  let config: unknown = {};
+  try {
+    config = JSON.parse(await decryptConfig(row.encrypted_config, c.env.JWT_SECRET));
+  } catch {
+    // return empty config if decryption fails rather than erroring
+  }
+  return c.json({ id: row.id, name: row.name, type: row.type, config });
+});
+
+app.patch("/api/storage-backends/:id", requireAuth, async (c) => {
+  const body = await c.req.json<Record<string, unknown>>();
+  const opts: { name?: string; encryptedConfig?: string } = {};
+
+  if (body.name !== undefined) {
+    if (typeof body.name !== "string") return c.json({ error: "name must be a string" }, 400);
+    const name = body.name.trim();
+    if (!name || name.length > 64 || name.includes("/")) {
+      return c.json({ error: "name must be 1–64 characters and must not contain '/'" }, 400);
+    }
+    if (name === "r2-bound" || name === "data-shack") {
+      return c.json({ error: `'${name}' is a reserved backend name` }, 400);
+    }
+    opts.name = name;
+  }
+
+  if (body.config !== undefined) {
+    opts.encryptedConfig = await encryptConfig(JSON.stringify(body.config), c.env.JWT_SECRET);
+  }
+
+  if (!opts.name && !opts.encryptedConfig) {
+    return c.json({ error: "at least one of name or config must be provided" }, 400);
+  }
+
+  try {
+    const updated = await updateStorageBackend(c.env.DB, c.req.param("id"), c.get("userId"), opts);
+    if (!updated) return c.json({ error: "not found" }, 404);
+    return c.json({ id: c.req.param("id") });
   } catch (err) {
     if (err instanceof Error && err.message.includes("UNIQUE constraint failed")) {
       return c.json({ error: "a storage backend with that name already exists" }, 409);
