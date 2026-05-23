@@ -194,7 +194,10 @@ app.post("/api/storage/proxy-credentials", requireAuth, async (c) => {
   let kvReady = false;
   for (let attempt = 0; attempt < 5; attempt++) {
     const check = await c.env.PROXY_CREDS_KV.get(accessKeyId);
-    if (check !== null) { kvReady = true; break; }
+    if (check !== null) {
+      kvReady = true;
+      break;
+    }
     if (attempt < 4) await new Promise<void>((r) => setTimeout(r, 50 * (attempt + 1)));
   }
   if (!kvReady) return c.json({ error: "credential store not ready, please retry" }, 502);
@@ -303,7 +306,9 @@ app.on(["GET", "HEAD", "PUT", "OPTIONS"], "/api/storage/s3proxy/*", async (c) =>
       }));
       const headers = new Headers({ "Content-Type": "application/xml" });
       addS3ProxyCorsHeaders(headers);
-      return new Response(buildListXml(bucket, listPrefix, objects), { headers });
+      return new Response(buildListXml(bucket, listPrefix, objects), {
+        headers,
+      });
     }
 
     const r2Key = r2BoundKey(userId, key);
@@ -312,7 +317,9 @@ app.on(["GET", "HEAD", "PUT", "OPTIONS"], "/api/storage/s3proxy/*", async (c) =>
       const body = c.req.raw.body;
       if (!body) return new Response("Bad Request", { status: 400 });
       const contentType = c.req.header("Content-Type") ?? "application/octet-stream";
-      const result = await c.env.R2.put(r2Key, body, { httpMetadata: { contentType } });
+      const result = await c.env.R2.put(r2Key, body, {
+        httpMetadata: { contentType },
+      });
       const headers = new Headers();
       if (result.httpEtag) headers.set("ETag", result.httpEtag);
       addS3ProxyCorsHeaders(headers);
@@ -432,7 +439,10 @@ app.on(["GET", "HEAD", "PUT", "OPTIONS"], "/api/storage/s3proxy/*", async (c) =>
     const etag = upstream.headers.get("ETag");
     if (etag) putHeaders.set("ETag", etag);
     addS3ProxyCorsHeaders(putHeaders);
-    return new Response(null, { status: upstream.status, headers: putHeaders });
+    return new Response(null, {
+      status: upstream.status,
+      headers: putHeaders,
+    });
   }
 
   const rangeHeader = c.req.header("Range");
