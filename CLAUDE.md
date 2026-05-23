@@ -25,7 +25,7 @@ Requires: `wrangler` (or npx), `openssl`, `jq`.
 **Always run all three checks before every commit** — CI enforces the same checks and will fail otherwise:
 
 ```bash
-npm test          # 164 vitest tests across 8 test files via @cloudflare/vitest-pool-workers
+npm test          # 166 vitest tests across 8 test files via @cloudflare/vitest-pool-workers
 npm run typecheck # tsc for worker + tsc -p test/tsconfig.json
 npm run lint      # biome check . (lint + format + import order)
 ```
@@ -72,7 +72,11 @@ They have separate `node_modules`, `package.json`, and `tsconfig.json`. The work
 
 **Load jobs:** Cron-triggered HTTP→storage ETL jobs. The `scheduled()` handler queries D1 for due jobs and enqueues `{ jobId }` messages to `LOAD_JOB_QUEUE`. The `queue()` consumer fetches the job, runs `runHttpLoadJob` from `src/loaders/http.ts` (HTTP fetch → R2/S3 write → catalog commit), then updates `last_run_at`/`last_error`/`next_run_at` in D1. On failure, the job error is persisted and the message is retried (up to `max_retries = 3`). `POST /api/load-jobs/:id/trigger` enqueues directly for on-demand runs.
 
-**S3-compatible storage proxy:** `POST /api/storage/proxy-credentials` (behind `requireAuth`) vends a short-lived `{ accessKeyId, secret, endpoint, region, bucket }` credential stored in `PROXY_CREDS_KV` with TTL. `GET|HEAD|PUT|OPTIONS /api/storage/s3proxy/:bucket/*key` (no `requireAuth` — the `accessKeyId` from the AWS4 `Authorization` header is the auth) forwards to the real backend: R2 binding for `r2-bound`, re-signed upstream S3 request for `r2-s3compat`. A `GET` with `?list-type=2` triggers `R2.list()` and returns S3 `ListBucketResult` XML. All responses carry CORS headers. The frontend (`frontend/src/storage.ts`) calls `acquireProxyCred()` and `buildS3Secret()` to configure DuckDB's httpfs via `CREATE OR REPLACE SECRET`.
+**S3-compatible storage proxy:** All storage routes live in `src/storage/router.ts` (a Hono sub-router mounted at `/api/storage` in `src/index.ts`). `POST /api/storage/proxy-credentials` (behind `requireAuth`) vends a short-lived `{ accessKeyId, secret, endpoint, region, bucket }` credential stored in `PROXY_CREDS_KV` with TTL. `GET|HEAD|PUT|OPTIONS /api/storage/s3proxy/:bucket/*key` (no `requireAuth` — the `accessKeyId` from the AWS4 `Authorization` header is the auth) forwards to the real backend: R2 binding for `r2-bound`, re-signed upstream S3 request for `r2-s3compat`. A `GET` with `?list-type=2` triggers `R2.list()` and returns S3 `ListBucketResult` XML. All responses carry CORS headers. The frontend (`frontend/src/storage.ts`) calls `acquireProxyCred()` and `buildS3Secret()` to configure DuckDB's httpfs via `CREATE OR REPLACE SECRET`.
+
+**URI scheme:** `r2://backendName/key` is the universal URI for both backend types. `r2-s3compat://id/key` still works for backwards compatibility. The Worker resolves the bucket segment (backend name or ID) to a storage backend via `getStorageBackendByNameOrId` in `src/db/settings.ts` (name lookup first, ID fallback). Special names `r2-bound` and `data-shack` map to the Worker's R2 binding directly. The `bucket` field returned in proxy credentials is the backend name (not ID), so DuckDB can scope multiple `CREATE SECRET` entries when a query touches several backends. A `UNIQUE(user_id, name)` constraint (migration 0006) ensures name-based resolution is unambiguous. Keys from DuckDB are `decodeURIComponent`-decoded before R2/upstream dispatch to handle percent-encoded characters in Hive partition paths (e.g. `created_date%3D2026-05-21` → `created_date=2026-05-21`).
+
+**Storage backend edit:** `GET /api/storage-backends/:id` returns the decrypted config for pre-filling an edit form. `PATCH /api/storage-backends/:id` updates `name` and/or `config` with the same validation as `POST` (reserved name check, length, no `/`, UNIQUE → 409). `updateStorageBackend()` in `src/db/settings.ts` builds the dynamic `UPDATE` statement. The `EditBackendDialog` in `SettingsPanel.tsx` fetches config on open and PATCHes on save.
 
 ## Frontend architecture
 
