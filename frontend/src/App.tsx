@@ -1,9 +1,11 @@
-import { useEffect, useState } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 import { CatalogPanel } from "./CatalogPanel.tsx";
 import { LoadJobsPanel } from "./LoadJobsPanel.tsx";
 import { QueryPanel } from "./QueryPanel.tsx";
 import { SettingsPanel } from "./SettingsPanel.tsx";
 import { clearTokens, getAccessToken, getValidToken, handleCallback, startLogin } from "./auth.ts";
+import { initDuckDB } from "./duckdb.ts";
+import { type SessionConnection, connectSession } from "./sessionWs.ts";
 
 const WORKER_BASE = import.meta.env.VITE_WORKER_URL ?? "";
 const DEV_TOKEN = import.meta.env.VITE_DEV_TOKEN as string | undefined;
@@ -22,6 +24,8 @@ export function App() {
   const [callbackError, setCallbackError] = useState<string | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<Tab>("query");
+  const [sessionConnected, setSessionConnected] = useState(false);
+  const sessionRef = useRef<SessionConnection | null>(null);
 
   useEffect(() => {
     if (DEV_TOKEN) {
@@ -68,6 +72,29 @@ export function App() {
       }
     };
     fetchUserId().catch(() => {});
+  }, [authed]);
+
+  // Establish Session DO WebSocket after auth to receive MCP queries and transform jobs.
+  useEffect(() => {
+    if (!authed) {
+      sessionRef.current?.close();
+      sessionRef.current = null;
+      setSessionConnected(false);
+      return;
+    }
+
+    const conn = connectSession({
+      workerBase: WORKER_BASE,
+      getAuthHeaders,
+      getDb: initDuckDB,
+      onStatusChange: setSessionConnected,
+    });
+    sessionRef.current = conn;
+
+    return () => {
+      conn.close();
+      sessionRef.current = null;
+    };
   }, [authed]);
 
   if (authed === null) {
@@ -140,6 +167,10 @@ export function App() {
           </div>
         </div>
         <div class="navbar-end gap-3 pr-2">
+          <span
+            class={`w-2 h-2 rounded-full flex-shrink-0 ${sessionConnected ? "bg-success" : "bg-base-content/20"}`}
+            title={sessionConnected ? "Browser session active" : "No MCP session"}
+          />
           {userId && (
             <span class="text-xs text-base-content/50 font-mono hidden sm:block">{userId}</span>
           )}

@@ -6,6 +6,8 @@ import { authenticate } from "./auth/middleware.ts";
 import { oauthRouter } from "./auth/oauth.ts";
 import { CatalogDO } from "./catalog/do.ts";
 export { CatalogDO };
+import { SessionDO } from "./session/do.ts";
+export { SessionDO };
 import { decryptConfig, encryptConfig } from "./crypto.ts";
 import {
   advanceNextRunAt,
@@ -32,6 +34,7 @@ import {
 import { decryptHttpConfig, resolveHeaderTemplates } from "./http-config.ts";
 import { validateDateRangeConfig, validatePaginationConfig } from "./loaders/config-types.ts";
 import { runHttpLoadJob } from "./loaders/http.ts";
+import { mcpHandler } from "./mcp/server.ts";
 import { parseHttpDsUri, signDataSourceToken, verifyDataSourceToken } from "./storage/resolve.ts";
 import { storageRouter } from "./storage/router.ts";
 import type { Env } from "./types.ts";
@@ -359,6 +362,10 @@ function catalogStub(env: Env, userId: string) {
   return env.CATALOG.get(env.CATALOG.idFromName(userId));
 }
 
+function sessionStub(env: Env, userId: string) {
+  return env.SESSION_DO.get(env.SESSION_DO.idFromName(userId));
+}
+
 app.get("/catalog/tables", requireAuth, async (c) => {
   const res = await catalogStub(c.env, c.get("userId")).fetch("http://do/tables");
   return new Response(res.body, { status: res.status, headers: res.headers });
@@ -397,11 +404,31 @@ app.delete("/catalog/tables/:table", requireAuth, async (c) => {
 
 app.post("/catalog/commit", requireAuth, async (c) => {
   const body = await c.req.json();
-  const res = await catalogStub(c.env, c.get("userId")).fetch("http://do/commit", {
+  const userId = c.get("userId");
+  const res = await catalogStub(c.env, userId).fetch("http://do/commit", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
+  if (res.ok) {
+    const cloned = res.clone();
+    c.executionCtx.waitUntil(
+      (async () => {
+        const data = (await cloned.json()) as { triggeredJobIds?: string[] };
+        if (data.triggeredJobIds && data.triggeredJobIds.length > 0) {
+          try {
+            await sessionStub(c.env, userId).fetch("http://do/dispatch-jobs", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ userId }),
+            });
+          } catch {
+            // Best-effort: jobs remain pending and will be dispatched on next browser connect.
+          }
+        }
+      })(),
+    );
+  }
   return new Response(res.body, { status: res.status, headers: res.headers });
 });
 
@@ -562,6 +589,107 @@ app.post("/api/load-jobs/:id/trigger", requireAuth, async (c) => {
   if (!job) return new Response("Not Found", { status: 404 });
   await c.env.LOAD_JOB_QUEUE.send({ jobId: job.id });
   return c.json({ queued: true }, 202);
+});
+
+// ── Session WebSocket ─────────────────────────────────────────────────────
+
+app.get("/session/ws", async (c) => {
+  if (c.req.header("Upgrade") !== "websocket") {
+    return c.text("Expected Upgrade: websocket", 426);
+  }
+  // WebSocket API can't set custom headers, so also accept a `token` query param.
+  const url = new URL(c.req.url);
+  const queryToken = url.searchParams.get("token");
+  let authRequest = c.req.raw;
+  if (queryToken) {
+    const augmented = new Headers(c.req.raw.headers);
+    if (c.env.DEV_TOKEN && queryToken === c.env.DEV_TOKEN) {
+      augmented.set("X-Dev-Token", queryToken);
+    } else {
+      augmented.set("Authorization", `Bearer ${queryToken}`);
+    }
+    authRequest = new Request(c.req.url, { headers: augmented, method: c.req.method });
+  }
+  const auth = await authenticate(authRequest, c.env);
+  if (!auth) return new Response("Unauthorized", { status: 401 });
+  const userId = auth.userId;
+
+  const stub = sessionStub(c.env, userId);
+  // Forward the WebSocket upgrade to the Session DO, carrying the authenticated userId.
+  const headers = new Headers(c.req.raw.headers);
+  headers.set("X-User-ID", userId);
+  return stub.fetch(
+    new Request(c.req.url, { headers, cf: (c.req.raw as Request & { cf?: unknown }).cf }),
+  );
+});
+
+app.get("/session/status", requireAuth, async (c) => {
+  const userId = c.get("userId");
+  const res = await sessionStub(c.env, userId).fetch("http://do/status", {
+    headers: { "X-User-ID": userId },
+  });
+  return new Response(res.body, { status: res.status, headers: res.headers });
+});
+
+// ── MCP server ────────────────────────────────────────────────────────────
+
+app.post("/mcp", requireAuth, async (c) => {
+  const userId = c.get("userId");
+  return mcpHandler(
+    c.req.raw,
+    c.env,
+    userId,
+    sessionStub(c.env, userId),
+    catalogStub(c.env, userId),
+  );
+});
+
+// ── Transform job endpoints (relay to Catalog DO) ─────────────────────────
+
+app.get("/api/transform-jobs", requireAuth, async (c) => {
+  const res = await catalogStub(c.env, c.get("userId")).fetch("http://do/jobs");
+  return new Response(res.body, { status: res.status, headers: res.headers });
+});
+
+app.post("/api/transform-jobs", requireAuth, async (c) => {
+  const body = await c.req.json();
+  const res = await catalogStub(c.env, c.get("userId")).fetch("http://do/jobs", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return new Response(res.body, { status: res.status, headers: res.headers });
+});
+
+app.delete("/api/transform-jobs/:id", requireAuth, async (c) => {
+  const res = await catalogStub(c.env, c.get("userId")).fetch(
+    `http://do/jobs/${encodeURIComponent(c.req.param("id"))}`,
+    { method: "DELETE" },
+  );
+  return new Response(res.body, { status: res.status });
+});
+
+app.get("/api/triggers", requireAuth, async (c) => {
+  const res = await catalogStub(c.env, c.get("userId")).fetch("http://do/triggers");
+  return new Response(res.body, { status: res.status, headers: res.headers });
+});
+
+app.post("/api/triggers", requireAuth, async (c) => {
+  const body = await c.req.json();
+  const res = await catalogStub(c.env, c.get("userId")).fetch("http://do/triggers", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return new Response(res.body, { status: res.status, headers: res.headers });
+});
+
+app.delete("/api/triggers/:id", requireAuth, async (c) => {
+  const res = await catalogStub(c.env, c.get("userId")).fetch(
+    `http://do/triggers/${encodeURIComponent(c.req.param("id"))}`,
+    { method: "DELETE" },
+  );
+  return new Response(res.body, { status: res.status });
 });
 
 // ── Root ─────────────────────────────────────────────────────────────────
