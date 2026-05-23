@@ -143,7 +143,7 @@ Implemented as a standalone Cloudflare Worker with D1, ahead of Stage 1, to esta
 ### ✅ Implemented
 
 - `SessionDO` (`src/session/do.ts`): accepts browser WebSocket via `ctx.acceptWebSocket` (hibernation API). Routes MCP queries: `POST /query` stores a resolver in an in-memory `pendingQueries` map, sends `{ type: "query", queryId, sql }` to the browser, and awaits `{ type: "result" | "error" }` back. `GET /session/status` returns connected socket count. `GET /session/ws` upgrades the browser connection.
-- MCP server (`src/mcp/server.ts`): Streamable HTTP transport (MCP 2025-03-26 spec), mounted at `/mcp` behind `requireAuth`. Three tools: `get_warehouse_schema` (catalog DO — no browser session required), `run_query` and `read_data` (both route through session DO).
+- MCP server (`src/mcp/server.ts`): Streamable HTTP transport (MCP 2025-03-26 spec), mounted at `/mcp` behind `requireAuth`. Four tools: `get_warehouse_schema` (catalog DO — no browser session required), `list_data_sources` (lists HTTP credentials — no browser session required), `run_query` and `read_data` (both route through session DO).
 - 13 integration tests in `test/session.test.ts`
 
 **Test:** Connect Claude Desktop to the MCP server. Ask Claude what tables exist — should answer without a browser tab open. Open a tab, ask Claude to query transactions — should return real results. Close the tab, ask Claude to query — should report no session available rather than hanging.
@@ -160,7 +160,7 @@ Implemented as a standalone Cloudflare Worker with D1, ahead of Stage 1, to esta
 - Trigger-on-commit: `POST /commit` in catalog DO checks the `triggers` table for each committed table, sets matching jobs from `idle/done/failed` to `pending`, and returns `{ triggeredJobIds }` in the response body.
 - Worker relays `triggeredJobIds` to the session DO in a `waitUntil` `POST /dispatch-jobs`, which forwards pending jobs to any connected browser socket.
 - Session DO dispatch on connect: `dispatchPendingJobs` fetches `GET /jobs/pending` from catalog DO and sends each as `{ type: "transform_job", jobId, sql, outputTable, outputUri, outputBackend, format }` over the WebSocket.
-- Browser transform runner (`frontend/src/sessionWs.ts`): sends `job_claimed`, acquires proxy credentials for the output backend, runs the COPY TO SQL in DuckDB, commits the output URI to the catalog DO, sends `job_complete` or `job_error`. Session DO resets `running` jobs to `pending` on WebSocket close so the next browser session re-claims them.
+- Browser transform runner (`frontend/src/sessionWs.ts`): sends `job_claimed`, acquires proxy credentials for the output backend, runs the COPY TO SQL in DuckDB, then sends `job_complete` (with the output URI) or `job_error`. The Session DO receives `job_complete`, commits the output URI to the catalog DO, and marks the job `done`. Session DO resets `running` jobs to `pending` on WebSocket close so the next browser session re-claims them.
 - Worker API: `GET/POST/DELETE /api/transform-jobs`, `GET/POST/DELETE /api/triggers`.
 
 **Test:** Trigger an Akahu load. Verify compact job appears as pending. Open a browser tab. Verify job is claimed and executed. Verify catalog has a Parquet snapshot URI replacing NDJSON staging URIs. Close tab mid-compaction, reopen — verify job re-runs cleanly.

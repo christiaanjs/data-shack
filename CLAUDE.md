@@ -25,7 +25,7 @@ Requires: `wrangler` (or npx), `openssl`, `jq`.
 **Always run all three checks before every commit** — CI enforces the same checks and will fail otherwise:
 
 ```bash
-npm test          # 186 vitest tests across 9 test files via @cloudflare/vitest-pool-workers
+npm test          # 187 vitest tests across 9 test files via @cloudflare/vitest-pool-workers
 npm run typecheck # tsc for worker + tsc -p test/tsconfig.json
 npm run lint      # biome check . (lint + format + import order)
 ```
@@ -58,9 +58,10 @@ They have separate `node_modules`, `package.json`, and `tsconfig.json`. The work
 **Entry point:** `src/index.ts` — Hono app with CORS middleware, `requireAuth` middleware, and two route groups: the OAuth router and authenticated endpoints.
 
 **Auth flow:**
-1. `authenticate()` in `src/auth/middleware.ts` checks for `X-Dev-Token` header first (when `ENABLE_DEV_AUTH=true`), then validates a Bearer JWT via `src/auth/jwt.ts` (HMAC-HS256).
-2. All OAuth endpoints live in `src/auth/oauth.ts` via `oauthRouter`. The flow: `/authorize/:provider` → Google OAuth → `/oauth/callback` → exchange code → issue MCP auth code → redirect to client → client POSTs to `/token` → receives JWT + refresh token.
-3. Provider support is Google-only. Passing any other provider to `/authorize/:provider` returns `400 invalid_request`.
+1. `authenticate()` in `src/auth/middleware.ts` checks for `X-Dev-Token` header first (when `ENABLE_DEV_AUTH=true`), then validates a Bearer JWT via `src/auth/jwt.ts` (HMAC-HS256). Audience is validated against `${issuer}/mcp` — tokens minted for other resources are rejected.
+2. `verifyJwt` in `src/auth/jwt.ts` accepts an optional `expectedAud` parameter; when supplied, it rejects tokens where `payload.aud !== expectedAud`.
+3. All OAuth endpoints live in `src/auth/oauth.ts` via `oauthRouter`. The flow: `/authorize/:provider` → Google OAuth → `/oauth/callback` → exchange code → issue MCP auth code → redirect to client → client POSTs to `/token` → receives JWT + refresh token.
+4. Provider support is Google-only. Passing any other provider to `/authorize/:provider` returns `400 invalid_request`.
 
 **D1 query layer:** `src/db/queries.ts` for user/identity operations, `src/db/oauth.ts` for OAuth table operations, `src/db/settings.ts` for credentials/storage backends, `src/db/load-jobs.ts` for load job CRUD. All SQL is in these files — no inline SQL elsewhere.
 
@@ -74,7 +75,7 @@ They have separate `node_modules`, `package.json`, and `tsconfig.json`. The work
 
 **Session DO:** `src/session/do.ts` — pairs MCP query requests with an active browser tab. Uses `ctx.acceptWebSocket(server, [userId])` (hibernation API) so the DO sleeps between events. An in-memory `pendingQueries` map (keyed by `queryId`) holds `{ resolve, reject }` closures while awaiting a browser response — safe because active `POST /query` fetch handlers prevent hibernation. On browser connect, dispatches any pending transform jobs via `dispatchPendingJobs` (fetches `GET /jobs/pending` from catalog DO, sends each as `{ type: "transform_job", ... }` over the socket). On socket close, resets any `running` transform jobs back to `pending` via `POST /jobs/reset-pending`. `GET /session/status` returns the count of connected sockets; `POST /dispatch-jobs` can be called by the Worker to push freshly triggered jobs.
 
-**MCP server:** `src/mcp/server.ts` — Streamable HTTP transport (MCP 2025-03-26 spec), mounted at `/mcp` on the main Hono app behind `requireAuth`. Three tools: `get_warehouse_schema` (fetches tables + snapshots from catalog DO — no browser session required), `run_query` and `read_data` (both POST to the session DO's `/query` endpoint and await a DuckDB result from the browser).
+**MCP server:** `src/mcp/server.ts` — Streamable HTTP transport (MCP 2025-03-26 spec), mounted at `/mcp` on the main Hono app behind `requireAuth`. Four tools: `get_warehouse_schema` (fetches tables + snapshots from catalog DO — no browser session required), `list_data_sources` (lists HTTP credentials with their base URLs — no browser session required), `run_query` and `read_data` (both POST to the session DO's `/query` endpoint and await a DuckDB result from the browser).
 
 **Transform jobs and triggers:** Managed entirely inside the catalog DO's SQLite. `transform_jobs` tracks `id, name, sql, output_table, output_uri, output_backend, format, status, requires_browser`. `triggers` maps a watched table name to a job. Status lifecycle: `idle → pending → running → done/failed`. On every `POST /commit`, the catalog DO queries triggers matching the committed table and moves qualifying jobs to `pending`, returning `{ triggeredJobIds }`. The Worker's commit relay picks up `triggeredJobIds` in a `waitUntil` and calls `POST /dispatch-jobs` on the session DO. Worker REST API: `GET/POST/DELETE /api/transform-jobs`, `GET/POST/DELETE /api/triggers`. Browser execution lives in `frontend/src/sessionWs.ts`: receives `transform_job`, sends `job_claimed`, runs the COPY TO SQL in DuckDB (acquiring proxy credentials for the output backend first), then sends `job_complete` (with the output URI) or `job_error`. The Session DO receives `job_complete`, commits the output URI to the catalog DO, and marks the job `done`.
 
@@ -93,6 +94,8 @@ Single-file auth client in `frontend/src/auth.ts` — handles DCR (Dynamic Clien
 `VITE_DEV_TOKEN` in the frontend environment skips OAuth entirely — the token is sent as `X-Dev-Token` on every request.
 
 `frontend/src/sessionWs.ts` — connects to the session DO WebSocket (`GET /session/ws`) after auth. Handles three inbound message types: `query` (runs SQL in DuckDB, streams row batches back), `transform_job` (acknowledges with `job_claimed`, acquires proxy credentials, runs COPY TO SQL, sends `job_complete` with output URI or `job_error`). The Session DO receives `job_complete` and performs the catalog commit. Status indicators surface in App.tsx.
+
+`frontend/src/QueryPanel.tsx` `registerCatalogViews` — on startup, loads all catalog snapshots and creates DuckDB views. For `r2://` and `r2-s3compat://` URIs it acquires S3 proxy credentials and creates views over `s3://` paths. For `http-ds://` URIs it batch-resolves them via `POST /api/storage/resolve` first and creates `read_json('{tokenUrl}')` views. Tables that fail (missing backend, unresolvable URI) are reported as failed views without blocking the others.
 
 ## Local development
 
