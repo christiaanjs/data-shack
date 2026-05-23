@@ -78,6 +78,7 @@ export async function insertStorageBackend(
 }
 
 interface CredentialConfigRow {
+  id: string;
   type: string;
   encrypted_config: string;
 }
@@ -88,7 +89,7 @@ export async function getCredentialConfig(
   userId: string,
 ): Promise<CredentialConfigRow | null> {
   const result = await db
-    .prepare("SELECT type, encrypted_config FROM credentials WHERE id = ? AND user_id = ?")
+    .prepare("SELECT id, type, encrypted_config FROM credentials WHERE id = ? AND user_id = ?")
     .bind(id, userId)
     .first<CredentialConfigRow>();
   return result ?? null;
@@ -101,14 +102,14 @@ export async function getCredentialByNameOrId(
 ): Promise<CredentialConfigRow | null> {
   // Try name first
   const byName = await db
-    .prepare("SELECT type, encrypted_config FROM credentials WHERE user_id = ? AND name = ?")
+    .prepare("SELECT id, type, encrypted_config FROM credentials WHERE user_id = ? AND name = ?")
     .bind(userId, nameOrId)
     .first<CredentialConfigRow>();
   if (byName) return byName;
   // Fall back to ID
   return (
     (await db
-      .prepare("SELECT type, encrypted_config FROM credentials WHERE user_id = ? AND id = ?")
+      .prepare("SELECT id, type, encrypted_config FROM credentials WHERE user_id = ? AND id = ?")
       .bind(userId, nameOrId)
       .first<CredentialConfigRow>()) ?? null
   );

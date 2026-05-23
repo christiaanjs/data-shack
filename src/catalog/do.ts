@@ -518,11 +518,12 @@ export class CatalogDO implements DurableObject {
       .exec("SELECT status FROM transform_jobs WHERE id = ?", jobId)
       .toArray();
     if (rows.length === 0) return new Response("Not Found", { status: 404 });
-    this.ctx.storage.sql.exec(
-      "UPDATE transform_jobs SET status = 'running', updated_at = ? WHERE id = ?",
+    const result = this.ctx.storage.sql.exec(
+      "UPDATE transform_jobs SET status = 'running', updated_at = ? WHERE id = ? AND status = 'pending'",
       Date.now(),
       jobId,
     );
+    if (result.rowsWritten === 0) return new Response("Conflict", { status: 409 });
     return new Response(null, { status: 204 });
   }
 

@@ -226,6 +226,21 @@ describe("verifyJwt", () => {
     expect(await verifyJwt(token, env.JWT_SECRET)).toBeNull();
   });
 
+  it("returns null for a token with wrong audience when expectedAud is set", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const payload = {
+      sub: "usr_1",
+      iss: "http://localhost",
+      aud: "http://localhost/mcp",
+      iat: now,
+      exp: now + 3600,
+      jti: "j5",
+    };
+    const token = await signJwt(payload, env.JWT_SECRET);
+    expect(await verifyJwt(token, env.JWT_SECRET, "http://other/mcp")).toBeNull();
+    expect(await verifyJwt(token, env.JWT_SECRET, "http://localhost/mcp")).not.toBeNull();
+  });
+
   it("returns null for malformed base64url input", async () => {
     expect(await verifyJwt("not.a.jwt!!!", env.JWT_SECRET)).toBeNull();
   });
@@ -722,7 +737,7 @@ describe("authenticate (via /me)", () => {
     const payload = {
       sub: "usr_test",
       iss: "http://localhost",
-      aud: "mcp",
+      aud: "http://localhost/mcp",
       iat: now,
       exp: now + 3600,
       jti: crypto.randomUUID(),
@@ -734,12 +749,29 @@ describe("authenticate (via /me)", () => {
     expect(res.status).toBe(200);
   });
 
+  it("rejects a JWT with wrong audience with 401", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const payload = {
+      sub: "usr_test",
+      iss: "http://localhost",
+      aud: "http://other-host/mcp",
+      iat: now,
+      exp: now + 3600,
+      jti: crypto.randomUUID(),
+    };
+    const token = await signJwt(payload, env.JWT_SECRET);
+    const res = await SELF.fetch("http://localhost/me", {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(res.status).toBe(401);
+  });
+
   it("rejects an expired Bearer JWT with 401", async () => {
     const now = Math.floor(Date.now() / 1000);
     const payload = {
       sub: "usr_test",
       iss: "http://localhost",
-      aud: "mcp",
+      aud: "http://localhost/mcp",
       iat: now - 7200,
       exp: now - 3600,
       jti: crypto.randomUUID(),

@@ -1,3 +1,4 @@
+import { Fragment } from "preact";
 import { useCallback, useEffect, useState } from "preact/hooks";
 
 interface TransformJobsPanelProps {
@@ -290,8 +291,8 @@ export function TransformJobsPanel({ workerBase, getAuthHeaders }: TransformJobs
                 </thead>
                 <tbody>
                   {jobs.map((job) => (
-                    <>
-                      <tr key={job.id}>
+                    <Fragment key={job.id}>
+                      <tr>
                         <td class="font-medium">
                           {job.name ?? <em class="text-base-content/40">unnamed</em>}
                         </td>
@@ -336,7 +337,7 @@ export function TransformJobsPanel({ workerBase, getAuthHeaders }: TransformJobs
                           </td>
                         </tr>
                       )}
-                    </>
+                    </Fragment>
                   ))}
                 </tbody>
               </table>

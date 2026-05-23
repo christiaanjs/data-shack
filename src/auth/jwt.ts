@@ -49,7 +49,11 @@ export async function signJwt(payload: JwtPayload, secret: string): Promise<stri
   return `${signingInput}.${base64urlEncode(sig)}`;
 }
 
-export async function verifyJwt(token: string, secret: string): Promise<JwtPayload | null> {
+export async function verifyJwt(
+  token: string,
+  secret: string,
+  expectedAud?: string,
+): Promise<JwtPayload | null> {
   const parts = token.split(".");
   if (parts.length !== 3) return null;
   const headerB64 = parts[0]!;
@@ -79,6 +83,7 @@ export async function verifyJwt(token: string, secret: string): Promise<JwtPaylo
 
     const p = payload as JwtPayload;
     if (p.exp < Math.floor(Date.now() / 1000)) return null;
+    if (expectedAud !== undefined && p.aud !== expectedAud) return null;
     return p;
   } catch {
     return null;

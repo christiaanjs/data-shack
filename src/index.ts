@@ -29,7 +29,6 @@ import {
   insertCredential,
   insertStorageBackend,
   listCredentials,
-  listHttpCredentials,
   listStorageBackends,
   updateStorageBackend,
 } from "./db/settings.ts";
@@ -124,7 +123,7 @@ async function resolveHttpDsUri(
       iat: now,
       exp: now + 3600,
       jti: crypto.randomUUID(),
-      c: parsed.credentialId,
+      c: row.id,
       p: parsed.path,
       u: userId,
     },
@@ -186,6 +185,9 @@ app.on(["GET", "HEAD"], "/api/data-sources/obj/:token", async (c) => {
       },
     });
   }
+
+  // HEAD requests don't need a body — skip the fetch loop entirely.
+  if (isHead) return new Response(null, { headers: { "Content-Type": "application/x-ndjson" } });
 
   // Paginated: fetch all pages, concatenate as NDJSON
   const maxPages = 45;

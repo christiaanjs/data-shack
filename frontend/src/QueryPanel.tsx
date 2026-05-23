@@ -125,11 +125,58 @@ export function QueryPanel({ workerBase, getAuthHeaders }: QueryPanelProps) {
       const db = dbRef.current;
       if (!db) return;
 
+      // Batch-resolve http-ds:// URIs to token URLs before creating views.
+      const httpDsEntries = withSnaps.filter(({ snapshot }) =>
+        snapshot.uri.startsWith("http-ds://"),
+      );
+      const httpDsTokenMap = new Map<string, string>();
+      if (httpDsEntries.length > 0) {
+        try {
+          const authHeaders = await getAuthHeaders();
+          const res = await fetch(`${workerBase}/api/storage/resolve`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", ...authHeaders },
+            body: JSON.stringify({
+              uris: httpDsEntries.map(({ snapshot }) => ({ uri: snapshot.uri, method: "GET" })),
+            }),
+          });
+          if (res.ok) {
+            const data = (await res.json()) as { urls: Record<string, string> };
+            for (const [uri, url] of Object.entries(data.urls)) {
+              httpDsTokenMap.set(uri, url);
+            }
+          }
+        } catch {
+          // token resolution failed — those tables will land in failedViews below
+        }
+      }
+
       // Acquire one proxy credential per backend (cached)
       const secretsByBackend = new Map<string, string>();
       const failed: string[] = [];
 
       for (const { table, snapshot } of withSnaps) {
+        const safeId = table.name.replace(/"/g, '""');
+
+        // http-ds:// tables: read directly from the resolved token URL.
+        if (snapshot.uri.startsWith("http-ds://")) {
+          const tokenUrl = httpDsTokenMap.get(snapshot.uri);
+          if (!tokenUrl) {
+            failed.push(table.name);
+            continue;
+          }
+          try {
+            await runQuery(
+              db,
+              `CREATE OR REPLACE VIEW "${safeId}" AS SELECT * FROM ${readerFn(snapshot.uri, snapshot.format)}('${tokenUrl}')`,
+              [],
+            );
+          } catch {
+            failed.push(table.name);
+          }
+          continue;
+        }
+
         const parsed = parseStorageUri(snapshot.uri);
         if (!parsed) {
           failed.push(table.name);
@@ -158,7 +205,6 @@ export function QueryPanel({ workerBase, getAuthHeaders }: QueryPanelProps) {
           ? `read_parquet('s3://${backend}/${key}**/*.parquet', hive_partitioning=true)`
           : `${readerFn(snapshot.uri, snapshot.format)}('s3://${backend}/${key}')`;
 
-        const safeId = table.name.replace(/"/g, '""');
         try {
           await runQuery(db, `CREATE OR REPLACE VIEW "${safeId}" AS SELECT * FROM ${readExpr}`, [
             preamble,
