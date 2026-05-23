@@ -23,6 +23,12 @@ interface StorageBackend {
   type: string;
 }
 
+interface CredentialRow {
+  id: string;
+  name: string;
+  type: string;
+}
+
 interface CatalogPanelProps {
   workerBase: string;
   getAuthHeaders: () => Promise<Record<string, string>>;
@@ -48,6 +54,7 @@ export function CatalogPanel({ workerBase, getAuthHeaders }: CatalogPanelProps) 
   const [tables, setTables] = useState<CatalogTable[]>([]);
   const [latestSnap, setLatestSnap] = useState<Record<string, CatalogSnapshot>>({});
   const [backends, setBackends] = useState<StorageBackend[]>([]);
+  const [credentials, setCredentials] = useState<CredentialRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -60,6 +67,12 @@ export function CatalogPanel({ workerBase, getAuthHeaders }: CatalogPanelProps) 
   const [committing, setCommitting] = useState(false);
   const [commitError, setCommitError] = useState<string | null>(null);
   const [commitSuccess, setCommitSuccess] = useState(false);
+
+  // Pagination (http-ds:// only)
+  const [cPagEnabled, setCPagEnabled] = useState(false);
+  const [cPagCursorParam, setCPagCursorParam] = useState("cursor");
+  const [cPagCursorPath, setCPagCursorPath] = useState("");
+  const [cPagDataPath, setCPagDataPath] = useState("");
 
   // Inline edit
   const [editingSnapId, setEditingSnapId] = useState<string | null>(null);
@@ -114,10 +127,35 @@ export function CatalogPanel({ workerBase, getAuthHeaders }: CatalogPanelProps) 
     }
   }, [workerBase, getAuthHeaders]);
 
+  const loadCredentials = useCallback(async () => {
+    try {
+      const headers = await getAuthHeaders();
+      const res = await fetch(`${workerBase}/api/credentials`, { headers });
+      if (!res.ok) return;
+      const { credentials: creds } = (await res.json()) as { credentials: CredentialRow[] };
+      setCredentials(creds.filter((c) => c.type === "http"));
+    } catch {
+      // non-fatal
+    }
+  }, [workerBase, getAuthHeaders]);
+
   useEffect(() => {
     load().catch(() => {});
     loadBackends().catch(() => {});
-  }, [load, loadBackends]);
+    loadCredentials().catch(() => {});
+  }, [load, loadBackends, loadCredentials]);
+
+  const isHttpDs = cUri.startsWith("http-ds://");
+
+  // When URI is http-ds://, auto-derive the backend from the credential name in the URI.
+  function resolvedBackend(): string {
+    if (isHttpDs) {
+      const withoutScheme = cUri.slice("http-ds://".length);
+      const slashIdx = withoutScheme.indexOf("/");
+      return slashIdx === -1 ? withoutScheme : withoutScheme.slice(0, slashIdx);
+    }
+    return cBackend;
+  }
 
   async function handleCommit(e: Event) {
     e.preventDefault();
@@ -126,10 +164,22 @@ export function CatalogPanel({ workerBase, getAuthHeaders }: CatalogPanelProps) 
     setCommitSuccess(false);
     try {
       const headers = await getAuthHeaders();
+
+      // Build URI — append pagination query params when enabled for http-ds://
+      let finalUri = cUri;
+      if (isHttpDs && cPagEnabled) {
+        const params = new URLSearchParams();
+        if (cPagCursorParam) params.set("_pag_cursor_param", cPagCursorParam);
+        if (cPagCursorPath) params.set("_pag_cursor_path", cPagCursorPath);
+        if (cPagDataPath) params.set("_pag_data_path", cPagDataPath);
+        const qs = params.toString();
+        if (qs) finalUri = `${cUri}${cUri.includes("?") ? "&" : "?"}${qs}`;
+      }
+
       const body: Record<string, string> = {
         table: cTable,
-        uri: cUri,
-        storageBackend: cBackend,
+        uri: finalUri,
+        storageBackend: resolvedBackend(),
       };
       if (cFormat) body.format = cFormat;
       if (cMessage) body.message = cMessage;
@@ -147,6 +197,10 @@ export function CatalogPanel({ workerBase, getAuthHeaders }: CatalogPanelProps) 
       setCBackend("");
       setCFormat("");
       setCMessage("");
+      setCPagEnabled(false);
+      setCPagCursorParam("cursor");
+      setCPagCursorPath("");
+      setCPagDataPath("");
       setCommitSuccess(true);
       await load();
     } catch (err) {
@@ -233,6 +287,16 @@ export function CatalogPanel({ workerBase, getAuthHeaders }: CatalogPanelProps) 
               </code>{" "}
               — S3-compatible backend. Use the backend ID shown in Settings → Storage Backends.
             </p>
+            <p>
+              <code class="font-mono text-xs bg-base-300 px-1 rounded">
+                http-ds://credName/path
+              </code>{" "}
+              — Live HTTP data source. The credential name is embedded in the URI; the storage
+              backend is auto-filled. Enable pagination below to append cursor parameters (
+              <code class="font-mono text-xs">_pag_cursor_param</code>,{" "}
+              <code class="font-mono text-xs">_pag_cursor_path</code>,{" "}
+              <code class="font-mono text-xs">_pag_data_path</code>) to the committed URI.
+            </p>
           </div>
         </div>
       </div>
@@ -255,22 +319,29 @@ export function CatalogPanel({ workerBase, getAuthHeaders }: CatalogPanelProps) 
                 />
               </fieldset>
               <fieldset class="fieldset">
-                <legend class="fieldset-legend">Storage backend</legend>
+                <legend class="fieldset-legend">
+                  {isHttpDs ? "Credential (auto-filled from URI)" : "Storage backend"}
+                </legend>
                 <input
                   class="input input-bordered input-sm w-full font-mono"
-                  list="backend-datalist"
+                  list={isHttpDs ? undefined : "backend-datalist"}
                   placeholder="primary-r2 or backend ID"
-                  value={cBackend}
-                  onInput={(e) => setCBackend((e.target as HTMLInputElement).value)}
+                  value={isHttpDs ? resolvedBackend() : cBackend}
+                  onInput={(e) => {
+                    if (!isHttpDs) setCBackend((e.target as HTMLInputElement).value);
+                  }}
+                  readOnly={isHttpDs}
                   required
                 />
-                <datalist id="backend-datalist">
-                  {backends.map((b) => (
-                    <option key={b.id} value={b.id}>
-                      {b.name} ({b.type})
-                    </option>
-                  ))}
-                </datalist>
+                {!isHttpDs && (
+                  <datalist id="backend-datalist">
+                    {backends.map((b) => (
+                      <option key={b.id} value={b.id}>
+                        {b.name} ({b.type})
+                      </option>
+                    ))}
+                  </datalist>
+                )}
               </fieldset>
             </div>
             <fieldset class="fieldset">
@@ -278,11 +349,17 @@ export function CatalogPanel({ workerBase, getAuthHeaders }: CatalogPanelProps) 
               <input
                 type="text"
                 class="input input-bordered input-sm w-full font-mono"
+                list="uri-credential-datalist"
                 placeholder="r2://data-shack-storage/transactions/2026-05.parquet"
                 value={cUri}
                 onInput={(e) => setCUri((e.target as HTMLInputElement).value)}
                 required
               />
+              <datalist id="uri-credential-datalist">
+                {credentials.map((c) => (
+                  <option key={c.id} value={`http-ds://${c.name}/`} />
+                ))}
+              </datalist>
             </fieldset>
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <fieldset class="fieldset">
@@ -310,6 +387,63 @@ export function CatalogPanel({ workerBase, getAuthHeaders }: CatalogPanelProps) 
                 />
               </fieldset>
             </div>
+            {/* Cursor pagination — only shown for http-ds:// URIs */}
+            {isHttpDs && (
+              <div class="border border-base-300 rounded-box p-3 space-y-3">
+                <label class="flex items-center gap-2 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    class="checkbox checkbox-sm"
+                    checked={cPagEnabled}
+                    onChange={(e) => setCPagEnabled((e.target as HTMLInputElement).checked)}
+                  />
+                  <span class="text-sm font-medium">Cursor pagination</span>
+                </label>
+                {cPagEnabled && (
+                  <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 pl-6">
+                    <fieldset class="fieldset">
+                      <legend class="fieldset-legend">Cursor param</legend>
+                      <input
+                        type="text"
+                        class="input input-bordered input-sm w-full font-mono"
+                        value={cPagCursorParam}
+                        onInput={(e) => setCPagCursorParam((e.target as HTMLInputElement).value)}
+                        placeholder="cursor"
+                      />
+                    </fieldset>
+                    <fieldset class="fieldset">
+                      <legend class="fieldset-legend">Cursor path</legend>
+                      <input
+                        type="text"
+                        class="input input-bordered input-sm w-full font-mono"
+                        value={cPagCursorPath}
+                        onInput={(e) => setCPagCursorPath((e.target as HTMLInputElement).value)}
+                        placeholder="next"
+                      />
+                      <p class="text-xs text-base-content/50 mt-1">
+                        Dot-notation path in the response for the next cursor value
+                      </p>
+                    </fieldset>
+                    <fieldset class="fieldset sm:col-span-2">
+                      <legend class="fieldset-legend">
+                        Data path <span class="text-base-content/40 font-normal">(optional)</span>
+                      </legend>
+                      <input
+                        type="text"
+                        class="input input-bordered input-sm w-full font-mono"
+                        value={cPagDataPath}
+                        onInput={(e) => setCPagDataPath((e.target as HTMLInputElement).value)}
+                        placeholder="items"
+                      />
+                      <p class="text-xs text-base-content/50 mt-1">
+                        Dot-notation path to the data array. If omitted, the entire response body is
+                        used.
+                      </p>
+                    </fieldset>
+                  </div>
+                )}
+              </div>
+            )}
             {commitError && (
               <div role="alert" class="alert alert-error py-2 text-sm">
                 <span>{commitError}</span>

@@ -1,6 +1,10 @@
 import { decryptConfig } from "../crypto.ts";
-import { getCredentialConfig } from "../db/settings.ts";
-import { getStorageBackendByNameOrId } from "../db/settings.ts";
+import {
+  getCredentialByNameOrId,
+  getCredentialConfig,
+  getStorageBackendByNameOrId,
+  listHttpCredentials,
+} from "../db/settings.ts";
 import { decryptHttpConfig, resolveHeaderTemplates } from "../http-config.ts";
 import type { Env } from "../types.ts";
 
@@ -36,9 +40,21 @@ const TOOLS: Tool[] = [
       type: "object",
       properties: {
         sql: { type: "string", description: "DuckDB SQL to execute" },
+        format: {
+          type: "string",
+          enum: ["table", "json", "csv"],
+          description:
+            "Output format. 'table' (default) = tab-separated with header, 'json' = array of objects, 'csv' = CSV with header row.",
+        },
       },
       required: ["sql"],
     },
+  },
+  {
+    name: "list_data_sources",
+    description:
+      "List all configured HTTP data source credentials. Returns id, name, and base URL for each. Use the name or id in http-ds://name/path URIs.",
+    inputSchema: { type: "object", properties: {}, required: [] },
   },
   {
     name: "read_data",
@@ -140,7 +156,12 @@ export async function mcpHandler(
       if (typeof sql !== "string" || !sql.trim()) {
         return respondError(-32602, "sql is required");
       }
-      return handleRunQuery(respond, respondError, sql, userId, sessionStub);
+      const fmt = typeof args.format === "string" ? args.format : "table";
+      return handleRunQuery(respond, respondError, sql, fmt, userId, sessionStub);
+    }
+
+    if (toolName === "list_data_sources") {
+      return handleListDataSources(respond, respondError, userId, env);
     }
 
     if (toolName === "read_data") {
@@ -213,6 +234,7 @@ async function handleRunQuery(
   respond: (r: unknown) => Response,
   respondError: (code: number, msg: string, data?: unknown) => Response,
   sql: string,
+  fmt: string,
   userId: string,
   sessionStub: ReturnType<DurableObjectNamespace["get"]>,
 ): Promise<Response> {
@@ -236,6 +258,38 @@ async function handleRunQuery(
   const truncated = result.rows.length > MAX_RESULT_ROWS;
   const rows = truncated ? result.rows.slice(0, MAX_RESULT_ROWS) : result.rows;
 
+  if (fmt === "json") {
+    const objects = rows.map((row) =>
+      Object.fromEntries(result.columns.map((col, i) => [col, row[i]])),
+    );
+    const text = JSON.stringify(objects, null, 2);
+    if (truncated) {
+      return respond({
+        content: [{ type: "text", text: `${text}\n\n(truncated to ${MAX_RESULT_ROWS} rows)` }],
+      });
+    }
+    return respond({ content: [{ type: "text", text }] });
+  }
+
+  if (fmt === "csv") {
+    const lines = [result.columns.join(",")];
+    for (const row of rows) {
+      lines.push(
+        row
+          .map((v) => {
+            const s = v === null ? "" : String(v);
+            return s.includes(",") || s.includes('"') || s.includes("\n")
+              ? `"${s.replace(/"/g, '""')}"`
+              : s;
+          })
+          .join(","),
+      );
+    }
+    if (truncated) lines.push(`# truncated to ${MAX_RESULT_ROWS} rows`);
+    return respond({ content: [{ type: "text", text: lines.join("\n") }] });
+  }
+
+  // default: table (tab-separated)
   const lines: string[] = [];
   lines.push(result.columns.join("\t"));
   for (const row of rows) {
@@ -243,6 +297,28 @@ async function handleRunQuery(
   }
   if (truncated) lines.push(`\n(truncated to ${MAX_RESULT_ROWS} rows)`);
 
+  return respond({ content: [{ type: "text", text: lines.join("\n") }] });
+}
+
+async function handleListDataSources(
+  respond: (r: unknown) => Response,
+  respondError: (code: number, msg: string) => Response,
+  userId: string,
+  env: Env,
+): Promise<Response> {
+  const credentials = await listHttpCredentials(env.DB, userId);
+  const results: { id: string; name: string; baseUrl: string }[] = [];
+  for (const cred of credentials) {
+    const row = await getCredentialConfig(env.DB, cred.id, userId);
+    if (!row) continue;
+    const config = await decryptHttpConfig(row.encrypted_config, env.JWT_SECRET);
+    if (!config) continue;
+    results.push({ id: cred.id, name: cred.name, baseUrl: config.baseUrl });
+  }
+  if (results.length === 0) {
+    return respond({ content: [{ type: "text", text: "No HTTP data sources configured." }] });
+  }
+  const lines = results.map((r) => `- **${r.name}** (${r.id}): ${r.baseUrl}`);
   return respond({ content: [{ type: "text", text: lines.join("\n") }] });
 }
 
@@ -277,7 +353,7 @@ async function handleReadHttpDs(
   const credentialId = slash === -1 ? rest : rest.slice(0, slash);
   const path = slash === -1 ? "/" : rest.slice(slash);
 
-  const row = await getCredentialConfig(env.DB, credentialId, userId);
+  const row = await getCredentialByNameOrId(env.DB, credentialId, userId);
   if (!row || row.type !== "http")
     return respondError(-32602, `HTTP credential not found: ${credentialId}`);
 
@@ -285,11 +361,8 @@ async function handleReadHttpDs(
   if (!config) return respondError(-32603, "Failed to decrypt credential config");
 
   const url = config.baseUrl.replace(/\/$/, "") + path;
-  
-  const resolvedHeaders = resolveHeaderTemplates(
-    config.headers,
-    config.variables,
-  );
+
+  const resolvedHeaders = resolveHeaderTemplates(config.headers, config.variables);
 
   let upstream: Response;
   try {

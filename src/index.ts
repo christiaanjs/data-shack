@@ -23,11 +23,13 @@ import {
 import {
   deleteCredential,
   deleteStorageBackend,
+  getCredentialByNameOrId,
   getCredentialConfig,
   getStorageBackendConfig,
   insertCredential,
   insertStorageBackend,
   listCredentials,
+  listHttpCredentials,
   listStorageBackends,
   updateStorageBackend,
 } from "./db/settings.ts";
@@ -110,7 +112,7 @@ async function resolveHttpDsUri(
   const parsed = parseHttpDsUri(uri);
   if (!parsed) throw new Error(`Invalid http-ds URI: ${uri}`);
 
-  const row = await getCredentialConfig(env.DB, parsed.credentialId, userId);
+  const row = await getCredentialByNameOrId(env.DB, parsed.credentialId, userId);
   if (!row || row.type !== "http")
     throw new Error(`HTTP credential not found: ${parsed.credentialId}`);
 
@@ -144,23 +146,74 @@ app.on(["GET", "HEAD"], "/api/data-sources/obj/:token", async (c) => {
   const config = await decryptHttpConfig(row.encrypted_config, c.env.JWT_SECRET);
   if (!config) return new Response("Bad Gateway", { status: 502 });
 
-  const url = config.baseUrl.replace(/\/$/, "") + payload.p;
+  // Parse path for pagination params
+  const pathUrl = new URL(payload.p, "http://x");
+  const pagCursorParam = pathUrl.searchParams.get("_pag_cursor_param");
+  const pagCursorPath = pathUrl.searchParams.get("_pag_cursor_path");
+  const pagDataPath = pathUrl.searchParams.get("_pag_data_path");
+  // Strip _pag_* and build clean path
+  pathUrl.searchParams.delete("_pag_cursor_param");
+  pathUrl.searchParams.delete("_pag_cursor_path");
+  pathUrl.searchParams.delete("_pag_data_path");
+  const cleanPath = pathUrl.pathname + (pathUrl.search !== "?" ? pathUrl.search : "");
+
+  const baseUrl = config.baseUrl.replace(/\/$/, "") + cleanPath;
   const resolvedHeaders = resolveHeaderTemplates(config.headers, config.variables);
 
-  // Always GET upstream — many APIs don't support HEAD. Strip body ourselves for HEAD requests.
-  let upstream: Response;
-  try {
-    upstream = await fetch(url, { method: "GET", headers: resolvedHeaders });
-  } catch {
-    return new Response("Bad Gateway", { status: 502 });
+  function getAtPath(obj: unknown, path: string): unknown {
+    return path.split(".").reduce<unknown>((cur, key) => {
+      if (cur && typeof cur === "object" && !Array.isArray(cur)) {
+        return (cur as Record<string, unknown>)[key];
+      }
+      return undefined;
+    }, obj);
   }
 
+  const isPaginated = pagCursorParam && pagCursorPath;
   const isHead = c.req.method === "HEAD";
-  return new Response(isHead ? null : upstream.body, {
-    status: upstream.status,
-    headers: {
-      "Content-Type": upstream.headers.get("Content-Type") ?? "application/octet-stream",
-    },
+
+  if (!isPaginated) {
+    let upstream: Response;
+    try {
+      upstream = await fetch(baseUrl, { method: "GET", headers: resolvedHeaders });
+    } catch {
+      return new Response("Bad Gateway", { status: 502 });
+    }
+    return new Response(isHead ? null : upstream.body, {
+      status: upstream.status,
+      headers: {
+        "Content-Type": upstream.headers.get("Content-Type") ?? "application/octet-stream",
+      },
+    });
+  }
+
+  // Paginated: fetch all pages, concatenate as NDJSON
+  const maxPages = 45;
+  const chunks: string[] = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < maxPages; page++) {
+    const pageUrl = new URL(baseUrl);
+    if (cursor) pageUrl.searchParams.set(pagCursorParam, cursor);
+    let res: Response;
+    try {
+      res = await fetch(pageUrl.toString(), { method: "GET", headers: resolvedHeaders });
+    } catch {
+      return new Response("Bad Gateway", { status: 502 });
+    }
+    if (!res.ok) return new Response(`Upstream error: ${res.status}`, { status: 502 });
+    const json = (await res.json()) as unknown;
+    const items = pagDataPath ? getAtPath(json, pagDataPath) : json;
+    if (Array.isArray(items)) {
+      for (const item of items) chunks.push(JSON.stringify(item));
+    } else if (items !== undefined) {
+      chunks.push(JSON.stringify(items));
+    }
+    const nextCursor = getAtPath(json, pagCursorPath);
+    if (!nextCursor || typeof nextCursor !== "string") break;
+    cursor = nextCursor;
+  }
+  return new Response(isHead ? null : chunks.join("\n"), {
+    headers: { "Content-Type": "application/x-ndjson" },
   });
 });
 
@@ -235,6 +288,22 @@ app.post("/api/storage/resolve", requireAuth, async (c) => {
 app.get("/api/credentials", requireAuth, async (c) => {
   const credentials = await listCredentials(c.env.DB, c.get("userId"));
   return c.json({ credentials });
+});
+
+app.get("/api/credentials/:id", requireAuth, async (c) => {
+  const row = await c.env.DB.prepare(
+    "SELECT id, name, type, encrypted_config FROM credentials WHERE id = ? AND user_id = ?",
+  )
+    .bind(c.req.param("id"), c.get("userId"))
+    .first<{ id: string; name: string; type: string; encrypted_config: string }>();
+  if (!row) return c.json({ error: "not found" }, 404);
+  let config: unknown = {};
+  try {
+    config = JSON.parse(await decryptConfig(row.encrypted_config, c.env.JWT_SECRET));
+  } catch {
+    // return empty config if decryption fails rather than erroring
+  }
+  return c.json({ id: row.id, name: row.name, type: row.type, config });
 });
 
 app.post("/api/credentials", requireAuth, async (c) => {
@@ -672,6 +741,29 @@ app.delete("/api/transform-jobs/:id", requireAuth, async (c) => {
   const res = await catalogStub(c.env, c.get("userId")).fetch(
     `http://do/jobs/${encodeURIComponent(c.req.param("id"))}`,
     { method: "DELETE" },
+  );
+  return new Response(res.body, { status: res.status });
+});
+
+app.patch("/api/transform-jobs/:id", requireAuth, async (c) => {
+  const id = c.req.param("id");
+  const body = await c.req.json();
+  const res = await catalogStub(c.env, c.get("userId")).fetch(
+    `http://do/jobs/${encodeURIComponent(id)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+  );
+  return new Response(res.body, { status: res.status, headers: res.headers });
+});
+
+app.post("/api/transform-jobs/:id/trigger", requireAuth, async (c) => {
+  const id = c.req.param("id");
+  const res = await catalogStub(c.env, c.get("userId")).fetch(
+    `http://do/jobs/${encodeURIComponent(id)}/trigger`,
+    { method: "POST" },
   );
   return new Response(res.body, { status: res.status });
 });

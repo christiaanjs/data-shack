@@ -152,6 +152,30 @@ export class CatalogDO implements DurableObject {
       if (!jobId.includes("/")) return this.deleteJob(jobId);
     }
 
+    if (
+      request.method === "PATCH" &&
+      pathname.startsWith("/jobs/") &&
+      !pathname.includes("/claim") &&
+      !pathname.includes("/complete") &&
+      !pathname.includes("/fail") &&
+      !pathname.includes("/trigger") &&
+      !pathname.includes("/reset") &&
+      pathname !== "/jobs/pending"
+    ) {
+      const jobId = pathname.slice("/jobs/".length);
+      const body = (await request.json()) as Record<string, unknown>;
+      return this.patchJob(jobId, body);
+    }
+
+    if (
+      request.method === "POST" &&
+      pathname.startsWith("/jobs/") &&
+      pathname.endsWith("/trigger")
+    ) {
+      const jobId = pathname.slice("/jobs/".length, -"/trigger".length);
+      return this.triggerJob(jobId);
+    }
+
     if (request.method === "POST" && pathname.startsWith("/jobs/") && pathname.endsWith("/claim")) {
       const jobId = pathname.slice("/jobs/".length, -"/claim".length);
       return this.claimJob(jobId);
@@ -423,6 +447,69 @@ export class CatalogDO implements DurableObject {
     }
     this.ctx.storage.sql.exec("DELETE FROM triggers WHERE job_id = ?", jobId);
     this.ctx.storage.sql.exec("DELETE FROM transform_jobs WHERE id = ?", jobId);
+    return new Response(null, { status: 204 });
+  }
+
+  private patchJob(jobId: string, body: Record<string, unknown>): Response {
+    const rows = this.ctx.storage.sql
+      .exec("SELECT status FROM transform_jobs WHERE id = ?", jobId)
+      .toArray();
+    if (rows.length === 0) return new Response("Not Found", { status: 404 });
+    if (rows[0]!.status === "running") {
+      return new Response("Cannot edit a running job", { status: 409 });
+    }
+    const setParts: string[] = [];
+    const bindValues: unknown[] = [];
+    if (typeof body.name === "string") {
+      setParts.push("name = ?");
+      bindValues.push(body.name || null);
+    }
+    if (typeof body.sql === "string" && body.sql) {
+      setParts.push("sql = ?");
+      bindValues.push(body.sql);
+    }
+    if (typeof body.output_table === "string" && SAFE_TABLE_NAME.test(body.output_table)) {
+      setParts.push("output_table = ?");
+      bindValues.push(body.output_table);
+    }
+    if (typeof body.output_uri === "string" && body.output_uri) {
+      setParts.push("output_uri = ?");
+      bindValues.push(body.output_uri);
+    }
+    if (typeof body.output_backend === "string" && body.output_backend) {
+      setParts.push("output_backend = ?");
+      bindValues.push(body.output_backend);
+    }
+    if ("format" in body) {
+      setParts.push("format = ?");
+      bindValues.push(typeof body.format === "string" ? body.format || null : null);
+    }
+    if (setParts.length === 0) return new Response("Nothing to update", { status: 400 });
+    setParts.push("updated_at = ?");
+    bindValues.push(Date.now(), jobId);
+    this.ctx.storage.sql.exec(
+      `UPDATE transform_jobs SET ${setParts.join(", ")} WHERE id = ?`,
+      ...bindValues,
+    );
+    const row = this.ctx.storage.sql
+      .exec("SELECT * FROM transform_jobs WHERE id = ?", jobId)
+      .toArray()[0];
+    return Response.json(row);
+  }
+
+  private triggerJob(jobId: string): Response {
+    const rows = this.ctx.storage.sql
+      .exec("SELECT status FROM transform_jobs WHERE id = ?", jobId)
+      .toArray();
+    if (rows.length === 0) return new Response("Not Found", { status: 404 });
+    if (rows[0]!.status === "running") {
+      return new Response("Job is currently running", { status: 409 });
+    }
+    this.ctx.storage.sql.exec(
+      "UPDATE transform_jobs SET status = 'pending', updated_at = ? WHERE id = ?",
+      Date.now(),
+      jobId,
+    );
     return new Response(null, { status: 204 });
   }
 

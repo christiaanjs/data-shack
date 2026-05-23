@@ -3,6 +3,7 @@ import { CatalogPanel } from "./CatalogPanel.tsx";
 import { LoadJobsPanel } from "./LoadJobsPanel.tsx";
 import { QueryPanel } from "./QueryPanel.tsx";
 import { SettingsPanel } from "./SettingsPanel.tsx";
+import { TransformJobsPanel } from "./TransformJobsPanel.tsx";
 import { clearTokens, getAccessToken, getValidToken, handleCallback, startLogin } from "./auth.ts";
 import { initDuckDB } from "./duckdb.ts";
 import { type SessionConnection, connectSession } from "./sessionWs.ts";
@@ -10,7 +11,7 @@ import { type SessionConnection, connectSession } from "./sessionWs.ts";
 const WORKER_BASE = import.meta.env.VITE_WORKER_URL ?? "";
 const DEV_TOKEN = import.meta.env.VITE_DEV_TOKEN as string | undefined;
 
-type Tab = "query" | "catalog" | "jobs" | "settings";
+type Tab = "query" | "catalog" | "jobs" | "transforms" | "settings";
 
 async function getAuthHeaders(): Promise<Record<string, string>> {
   if (DEV_TOKEN) return { "X-Dev-Token": DEV_TOKEN };
@@ -159,6 +160,14 @@ export function App() {
             <button
               type="button"
               role="tab"
+              class={`tab${activeTab === "transforms" ? " tab-active" : ""}`}
+              onClick={() => setActiveTab("transforms")}
+            >
+              Transforms
+            </button>
+            <button
+              type="button"
+              role="tab"
               class={`tab${activeTab === "settings" ? " tab-active" : ""}`}
               onClick={() => setActiveTab("settings")}
             >
@@ -199,6 +208,9 @@ export function App() {
         )}
         {activeTab === "jobs" && (
           <LoadJobsPanel workerBase={WORKER_BASE} getAuthHeaders={getAuthHeaders} />
+        )}
+        {activeTab === "transforms" && (
+          <TransformJobsPanel workerBase={WORKER_BASE} getAuthHeaders={getAuthHeaders} />
         )}
         {activeTab === "settings" && (
           <SettingsPanel workerBase={WORKER_BASE} getAuthHeaders={getAuthHeaders} />
