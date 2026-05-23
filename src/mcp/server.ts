@@ -1,7 +1,7 @@
 import { decryptConfig } from "../crypto.ts";
 import { getCredentialConfig } from "../db/settings.ts";
 import { getStorageBackendByNameOrId } from "../db/settings.ts";
-import { decryptHttpConfig } from "../http-config.ts";
+import { decryptHttpConfig, resolveHeaderTemplates } from "../http-config.ts";
 import type { Env } from "../types.ts";
 
 const PROTOCOL_VERSION = "2025-03-26";
@@ -285,10 +285,11 @@ async function handleReadHttpDs(
   if (!config) return respondError(-32603, "Failed to decrypt credential config");
 
   const url = config.baseUrl.replace(/\/$/, "") + path;
-  const resolvedHeaders: Record<string, string> = {};
-  for (const [k, v] of Object.entries(config.headers ?? {})) {
-    resolvedHeaders[k] = String(v);
-  }
+  
+  const resolvedHeaders = resolveHeaderTemplates(
+    config.headers,
+    config.variables,
+  );
 
   let upstream: Response;
   try {

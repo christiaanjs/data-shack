@@ -2,6 +2,10 @@ name = "data-shack"
 main = "src/index.ts"
 compatibility_date = "2025-05-06"
 
+[observability.logs]
+enabled = true
+invocation_logs = true
+
 [[d1_databases]]
 binding = "DB"
 database_name = "data-shack-db"
