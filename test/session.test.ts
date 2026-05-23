@@ -357,6 +357,101 @@ describe("read_data tool", () => {
     expect(text).not.toMatch(/credential not found/i);
     expect(text).toMatch(/[Ff]ail|[Ee]rror|connect/i);
   });
+
+  it("reads JSON from r2-s3compat backend using SigV4-signed request", async () => {
+    const createRes = await SELF.fetch("http://localhost/api/storage-backends", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({
+        name: "my-s3-backend",
+        type: "r2-s3compat",
+        config: {
+          endpoint: "https://test-account.r2.cloudflarestorage.com",
+          accessKeyId: "test-access-key",
+          secretAccessKey: "test-secret-key",
+          bucket: "my-bucket",
+          region: "auto",
+        },
+      }),
+    });
+    expect(createRes.status).toBe(201);
+
+    const payload = JSON.stringify({ records: [{ id: 1, name: "test" }] });
+    let capturedRequest: Request | null = null;
+    const savedFetch = globalThis.fetch;
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : (input as Request).url;
+      if (url.includes("r2.cloudflarestorage.com")) {
+        capturedRequest = new Request(url, init);
+        return new Response(payload, {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return savedFetch(input, init);
+    };
+
+    try {
+      const data = await mcpCall("read_data", { uri: "r2://my-s3-backend/path/to/data.json" });
+      const text = data.result?.content[0]?.text ?? "";
+      expect(text).toContain('"records"');
+      expect(text).toContain('"name"');
+      expect(text).toContain("test");
+
+      // Verify the request was SigV4-signed
+      expect(capturedRequest).not.toBeNull();
+      const authHeader = (capturedRequest as unknown as Request).headers.get("Authorization") ?? "";
+      expect(authHeader).toContain("AWS4-HMAC-SHA256");
+      expect(authHeader).toContain("test-access-key");
+    } finally {
+      globalThis.fetch = savedFetch;
+    }
+  });
+
+  it("returns error from r2-s3compat when backend returns non-200", async () => {
+    await SELF.fetch("http://localhost/api/storage-backends", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({
+        name: "my-s3-backend-404",
+        type: "r2-s3compat",
+        config: {
+          endpoint: "https://test-account.r2.cloudflarestorage.com",
+          accessKeyId: "test-access-key",
+          secretAccessKey: "test-secret-key",
+          bucket: "my-bucket",
+          region: "auto",
+        },
+      }),
+    });
+
+    const savedFetch = globalThis.fetch;
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : (input as Request).url;
+      if (url.includes("r2.cloudflarestorage.com")) {
+        return new Response("NoSuchKey", { status: 404 });
+      }
+      return savedFetch(input, init);
+    };
+
+    try {
+      const data = await mcpCall("read_data", { uri: "r2://my-s3-backend-404/missing.json" });
+      const text = JSON.stringify(data);
+      expect(text).toMatch(/404|[Bb]ackend returned/);
+    } finally {
+      globalThis.fetch = savedFetch;
+    }
+  });
 });
 
 // ── run_query with mock browser session ───────────────────────────────────────

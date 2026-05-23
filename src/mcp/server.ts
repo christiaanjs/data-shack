@@ -6,6 +6,7 @@ import {
   listHttpCredentials,
 } from "../db/settings.ts";
 import { decryptHttpConfig, resolveHeaderTemplates } from "../http-config.ts";
+import { signS3Request } from "../storage/resolve.ts";
 import type { Env } from "../types.ts";
 
 const PROTOCOL_VERSION = "2025-03-26";
@@ -59,7 +60,7 @@ const TOOLS: Tool[] = [
   {
     name: "read_data",
     description:
-      "Read JSON or NDJSON data directly from a URI without requiring a browser session. Supports http-ds://credentialId/path for HTTP data sources and r2://backendName/key for R2 storage (r2-bound only for direct read). Size limit: 1 MB.",
+      "Read JSON or NDJSON data directly from a URI without requiring a browser session. Supports http-ds://credentialId/path for HTTP data sources and r2://backendName/key for R2 storage (both r2-bound and r2-s3compat backends). Size limit: 1 MB.",
     inputSchema: {
       type: "object",
       properties: {
@@ -431,23 +432,33 @@ async function handleReadR2(
     return respondError(-32603, "Failed to decrypt backend config");
   }
 
-  const endpoint = s3Config.endpoint.replace(/\/$/, "");
-  const url = `${endpoint}/${s3Config.bucket}/${key}`;
+  let signedUrl: string;
+  let signedHeaders: Record<string, string>;
+  try {
+    const signed = await signS3Request({
+      method: "GET",
+      endpoint: s3Config.endpoint,
+      bucket: s3Config.bucket,
+      key,
+      region: s3Config.region,
+      accessKeyId: s3Config.accessKeyId,
+      secretAccessKey: s3Config.secretAccessKey,
+    });
+    signedUrl = signed.url;
+    signedHeaders = signed.headers;
+  } catch {
+    return respondError(-32603, "Failed to sign S3 request");
+  }
 
-  // Simple GET without SigV4 signing — works only for public buckets.
-  // For private buckets, the proxy endpoint should be used instead.
   let upstream: Response;
   try {
-    upstream = await fetch(url);
+    upstream = await fetch(signedUrl, { method: "GET", headers: signedHeaders });
   } catch {
     return respondError(-32603, "Failed to fetch from S3-compatible backend");
   }
 
   if (!upstream.ok) {
-    return respondError(
-      -32603,
-      `Backend returned ${upstream.status}. For private buckets use the S3 proxy.`,
-    );
+    return respondError(-32603, `Backend returned ${upstream.status}`);
   }
 
   return readAndReturnJson(respond, respondError, upstream);
