@@ -56,7 +56,7 @@ describe("POST /mcp - MCP server", () => {
         jsonrpc: "2.0",
         id: 1,
         method: "initialize",
-        params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "test" } },
+        params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "test" } },
       }),
     });
     expect(res.status).toBe(200);
@@ -71,18 +71,18 @@ describe("POST /mcp - MCP server", () => {
     };
     expect(data.jsonrpc).toBe("2.0");
     expect(data.id).toBe(1);
-    expect(data.result.protocolVersion).toBe("2025-03-26");
+    expect(data.result.protocolVersion).toBe("2024-11-05");
     expect(data.result.serverInfo.name).toBe("data-shack");
     expect(data.result.capabilities).toHaveProperty("tools");
   });
 
-  it("notifications/initialized returns 200", async () => {
+  it("notifications (no id) return 202", async () => {
     const res = await SELF.fetch("http://localhost/mcp", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...DEV_HEADERS },
       body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }),
     });
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(202);
   });
 
   it("tools/list returns three tools", async () => {
@@ -181,24 +181,5 @@ describe("POST /mcp - MCP server", () => {
     expect(res.status).toBe(200);
     const data = (await res.json()) as { error?: { code: number } };
     expect(data.error?.code).toBe(-32601);
-  });
-
-  it("SSE response format when Accept: text/event-stream", async () => {
-    const res = await SELF.fetch("http://localhost/mcp", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "text/event-stream",
-        ...DEV_HEADERS,
-      },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 7, method: "tools/list" }),
-    });
-    expect(res.status).toBe(200);
-    expect(res.headers.get("Content-Type")).toContain("text/event-stream");
-    const text = await res.text();
-    expect(text.startsWith("data:")).toBe(true);
-    const jsonPart = text.replace(/^data: /, "").trim();
-    const parsed = JSON.parse(jsonPart) as { result: { tools: unknown[] } };
-    expect(parsed.result.tools).toHaveLength(3);
   });
 });

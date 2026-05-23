@@ -4,7 +4,7 @@ import { getStorageBackendByNameOrId } from "../db/settings.ts";
 import { decryptHttpConfig } from "../http-config.ts";
 import type { Env } from "../types.ts";
 
-const PROTOCOL_VERSION = "2025-03-26";
+const PROTOCOL_VERSION = "2024-11-05";
 const MAX_RESULT_ROWS = 1000;
 const MAX_READ_BYTES = 1_048_576; // 1 MB
 
@@ -71,17 +71,6 @@ function jsonRpcError(
   return { jsonrpc: "2.0", id: id ?? null, error: { code, message, data } };
 }
 
-function sseResponse(obj: unknown): Response {
-  const body = `data: ${JSON.stringify(obj)}\n\n`;
-  return new Response(body, {
-    headers: {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
-      Connection: "keep-alive",
-    },
-  });
-}
-
 export async function mcpHandler(
   request: Request,
   env: Env,
@@ -97,17 +86,15 @@ export async function mcpHandler(
   }
 
   const { id, method, params } = body;
-  const useSSE = request.headers.get("Accept")?.includes("text/event-stream") ?? false;
 
-  const respond = (result: unknown) => {
-    const payload = jsonRpcOk(id, result);
-    return useSSE ? sseResponse(payload) : Response.json(payload);
-  };
+  // Notifications (no id) — acknowledge without a body.
+  if (id === undefined) {
+    return new Response(null, { status: 202 });
+  }
 
-  const respondError = (code: number, message: string, data?: unknown) => {
-    const payload = jsonRpcError(id, code, message, data);
-    return useSSE ? sseResponse(payload) : Response.json(payload, { status: 200 });
-  };
+  const respond = (result: unknown) => Response.json(jsonRpcOk(id, result));
+  const respondError = (code: number, message: string, data?: unknown) =>
+    Response.json(jsonRpcError(id, code, message, data));
 
   // ── Method dispatch ───────────────────────────────────────────────────────
 
@@ -117,10 +104,6 @@ export async function mcpHandler(
       capabilities: { tools: {} },
       serverInfo: { name: "data-shack", version: "1.0.0" },
     });
-  }
-
-  if (method === "notifications/initialized") {
-    return new Response(null, { status: 200 });
   }
 
   if (method === "tools/list") {
