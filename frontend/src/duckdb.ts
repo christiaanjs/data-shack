@@ -47,6 +47,17 @@ export async function initDuckDB(): Promise<duckdb.AsyncDuckDB> {
   return db;
 }
 
+// Arrow BigInt values can't be serialized by JSON.stringify. Convert to number
+// when within safe integer range, otherwise to string to preserve precision.
+function serializeArrowValue(v: unknown): unknown {
+  if (typeof v === "bigint") {
+    const MAX = BigInt(Number.MAX_SAFE_INTEGER);
+    const MIN = -MAX;
+    return v >= MIN && v <= MAX ? Number(v) : String(v);
+  }
+  return v;
+}
+
 export async function runQuery(
   db: duckdb.AsyncDuckDB,
   sql: string,
@@ -65,7 +76,7 @@ export async function runQuery(
         const row: unknown[] = [];
         for (let j = 0; j < columns.length; j++) {
           const vector = batch.getChildAt(j);
-          row.push(vector ? vector.get(i) : null);
+          row.push(vector ? serializeArrowValue(vector.get(i)) : null);
         }
         rows.push(row);
       }
