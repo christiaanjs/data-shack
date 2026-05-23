@@ -273,14 +273,28 @@ app.post("/api/storage-backends", requireAuth, async (c) => {
   if (typeof body.name !== "string" || typeof body.type !== "string" || !body.config) {
     return c.json({ error: "name, type, and config are required" }, 400);
   }
+  const name = body.name.trim();
+  if (!name || name.length > 64 || name.includes("/")) {
+    return c.json({ error: "name must be 1–64 characters and must not contain '/'" }, 400);
+  }
+  if (name === "r2-bound" || name === "data-shack") {
+    return c.json({ error: `'${name}' is a reserved backend name` }, 400);
+  }
   const encryptedConfig = await encryptConfig(JSON.stringify(body.config), c.env.JWT_SECRET);
-  const result = await insertStorageBackend(c.env.DB, {
-    userId: c.get("userId"),
-    name: body.name,
-    type: body.type,
-    encryptedConfig,
-  });
-  return c.json({ id: result.id }, 201);
+  try {
+    const result = await insertStorageBackend(c.env.DB, {
+      userId: c.get("userId"),
+      name,
+      type: body.type,
+      encryptedConfig,
+    });
+    return c.json({ id: result.id }, 201);
+  } catch (err) {
+    if (err instanceof Error && err.message.includes("UNIQUE constraint failed")) {
+      return c.json({ error: "a storage backend with that name already exists" }, 409);
+    }
+    throw err;
+  }
 });
 
 app.delete("/api/storage-backends/:id", requireAuth, async (c) => {

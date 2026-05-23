@@ -107,6 +107,8 @@ export async function deleteStorageBackend(
 }
 
 interface StorageBackendConfigRow {
+  id: string;
+  name: string;
   type: string;
   encrypted_config: string;
 }
@@ -117,8 +119,34 @@ export async function getStorageBackendConfig(
   userId: string,
 ): Promise<StorageBackendConfigRow | null> {
   const result = await db
-    .prepare("SELECT type, encrypted_config FROM storage_backends WHERE id = ? AND user_id = ?")
+    .prepare(
+      "SELECT id, name, type, encrypted_config FROM storage_backends WHERE id = ? AND user_id = ?",
+    )
     .bind(id, userId)
     .first<StorageBackendConfigRow>();
   return result ?? null;
+}
+
+// Resolves a storage backend by name first, falling back to ID.
+// Returns the full row including id and name so callers can use either for subsequent lookups.
+export async function getStorageBackendByNameOrId(
+  db: D1Database,
+  nameOrId: string,
+  userId: string,
+): Promise<StorageBackendConfigRow | null> {
+  const byName = await db
+    .prepare(
+      "SELECT id, name, type, encrypted_config FROM storage_backends WHERE user_id = ? AND name = ?",
+    )
+    .bind(userId, nameOrId)
+    .first<StorageBackendConfigRow>();
+  if (byName) return byName;
+  return (
+    (await db
+      .prepare(
+        "SELECT id, name, type, encrypted_config FROM storage_backends WHERE user_id = ? AND id = ?",
+      )
+      .bind(userId, nameOrId)
+      .first<StorageBackendConfigRow>()) ?? null
+  );
 }

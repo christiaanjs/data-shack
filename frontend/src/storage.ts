@@ -8,17 +8,17 @@ interface ProxyCred {
   expiresAt: number;
 }
 
-// Session-scoped cache keyed by "backendId:pathPrefix"
+// Session-scoped cache keyed by "backend:pathPrefix"
 const credCache = new Map<string, ProxyCred>();
 
 export async function acquireProxyCred(
-  backendId: string,
+  backend: string,
   pathPrefix: string,
   workerOrigin: string,
   getAuthHeaders: () => Promise<Record<string, string>>,
   ttlSeconds = 3600,
 ): Promise<ProxyCred> {
-  const cacheKey = `${backendId}:${pathPrefix}`;
+  const cacheKey = `${backend}:${pathPrefix}`;
   const cached = credCache.get(cacheKey);
   if (cached && Date.now() < cached.expiresAt) return cached;
 
@@ -26,7 +26,7 @@ export async function acquireProxyCred(
   const res = await fetch(`${workerOrigin}/api/storage/proxy-credentials`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...headers },
-    body: JSON.stringify({ backendId, pathPrefix, ttlSeconds }),
+    body: JSON.stringify({ backend, pathPrefix, ttlSeconds }),
   });
   if (!res.ok) throw new Error(`Failed to acquire proxy credential: ${res.status}`);
   const data = (await res.json()) as {
@@ -48,7 +48,7 @@ export async function acquireProxyCred(
 }
 
 // Returns a DuckDB CREATE OR REPLACE SECRET statement for the given credential.
-// The secret name uses the backendId (sanitised) so multiple backends can coexist.
+// The secret name uses the bucket (sanitised) so multiple backends can coexist.
 export function buildS3Secret(cred: ProxyCred): string {
   const secretName = `_ds_${cred.bucket.replace(/[^a-zA-Z0-9]/g, "_")}`;
   return (
@@ -61,21 +61,21 @@ export function buildS3Secret(cred: ProxyCred): string {
   );
 }
 
-// Parses an r2:// or r2-s3compat:// URI into { backendId, key }.
-// r2://bucket/key  → backendId = "r2-bound", key = key (bucket portion is ignored)
-// r2-s3compat://backendId/key → backendId, key
-export function parseStorageUri(uri: string): { backendId: string; key: string } | null {
+// Parses a storage URI into { backend, key }.
+// r2://backendName/key  → backend = backendName (resolved by Worker; "r2-bound"/"data-shack" = built-in R2)
+// r2-s3compat://id/key  → backend = id (deprecated scheme, kept for backwards compatibility)
+export function parseStorageUri(uri: string): { backend: string; key: string } | null {
   if (uri.startsWith("r2://")) {
     const rest = uri.slice("r2://".length);
     const slash = rest.indexOf("/");
     if (slash === -1) return null;
-    return { backendId: "r2-bound", key: rest.slice(slash + 1) };
+    return { backend: rest.slice(0, slash), key: rest.slice(slash + 1) };
   }
   if (uri.startsWith("r2-s3compat://")) {
     const rest = uri.slice("r2-s3compat://".length);
     const slash = rest.indexOf("/");
     if (slash === -1) return null;
-    return { backendId: rest.slice(0, slash), key: rest.slice(slash + 1) };
+    return { backend: rest.slice(0, slash), key: rest.slice(slash + 1) };
   }
   return null;
 }

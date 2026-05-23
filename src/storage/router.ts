@@ -2,9 +2,12 @@ import { createMiddleware } from "hono/factory";
 import { Hono } from "hono/tiny";
 import { authenticate } from "../auth/middleware.ts";
 import { decryptConfig } from "../crypto.ts";
-import { getStorageBackendConfig } from "../db/settings.ts";
+import { getStorageBackendByNameOrId, getStorageBackendConfig } from "../db/settings.ts";
 import type { Env } from "../types.ts";
 import { parseS3AuthCredential, r2BoundKey, signS3Request } from "./resolve.ts";
+
+// Names that always map to the built-in R2 Worker binding rather than a D1 backend row.
+const R2_BOUND_NAMES = new Set(["r2-bound", "data-shack"]);
 
 type Variables = { userId: string };
 type R2GetOptions = Parameters<R2Bucket["get"]>[1];
@@ -100,21 +103,31 @@ function corsError(status: 400 | 401 | 403 | 502, message: string): Response {
 
 storageRouter.post("/proxy-credentials", requireAuth, async (c) => {
   const body = await c.req.json<Record<string, unknown>>();
-  if (typeof body.backendId !== "string" || !body.backendId)
-    return c.json({ error: "backendId is required" }, 400);
+  // Accept "backend" (name or id) — "backendId" kept as a deprecated alias
+  const rawBackend = body.backend ?? body.backendId;
+  if (typeof rawBackend !== "string" || !rawBackend)
+    return c.json({ error: "backend is required (name or id of a storage backend)" }, 400);
   if (typeof body.pathPrefix !== "string") return c.json({ error: "pathPrefix is required" }, 400);
 
   const userId = c.get("userId");
-  const backendId = body.backendId;
   const pathPrefix = body.pathPrefix;
   const ttlSeconds =
     typeof body.ttlSeconds === "number" && body.ttlSeconds > 0
       ? Math.min(body.ttlSeconds, 3600)
       : 3600;
 
-  if (backendId !== "r2-bound") {
-    const row = await getStorageBackendConfig(c.env.DB, backendId, userId);
+  // Resolve backend name/id → internal backendId + the name DuckDB will use as its S3 bucket.
+  let backendId: string;
+  let backendName: string;
+  if (R2_BOUND_NAMES.has(rawBackend)) {
+    backendId = "r2-bound";
+    backendName = rawBackend; // preserves "r2-bound" or "data-shack" as DuckDB sees it
+  } else {
+    const row = await getStorageBackendByNameOrId(c.env.DB, rawBackend, userId);
     if (!row) return c.json({ error: "storage backend not found" }, 404);
+    // If resolved by name, backendName = the name. If resolved by id, backendName = id (backwards compat).
+    backendId = row.id;
+    backendName = rawBackend === row.id ? row.id : row.name;
   }
 
   const accessKeyId = `pxy_${crypto.randomUUID().replace(/-/g, "")}`;
@@ -122,9 +135,11 @@ storageRouter.post("/proxy-credentials", requireAuth, async (c) => {
   // never validates the signature. accessKeyId is the effective bearer token.
   const secret = crypto.randomUUID();
 
-  await c.env.PROXY_CREDS_KV.put(accessKeyId, JSON.stringify({ userId, backendId, pathPrefix }), {
-    expirationTtl: ttlSeconds,
-  });
+  await c.env.PROXY_CREDS_KV.put(
+    accessKeyId,
+    JSON.stringify({ userId, backendId, backendName, pathPrefix }),
+    { expirationTtl: ttlSeconds },
+  );
 
   // Read-back loop: confirm KV write is visible before returning to the client
   let kvReady = false;
@@ -144,13 +159,13 @@ storageRouter.post("/proxy-credentials", requireAuth, async (c) => {
     secret,
     endpoint: `${workerOrigin}/api/storage/s3proxy`,
     region: "auto",
-    bucket: backendId,
+    bucket: backendName,
   });
 });
 
 // ── S3-compatible proxy ───────────────────────────────────────────────────
 
-type ProxyCred = { userId: string; backendId: string; pathPrefix: string };
+type ProxyCred = { userId: string; backendId: string; backendName: string; pathPrefix: string };
 type S3ProxyRequest = {
   bucket: string;
   key: string;
@@ -189,7 +204,7 @@ async function parseS3ProxyRequest(
 
   const cred = JSON.parse(credJson) as ProxyCred;
 
-  if (bucket !== cred.backendId) return corsError(403, "Forbidden");
+  if (bucket !== cred.backendName) return corsError(403, "Forbidden");
 
   // Normalize pathPrefix: ensure trailing "/" so "allowed" can't be bypassed with "allowed-extra/"
   const effectivePrefix =

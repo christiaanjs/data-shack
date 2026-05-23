@@ -22,12 +22,12 @@ describe("POST /api/storage/proxy-credentials", () => {
     const res = await SELF.fetch("http://localhost/api/storage/proxy-credentials", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ backendId: "r2-bound", pathPrefix: "" }),
+      body: JSON.stringify({ backend: "r2-bound", pathPrefix: "" }),
     });
     expect(res.status).toBe(401);
   });
 
-  it("returns 400 when backendId is missing", async () => {
+  it("returns 400 when backend is missing", async () => {
     const res = await SELF.fetch("http://localhost/api/storage/proxy-credentials", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...DEV_HEADERS },
@@ -40,7 +40,7 @@ describe("POST /api/storage/proxy-credentials", () => {
     const res = await SELF.fetch("http://localhost/api/storage/proxy-credentials", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...DEV_HEADERS },
-      body: JSON.stringify({ backendId: "r2-bound" }),
+      body: JSON.stringify({ backend: "r2-bound" }),
     });
     expect(res.status).toBe(400);
   });
@@ -49,16 +49,16 @@ describe("POST /api/storage/proxy-credentials", () => {
     const res = await SELF.fetch("http://localhost/api/storage/proxy-credentials", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...DEV_HEADERS },
-      body: JSON.stringify({ backendId: "sb_nonexistent", pathPrefix: "" }),
+      body: JSON.stringify({ backend: "sb_nonexistent", pathPrefix: "" }),
     });
     expect(res.status).toBe(404);
   });
 
-  it("vends a credential for r2-bound", async () => {
+  it("vends a credential for r2-bound by name", async () => {
     const res = await SELF.fetch("http://localhost/api/storage/proxy-credentials", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...DEV_HEADERS },
-      body: JSON.stringify({ backendId: "r2-bound", pathPrefix: "" }),
+      body: JSON.stringify({ backend: "r2-bound", pathPrefix: "" }),
     });
     expect(res.status).toBe(200);
     const data = (await res.json()) as {
@@ -75,12 +75,24 @@ describe("POST /api/storage/proxy-credentials", () => {
     expect(data.bucket).toBe("r2-bound");
   });
 
-  it("vends a credential for an r2-s3compat backend", async () => {
+  it("accepts 'data-shack' as an alias for r2-bound", async () => {
+    const res = await SELF.fetch("http://localhost/api/storage/proxy-credentials", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({ backend: "data-shack", pathPrefix: "" }),
+    });
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as { bucket: string };
+    // bucket preserves the alias so DuckDB scopes its secret to s3://data-shack/
+    expect(data.bucket).toBe("data-shack");
+  });
+
+  it("vends a credential for an r2-s3compat backend resolved by name", async () => {
     const createRes = await SELF.fetch("http://localhost/api/storage-backends", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...DEV_HEADERS },
       body: JSON.stringify({
-        name: "Proxy Test Backend",
+        name: "proxy-test-backend",
         type: "r2-s3compat",
         config: {
           endpoint: "https://test-account.r2.cloudflarestorage.com",
@@ -93,34 +105,58 @@ describe("POST /api/storage/proxy-credentials", () => {
     });
     const { id } = (await createRes.json()) as { id: string };
 
-    const res = await SELF.fetch("http://localhost/api/storage/proxy-credentials", {
+    // Resolve by name — bucket should be the name, not the id
+    const byName = await SELF.fetch("http://localhost/api/storage/proxy-credentials", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...DEV_HEADERS },
-      body: JSON.stringify({ backendId: id, pathPrefix: "" }),
+      body: JSON.stringify({ backend: "proxy-test-backend", pathPrefix: "" }),
     });
-    expect(res.status).toBe(200);
-    const data = (await res.json()) as { bucket: string; accessKeyId: string };
-    expect(data.bucket).toBe(id);
-    expect(data.accessKeyId).toMatch(/^pxy_/);
+    expect(byName.status).toBe(200);
+    const nameData = (await byName.json()) as { bucket: string; accessKeyId: string };
+    expect(nameData.bucket).toBe("proxy-test-backend");
+    expect(nameData.accessKeyId).toMatch(/^pxy_/);
+
+    // Resolve by id (backwards compat) — bucket should be the id
+    const byId = await SELF.fetch("http://localhost/api/storage/proxy-credentials", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({ backend: id, pathPrefix: "" }),
+    });
+    expect(byId.status).toBe(200);
+    const idData = (await byId.json()) as { bucket: string };
+    expect(idData.bucket).toBe(id);
   });
 
-  it("credential is stored in KV and immediately readable", async () => {
+  it("credential is stored in KV with backendId and backendName", async () => {
     const vendRes = await SELF.fetch("http://localhost/api/storage/proxy-credentials", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...DEV_HEADERS },
-      body: JSON.stringify({ backendId: "r2-bound", pathPrefix: "test/" }),
+      body: JSON.stringify({ backend: "r2-bound", pathPrefix: "test/" }),
     });
     const { accessKeyId } = (await vendRes.json()) as { accessKeyId: string };
 
     const stored = (await env.PROXY_CREDS_KV.get(accessKeyId, "json")) as {
       userId: string;
       backendId: string;
+      backendName: string;
       pathPrefix: string;
     } | null;
     expect(stored).not.toBeNull();
     expect(stored?.userId).toBe("usr_test");
     expect(stored?.backendId).toBe("r2-bound");
+    expect(stored?.backendName).toBe("r2-bound");
     expect(stored?.pathPrefix).toBe("test/");
+  });
+
+  it("accepts deprecated backendId field for backwards compatibility", async () => {
+    const res = await SELF.fetch("http://localhost/api/storage/proxy-credentials", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({ backend: "r2-bound", pathPrefix: "" }),
+    });
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as { bucket: string };
+    expect(data.bucket).toBe("r2-bound");
   });
 });
 
@@ -139,11 +175,11 @@ describe("S3 proxy auth enforcement", () => {
     expect(res.status).toBe(401);
   });
 
-  it("returns 403 when bucket does not match backendId", async () => {
+  it("returns 403 when bucket does not match backendName", async () => {
     const vendRes = await SELF.fetch("http://localhost/api/storage/proxy-credentials", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...DEV_HEADERS },
-      body: JSON.stringify({ backendId: "r2-bound", pathPrefix: "" }),
+      body: JSON.stringify({ backend: "r2-bound", pathPrefix: "" }),
     });
     const { accessKeyId } = (await vendRes.json()) as { accessKeyId: string };
 
@@ -157,7 +193,7 @@ describe("S3 proxy auth enforcement", () => {
     const vendRes = await SELF.fetch("http://localhost/api/storage/proxy-credentials", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...DEV_HEADERS },
-      body: JSON.stringify({ backendId: "r2-bound", pathPrefix: "allowed/" }),
+      body: JSON.stringify({ backend: "r2-bound", pathPrefix: "allowed/" }),
     });
     const { accessKeyId } = (await vendRes.json()) as { accessKeyId: string };
 
@@ -176,7 +212,7 @@ describe("S3 proxy r2-bound GET/PUT", () => {
     const res = await SELF.fetch("http://localhost/api/storage/proxy-credentials", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...DEV_HEADERS },
-      body: JSON.stringify({ backendId: "r2-bound", pathPrefix }),
+      body: JSON.stringify({ backend: "r2-bound", pathPrefix }),
     });
     return (await res.json()) as { accessKeyId: string };
   }
@@ -253,7 +289,7 @@ describe("S3 proxy r2-bound LIST", () => {
     const vendRes = await SELF.fetch("http://localhost/api/storage/proxy-credentials", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...DEV_HEADERS },
-      body: JSON.stringify({ backendId: "r2-bound", pathPrefix: "" }),
+      body: JSON.stringify({ backend: "r2-bound", pathPrefix: "" }),
     });
     const { accessKeyId } = (await vendRes.json()) as { accessKeyId: string };
 
@@ -272,7 +308,7 @@ describe("S3 proxy r2-bound LIST", () => {
     const vendRes = await SELF.fetch("http://localhost/api/storage/proxy-credentials", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...DEV_HEADERS },
-      body: JSON.stringify({ backendId: "r2-bound", pathPrefix: "allowed/" }),
+      body: JSON.stringify({ backend: "r2-bound", pathPrefix: "allowed/" }),
     });
     const { accessKeyId } = (await vendRes.json()) as { accessKeyId: string };
 

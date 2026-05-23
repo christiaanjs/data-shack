@@ -20,11 +20,11 @@ beforeAll(async () => {
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
-async function vendCred(backendId = "r2-bound", pathPrefix = "") {
+async function vendCred(backend = "r2-bound", pathPrefix = "") {
   const res = await SELF.fetch("http://localhost/api/storage/proxy-credentials", {
     method: "POST",
     headers: { "Content-Type": "application/json", ...DEV_HEADERS },
-    body: JSON.stringify({ backendId, pathPrefix }),
+    body: JSON.stringify({ backend, pathPrefix }),
   });
   if (!res.ok) throw new Error(`vend failed: ${res.status}`);
   return res.json() as Promise<{
