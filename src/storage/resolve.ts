@@ -1,17 +1,3 @@
-import type { Env } from "../types.ts";
-
-interface StorageTokenPayload {
-  sub: string;
-  iss: string;
-  aud: string;
-  exp: number;
-  iat: number;
-  jti: string;
-  b: string; // bucket
-  k: string; // key
-  method: "GET" | "PUT";
-}
-
 function base64urlEncode(buf: ArrayBuffer): string {
   const bytes = new Uint8Array(buf);
   let binary = "";
@@ -40,55 +26,6 @@ async function hmacKey(secret: string): Promise<CryptoKey> {
     false,
     ["sign", "verify"],
   );
-}
-
-async function signStorageToken(payload: StorageTokenPayload, secret: string): Promise<string> {
-  const header = base64urlEncodeStr(JSON.stringify({ alg: "HS256", typ: "JWT" }));
-  const body = base64urlEncodeStr(JSON.stringify(payload));
-  const signingInput = `${header}.${body}`;
-  const key = await hmacKey(secret);
-  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(signingInput));
-  return `${signingInput}.${base64urlEncode(sig)}`;
-}
-
-export async function verifyStorageToken(
-  token: string,
-  secret: string,
-): Promise<StorageTokenPayload | null> {
-  const parts = token.split(".");
-  if (parts.length !== 3) return null;
-  const [headerB64, payloadB64, sigB64] = parts as [string, string, string];
-  try {
-    const key = await hmacKey(secret);
-    const valid = await crypto.subtle.verify(
-      "HMAC",
-      key,
-      base64urlDecode(sigB64),
-      new TextEncoder().encode(`${headerB64}.${payloadB64}`),
-    );
-    if (!valid) return null;
-
-    const payload = JSON.parse(new TextDecoder().decode(base64urlDecode(payloadB64))) as unknown;
-    const p = payload as Record<string, unknown>;
-
-    if (
-      typeof payload !== "object" ||
-      payload === null ||
-      p.aud !== "storage" ||
-      typeof p.b !== "string" ||
-      typeof p.k !== "string" ||
-      typeof p.exp !== "number" ||
-      (p.method !== "GET" && p.method !== "PUT")
-    ) {
-      return null;
-    }
-
-    const typed = payload as StorageTokenPayload;
-    if (typed.exp < Math.floor(Date.now() / 1000)) return null;
-    return typed;
-  } catch {
-    return null;
-  }
 }
 
 interface DataSourceTokenPayload {
@@ -178,33 +115,15 @@ export function r2BoundKey(userId: string, relPath: string): string {
   return `users/${userId}/${relPath}`;
 }
 
-export async function resolveUri(
-  uri: string,
-  env: Env,
-  userId: string,
-  workerOrigin: string,
-  method: "GET" | "PUT" = "GET",
-): Promise<string> {
-  const parsed = parseR2Uri(uri);
-  if (!parsed) throw new Error(`Unsupported URI: ${uri}`);
-
-  const now = Math.floor(Date.now() / 1000);
-  const token = await signStorageToken(
-    {
-      sub: "storage",
-      iss: workerOrigin,
-      aud: "storage",
-      iat: now,
-      exp: now + (method === "PUT" ? 900 : 3600),
-      jti: crypto.randomUUID(),
-      b: parsed.bucket,
-      k: r2BoundKey(userId, parsed.key),
-      method,
-    },
-    env.JWT_SECRET,
-  );
-
-  return `${workerOrigin}/api/storage/obj/${token}`;
+export function parseR2S3CompatUri(uri: string): { backendId: string; key: string } | null {
+  if (!uri.startsWith("r2-s3compat://")) return null;
+  const rest = uri.slice("r2-s3compat://".length);
+  const slash = rest.indexOf("/");
+  if (slash === -1) return null;
+  const backendId = rest.slice(0, slash);
+  const key = rest.slice(slash + 1);
+  if (!backendId || !key) return null;
+  return { backendId, key };
 }
 
 // ── R2 S3-compatible signing ──────────────────────────────────────────────
@@ -311,139 +230,9 @@ export async function signS3Request(opts: {
   };
 }
 
-export async function signS3PresignedPutUrl(opts: {
-  endpoint: string;
-  bucket: string;
-  key: string;
-  region: string;
-  accessKeyId: string;
-  secretAccessKey: string;
-  expiresSeconds: number;
-}): Promise<string> {
-  const now = new Date();
-  const pad2 = (n: number) => String(n).padStart(2, "0");
-  const dateStamp = `${now.getUTCFullYear()}${pad2(now.getUTCMonth() + 1)}${pad2(now.getUTCDate())}`;
-  const amzDate = `${dateStamp}T${pad2(now.getUTCHours())}${pad2(now.getUTCMinutes())}${pad2(now.getUTCSeconds())}Z`;
-
-  const endpointUrl = new URL(opts.endpoint);
-  const host = endpointUrl.host;
-  const endpointPathPrefix =
-    endpointUrl.pathname === "/" ? "" : endpointUrl.pathname.replace(/\/$/, "");
-  const encodedKey = s3EncodeKey(opts.key);
-  const path = `${endpointPathPrefix}/${opts.bucket}/${encodedKey}`;
-
-  const credentialScope = `${dateStamp}/${opts.region}/s3/aws4_request`;
-
-  // Query params must be in alphabetical order for the canonical query string.
-  const canonicalQueryString = [
-    "X-Amz-Algorithm=AWS4-HMAC-SHA256",
-    `X-Amz-Credential=${encodeURIComponent(`${opts.accessKeyId}/${credentialScope}`)}`,
-    `X-Amz-Date=${amzDate}`,
-    `X-Amz-Expires=${opts.expiresSeconds}`,
-    "X-Amz-SignedHeaders=host",
-  ].join("&");
-
-  const canonicalRequest = [
-    "PUT",
-    path,
-    canonicalQueryString,
-    `host:${host}\n`,
-    "host",
-    "UNSIGNED-PAYLOAD",
-  ].join("\n");
-
-  const stringToSign = [
-    "AWS4-HMAC-SHA256",
-    amzDate,
-    credentialScope,
-    await sha256Hex(canonicalRequest),
-  ].join("\n");
-
-  let sigKey = new TextEncoder().encode(`AWS4${opts.secretAccessKey}`).buffer as ArrayBuffer;
-  for (const part of [dateStamp, opts.region, "s3", "aws4_request"]) {
-    sigKey = await hmacSha256Raw(sigKey, part);
-  }
-  const signature = Array.from(new Uint8Array(await hmacSha256Raw(sigKey, stringToSign)))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-
-  return `${endpointUrl.origin}${path}?${canonicalQueryString}&X-Amz-Signature=${signature}`;
-}
-
-// ── R2 S3-compatible token ────────────────────────────────────────────────
-
-interface R2S3CompatTokenPayload {
-  sub: string;
-  aud: string;
-  exp: number;
-  iat: number;
-  jti: string;
-  d: string; // storage backend ID
-  k: string; // object key
-  u: string; // user ID
-  method: "GET" | "PUT";
-}
-
-export async function signR2S3CompatToken(
-  payload: R2S3CompatTokenPayload,
-  secret: string,
-): Promise<string> {
-  const header = base64urlEncodeStr(JSON.stringify({ alg: "HS256", typ: "JWT" }));
-  const body = base64urlEncodeStr(JSON.stringify(payload));
-  const signingInput = `${header}.${body}`;
-  const key = await hmacKey(secret);
-  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(signingInput));
-  return `${signingInput}.${base64urlEncode(sig)}`;
-}
-
-export async function verifyR2S3CompatToken(
-  token: string,
-  secret: string,
-): Promise<R2S3CompatTokenPayload | null> {
-  const parts = token.split(".");
-  if (parts.length !== 3) return null;
-  const [headerB64, payloadB64, sigB64] = parts as [string, string, string];
-  try {
-    const key = await hmacKey(secret);
-    const valid = await crypto.subtle.verify(
-      "HMAC",
-      key,
-      base64urlDecode(sigB64),
-      new TextEncoder().encode(`${headerB64}.${payloadB64}`),
-    );
-    if (!valid) return null;
-
-    const payload = JSON.parse(new TextDecoder().decode(base64urlDecode(payloadB64))) as unknown;
-    const p = payload as Record<string, unknown>;
-
-    if (
-      typeof payload !== "object" ||
-      payload === null ||
-      p.aud !== "r2-s3compat" ||
-      typeof p.d !== "string" ||
-      typeof p.k !== "string" ||
-      typeof p.u !== "string" ||
-      typeof p.exp !== "number" ||
-      (p.method !== "GET" && p.method !== "PUT")
-    ) {
-      return null;
-    }
-
-    const typed = payload as R2S3CompatTokenPayload;
-    if (typed.exp < Math.floor(Date.now() / 1000)) return null;
-    return typed;
-  } catch {
-    return null;
-  }
-}
-
-export function parseR2S3CompatUri(uri: string): { backendId: string; key: string } | null {
-  if (!uri.startsWith("r2-s3compat://")) return null;
-  const rest = uri.slice("r2-s3compat://".length);
-  const slash = rest.indexOf("/");
-  if (slash === -1) return null;
-  const backendId = rest.slice(0, slash);
-  const key = rest.slice(slash + 1);
-  if (!backendId || !key) return null;
-  return { backendId, key };
+// Extracts the accessKeyId from an AWS Sig V4 Authorization header.
+// Header format: AWS4-HMAC-SHA256 Credential=<accessKeyId>/<date>/...
+export function parseS3AuthCredential(authHeader: string): string | null {
+  const match = authHeader.match(/^AWS4-HMAC-SHA256 Credential=([^/,\s]+)/);
+  return match?.[1] ?? null;
 }

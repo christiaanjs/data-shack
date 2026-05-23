@@ -94,6 +94,31 @@ export async function getCredentialConfig(
   return result ?? null;
 }
 
+export async function updateStorageBackend(
+  db: D1Database,
+  id: string,
+  userId: string,
+  opts: { name?: string; encryptedConfig?: string },
+): Promise<boolean> {
+  const setParts: string[] = [];
+  const bindValues: unknown[] = [];
+  if (opts.name !== undefined) {
+    setParts.push("name = ?");
+    bindValues.push(opts.name);
+  }
+  if (opts.encryptedConfig !== undefined) {
+    setParts.push("encrypted_config = ?");
+    bindValues.push(opts.encryptedConfig);
+  }
+  setParts.push("updated_at = ?");
+  bindValues.push(Date.now(), id, userId);
+  const result = await db
+    .prepare(`UPDATE storage_backends SET ${setParts.join(", ")} WHERE id = ? AND user_id = ?`)
+    .bind(...bindValues)
+    .run();
+  return (result.meta.changes ?? 0) > 0;
+}
+
 export async function deleteStorageBackend(
   db: D1Database,
   id: string,
@@ -107,6 +132,8 @@ export async function deleteStorageBackend(
 }
 
 interface StorageBackendConfigRow {
+  id: string;
+  name: string;
   type: string;
   encrypted_config: string;
 }
@@ -117,8 +144,34 @@ export async function getStorageBackendConfig(
   userId: string,
 ): Promise<StorageBackendConfigRow | null> {
   const result = await db
-    .prepare("SELECT type, encrypted_config FROM storage_backends WHERE id = ? AND user_id = ?")
+    .prepare(
+      "SELECT id, name, type, encrypted_config FROM storage_backends WHERE id = ? AND user_id = ?",
+    )
     .bind(id, userId)
     .first<StorageBackendConfigRow>();
   return result ?? null;
+}
+
+// Resolves a storage backend by name first, falling back to ID.
+// Returns the full row including id and name so callers can use either for subsequent lookups.
+export async function getStorageBackendByNameOrId(
+  db: D1Database,
+  nameOrId: string,
+  userId: string,
+): Promise<StorageBackendConfigRow | null> {
+  const byName = await db
+    .prepare(
+      "SELECT id, name, type, encrypted_config FROM storage_backends WHERE user_id = ? AND name = ?",
+    )
+    .bind(userId, nameOrId)
+    .first<StorageBackendConfigRow>();
+  if (byName) return byName;
+  return (
+    (await db
+      .prepare(
+        "SELECT id, name, type, encrypted_config FROM storage_backends WHERE user_id = ? AND id = ?",
+      )
+      .bind(userId, nameOrId)
+      .first<StorageBackendConfigRow>()) ?? null
+  );
 }

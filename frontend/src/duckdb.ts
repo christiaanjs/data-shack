@@ -2,6 +2,21 @@ import * as duckdb from "@duckdb/duckdb-wasm";
 
 let dbInstance: duckdb.AsyncDuckDB | null = null;
 
+function resolveLogLevel(): duckdb.LogLevel {
+  switch (import.meta.env.VITE_DUCKDB_LOG_LEVEL) {
+    case "DEBUG":
+      return duckdb.LogLevel.DEBUG;
+    case "INFO":
+      return duckdb.LogLevel.INFO;
+    case "WARNING":
+      return duckdb.LogLevel.WARNING;
+    case "ERROR":
+      return duckdb.LogLevel.ERROR;
+    default:
+      return import.meta.env.DEV ? duckdb.LogLevel.INFO : duckdb.LogLevel.WARNING;
+  }
+}
+
 export async function initDuckDB(): Promise<duckdb.AsyncDuckDB> {
   if (dbInstance) return dbInstance;
 
@@ -15,7 +30,7 @@ export async function initDuckDB(): Promise<duckdb.AsyncDuckDB> {
     new Blob([`importScripts("${bundle.mainWorker}");`], { type: "text/javascript" }),
   );
   const worker = new Worker(blobUrl);
-  const logger = new duckdb.ConsoleLogger(duckdb.LogLevel.WARNING);
+  const logger = new duckdb.ConsoleLogger(resolveLogLevel());
   const db = new duckdb.AsyncDuckDB(logger, worker);
   await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
   URL.revokeObjectURL(blobUrl);

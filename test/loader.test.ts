@@ -42,7 +42,7 @@ async function insertR2BoundBackend(): Promise<string> {
     .bind(
       id,
       USER_ID,
-      "Test R2",
+      `Test R2 ${id}`,
       "r2-bound",
       await encryptConfig(JSON.stringify(config), env.JWT_SECRET),
       Date.now(),
@@ -67,7 +67,7 @@ async function insertR2S3CompatBackend(): Promise<string> {
     .bind(
       id,
       USER_ID,
-      "Test S3",
+      `Test S3 ${id}`,
       "r2-s3compat",
       await encryptConfig(JSON.stringify(config), env.JWT_SECRET),
       Date.now(),

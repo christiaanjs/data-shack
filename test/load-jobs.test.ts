@@ -34,7 +34,7 @@ async function createBackend(): Promise<string> {
     method: "POST",
     headers: { "Content-Type": "application/json", ...DEV_HEADERS },
     body: JSON.stringify({
-      name: "Test R2",
+      name: `test-r2-${crypto.randomUUID().replace(/-/g, "").slice(0, 8)}`,
       type: "r2-bound",
       config: { bucket: "data-shack-storage" },
     }),

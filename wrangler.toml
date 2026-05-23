@@ -11,6 +11,10 @@ database_id = "b5f7796d-323f-49d0-aca1-e39a64bdb55b"
 binding = "R2"
 bucket_name = "data-shack-storage"
 
+[[kv_namespaces]]
+binding = "PROXY_CREDS_KV"
+id = "bead93e6e210407094d6fa99327784b5"
+
 [[durable_objects.bindings]]
 name = "CATALOG"
 class_name = "CatalogDO"
@@ -56,6 +60,10 @@ database_id = "1910faa5-f94e-4e15-aedd-648e604a6915"
 [[env.staging.r2_buckets]]
 binding = "R2"
 bucket_name = "data-shack-storage-staging"
+
+[[env.staging.kv_namespaces]]
+binding = "PROXY_CREDS_KV"
+id = "122d990587e9476e95dedb426b5fbf37"
 
 [[env.staging.durable_objects.bindings]]
 name = "CATALOG"

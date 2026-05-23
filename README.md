@@ -9,11 +9,12 @@ A personal data integration platform built on Cloudflare that brings your data t
 | OAuth 2.0 worker (Google, PKCE, DCR, JWT, refresh rotation) | ✅ Done |
 | D1 schema: users, oauth tables, credentials, storage_backends | ✅ Done |
 | Credential + storage backend vault (AES-GCM encrypted in D1) | ✅ Done |
-| R2 storage proxy: URI resolution, signed tokens, Range streaming | ✅ Done |
-| Storage write path: `COPY TO 'r2://…'` and `COPY TO 'r2-s3compat://…'` from DuckDB WASM | ✅ Done |
+| S3-compatible storage proxy: KV-backed proxy credentials, GET/HEAD/PUT/LIST/OPTIONS with CORS and ETags | ✅ Done |
+| Partitioned writes and hive-partitioned reads: DuckDB `COPY TO … PARTITION_BY` and `read_parquet('…/**/*.parquet', hive_partitioning=true)` | ✅ Done |
+| `r2://name/key` URI scheme — universal for both backend types, resolved by name first, ID fallback | ✅ Done |
 | DuckDB-WASM query engine in the browser | ✅ Done |
 | Query UI: URI resolver + SQL editor + results table | ✅ Done |
-| Settings UI: manage credentials and storage backends | ✅ Done |
+| Settings UI: manage credentials and storage backends; inline edit for backends | ✅ Done |
 | `http` credential type: configurable headers with `{{variable}}` templates | ✅ Done |
 | HTTP data source proxy: `http-ds://` URI scheme + token endpoint for DuckDB | ✅ Done |
 | Settings test dialog: call any HTTP data source path and see the raw response | ✅ Done |
@@ -30,39 +31,45 @@ See [`build-plan.md`](./build-plan.md) for the full sequenced plan.
 
 ## Current capability
 
-### Querying object storage (R2)
+### Querying object storage (R2 and S3-compatible)
 
-A signed-in user can write files to the R2 bucket and query them with SQL directly in the browser:
+A signed-in user can query files in R2 or any S3-compatible backend from DuckDB running in the browser. The frontend requests short-lived proxy credentials from the worker (`POST /api/storage/proxy-credentials`), configures DuckDB's httpfs with a `CREATE SECRET`, and all storage traffic flows through `/api/storage/s3proxy` on the worker.
 
-1. Upload a file to R2:
-   ```
-   wrangler r2 object put data-shack-storage/sample.ndjson --file sample.ndjson
-   ```
-2. Open the **Query** tab and run:
-   ```sql
-   SELECT * FROM read_json('r2://data-shack-storage/sample.ndjson') LIMIT 100
-   ```
-   The worker resolves the `r2://` URI to a short-lived signed URL and DuckDB reads the file directly.
+Seed a file to try it:
+```
+wrangler r2 object put data-shack-storage/sample.ndjson --file sample.ndjson
+```
+
+Then query it from the **Query** tab:
+```sql
+-- Single file (r2-bound backend — use the backend name from Settings)
+SELECT * FROM read_json('r2://primary-r2/sample.ndjson') LIMIT 100
+
+-- Hive-partitioned dataset — use backend name (r2-bound or r2-s3compat)
+-- Worker serves the ListObjectsV2 DuckDB needs to discover partitions
+SELECT * FROM read_parquet('r2://my-s3-backend/data/**/*.parquet', hive_partitioning=true)
+```
+
+The `r2://backendName/key` scheme works for both `r2-bound` and `r2-s3compat` backends. The Worker resolves the name to the appropriate backend at request time. The legacy `r2-s3compat://backendId/key` scheme still works for backwards compatibility.
+
+The `r2://backendName/key` URI scheme is translated to `s3://backendName/key` internally — DuckDB never sees raw storage credentials. The Worker resolves the backend name (or ID for the legacy `r2-s3compat://` scheme) at credential-vend time.
 
 ### Writing query results to storage
 
-DuckDB can write query results directly to the R2 bucket or an r2-s3compat backend using `COPY TO`:
+DuckDB writes natively to the S3 proxy using the same proxy credential as reads. Partitioned writes work because DuckDB drives every `PUT` through the credential — no special setup required:
 
 ```sql
--- Write to the bound R2 bucket
-COPY (SELECT * FROM read_json('r2://data-shack-storage/raw.ndjson')) TO 'r2://data-shack-storage/output.parquet' (FORMAT PARQUET)
+-- Single file (r2-bound backend named "primary-r2")
+COPY (SELECT * FROM read_json('r2://primary-r2/raw.ndjson'))
+TO 'r2://primary-r2/output.parquet' (FORMAT PARQUET)
 
--- Write to an r2-s3compat backend (storage backend ID from Settings)
-COPY (SELECT 1 AS id, 'hello' AS msg) TO 'r2-s3compat://sb_abc123/output.parquet' (FORMAT PARQUET)
+-- Partitioned by column — DuckDB generates one file per partition automatically
+-- Works with any backend type; use the backend name from Settings
+COPY (SELECT date_trunc('month', created_at) AS month, amount FROM transactions)
+TO 'r2://my-s3-backend/data/spending' (FORMAT PARQUET, PARTITION_BY (month), OVERWRITE_OR_IGNORE true)
 ```
 
-For `r2://` writes, the frontend resolves a short-lived PUT token, DuckDB writes to its virtual FS, and JS uploads the buffer via `fetch`. For `r2-s3compat://` writes, the worker returns S3 credentials directly and DuckDB writes natively via its built-in S3 httpfs — to enable this, apply the included CORS policy to your R2 bucket:
-
-```bash
-wrangler r2 bucket cors set <bucket-name> --file r2-cors.json
-```
-
-The `POST /api/storage/resolve` endpoint handles both read and write URI resolution via a `method: "GET" | "PUT"` field per URI — no separate endpoint needed.
+No CORS policy is needed on the upstream bucket. All storage traffic goes through the worker proxy endpoint, which re-signs requests to the real backend before forwarding.
 
 ### Catalog: tracking and querying tables
 
@@ -70,13 +77,16 @@ The **Catalog** tab lets you register files in object storage as named tables th
 
 1. Go to the **Catalog** tab and fill in the commit form:
    - **Table name** — e.g. `transactions`
-   - **URI** — e.g. `r2://data-shack-storage/transactions/2026-05.parquet`
-   - **Storage backend** — the backend ID from Settings (e.g. `primary-r2`)
+   - **URI** — e.g. `r2://primary-r2/transactions/2026-05.parquet`
+   - **Storage backend** — the backend name from Settings (e.g. `primary-r2`)
    - **Format** — leave as Auto to infer from the file extension, or pick explicitly if the extension is misleading (e.g. a `.json` file that is actually NDJSON)
 
-2. The URI convention for bound R2 storage:
-   - `r2://bucket-name/path/to/file.parquet` — the bucket name is a required placeholder (use the real bucket name as a convention). Everything **after the first slash** is the file path within your user namespace, so `r2://bucket/folder/file.parquet` resolves to `users/<you>/folder/file.parquet` in the bucket.
-   - `r2-s3compat://backend-id/path/to/file.parquet` — use the backend ID shown in Settings → Storage Backends.
+2. URI convention — use `r2://backendName/path` for all backend types:
+   - `r2://primary-r2/folder/file.parquet` — backend name `primary-r2` is resolved by the Worker; for `r2-bound`, everything after the first `/` is scoped to your user namespace in the bucket.
+   - `r2://my-s3-backend/folder/file.parquet` — same scheme for `r2-s3compat` backends; the path is relative to the bucket root.
+   - The legacy `r2-s3compat://backendId/path` scheme still works if you have existing URIs with backend IDs.
+
+3. Go to **Settings → Storage Backends** to rename or edit a backend's config. The **Edit** button opens a dialog pre-filled with the decrypted config.
 
 3. Open the **Query** tab. The catalog is loaded automatically — registered tables appear as badges and are available as DuckDB views:
    ```sql
@@ -128,13 +138,13 @@ The **Load Jobs** tab lets you define cron-triggered jobs that pull from an HTTP
 4. Click **Run now** to trigger an immediate run without waiting for the cron. The job fetches the API response, streams it to storage (using `FixedLengthStream` when `Content-Length` is available, buffering otherwise), and commits the file URI to the catalog.
 5. Each run creates a new timestamped file (`{tableDir}/load-{timestamp}.{ext}`). Old files are retained; the catalog always points to the latest snapshot.
 
-The **Settings** tab also stores storage backend configs (encrypted in D1). The `r2-s3compat` backend type is fully dispatched — both read and write URI resolution looks up config from D1 and signs requests with SigV4 accordingly. The `r2://` backend uses the Worker's bound R2 binding directly (no D1 lookup needed at resolve time). Full dispatch for `s3`, `gcs`, and `azure` backend types is deferred to a later stage.
+The **Settings** tab stores storage backend configs (encrypted in D1). Backends can be created, renamed (via the **Edit** button), and deleted. Both `r2-bound` and `r2-s3compat` backends are fully dispatched — `r2-bound` uses the Worker's R2 binding directly; `r2-s3compat` re-signs upstream SigV4 requests using config from D1. Full dispatch for `s3`, `gcs`, and `azure` backend types is deferred to a later stage.
 
 ## Architecture Overview
 
 The system is built on Cloudflare's stack (Workers, D1, R2, Durable Objects, Pages) with OAuth 2.0 (Google) and JWT-based authentication. SQL execution happens in a **browser-local DuckDB-WASM instance** rather than on the server. The server orchestrates; your browser computes.
 
-The key structural insight is a clean split between the **control plane** (all traffic through the Worker proxy) and the **data plane** (browser reads and writes object storage directly via Worker-resolved URLs). Large Parquet files never pass through a Worker. Storage backends are pluggable — the catalog records URIs, the Worker proxy resolves them to HTTPS URLs at access time, and DuckDB's `httpfs` is unaware of which backend it's talking to.
+The Worker proxy acts as an S3-compatible endpoint: the browser requests short-lived proxy credentials from `POST /api/storage/proxy-credentials`, configures DuckDB's httpfs with a `CREATE OR REPLACE SECRET`, and all subsequent storage operations (GET, HEAD, PUT, ListObjectsV2) flow through `/api/storage/s3proxy` on the Worker. Storage backends are pluggable — the Worker translates the S3 protocol to R2 binding calls (for `r2-bound`) or re-signed upstream S3 requests (for `r2-s3compat`), and DuckDB is unaware of which backend it's talking to.
 
 ## Core Components
 
@@ -222,24 +232,21 @@ Dashboards are React artifacts with props bound to SQL queries. The authoring wo
 
 ## Storage Access Pattern
 
-Storage backends are configured in D1's `storage_backends` table and referenced by ID in catalog snapshot records. The catalog stores URIs (`r2://bucket/key`, `s3://bucket/key`, `https://…`); the Worker proxy resolves them to plain HTTPS URLs at access time. DuckDB's `httpfs` is unaware of which backend it is reading from.
+Storage backends are configured in D1's `storage_backends` table with a `UNIQUE(user_id, name)` constraint. The catalog stores URIs using the `r2://backendName/key` scheme (universal for all backend types). The Worker resolves the backend name to its configuration at credential-vend time via `getStorageBackendByNameOrId` (name lookup first, ID fallback for legacy URIs). DuckDB's `httpfs` is unaware of which backend it is reading from.
 
-| Backend type | Mechanism | Notes |
+| Backend type | Proxy mechanism | Notes |
 |---|---|---|
-| `r2-bound` | R2 Worker binding → signed URL | Primary bucket in same Cloudflare account |
-| `s3` | SigV4-signed URL | AWS S3 or any S3-compatible endpoint |
-| `r2-s3compat` | SigV4-signed URL (R2 S3 endpoint) | R2 in another account |
-| `gcs` | Signed URL via service account | Google Cloud Storage |
-| `azure` | SAS token URL | Azure Blob Storage |
+| `r2-bound` | S3 proxy → R2 Worker binding | Primary bucket in same Cloudflare account |
+| `r2-s3compat` | S3 proxy → re-signed upstream S3 request | R2 in another account, or any S3-compatible service |
+| `s3`, `gcs`, `azure` | Not yet implemented | Deferred to a later stage |
 | `https` | Passthrough (domain allowlist check) | Publicly accessible data |
 
-| Operation | Mechanism | Reason |
-|---|---|---|
-| ETL Worker writes (primary R2) | Native Worker binding | Direct R2 access; no credentials exposed |
-| ETL Worker writes (other backends) | `fetch()` with credentials from D1 | Binding only works for same-account R2 |
-| Browser reads Parquet/NDJSON | Worker-resolved HTTPS URL | Files can be large; avoids Worker memory limits |
-| Browser writes compacted Parquet | Worker-resolved writable URL | Same; Worker validates URI prefix before resolving |
-| Catalog and credential operations | Proxied through Worker | Small payloads; centralised auth check is valuable |
+| Operation | Mechanism |
+|---|---|
+| ETL Worker writes (primary R2) | Native Worker binding — direct R2 access |
+| ETL Worker writes (other backends) | `fetch()` with credentials from D1 |
+| Browser reads / writes / lists storage | S3 proxy (`/api/storage/s3proxy`) with KV-backed proxy credentials; Worker forwards to real backend |
+| Catalog and credential operations | Proxied through Worker; small payloads |
 
 Writable URLs are only resolved for URIs matching the user's namespace and expected schema. The Worker rejects out-of-namespace requests before resolving. Adding a new storage backend requires a resolver case in the Worker proxy and a row in `storage_backends` — no catalog schema changes or browser changes required.
 

@@ -13,9 +13,13 @@ Each stage produces something functional and testable independently. Stages 1–
 | Storage write path | `COPY TO 'r2://…'` and `COPY TO 'r2-s3compat://…'` from DuckDB WASM | ✅ Done |
 | Stage 3 | Catalog DO | ✅ Done |
 | Stage 4 | Load jobs: cron-triggered HTTP→storage ETL with catalog commit | ✅ Done |
+| URI unification | `r2://name/key` for both backend types; name-based resolution; `UNIQUE(user_id, name)` | ✅ Done |
+| Storage backend edit | `GET`/`PATCH /api/storage-backends/:id`; `EditBackendDialog` in settings UI | ✅ Done |
 | Stage 5–10 | See below | Not started |
 
-**Note on Stage 1 + Stage 2 storage resolution:** The `POST /api/storage/resolve` endpoint handles both read (`method: "GET"`) and write (`method: "PUT"`) URI resolution in a single call. `r2://` read/write is fully working against the bound R2 bucket. `r2-s3compat://` read/write is fully working — resolution looks up backend config from D1 and signs requests with SigV4; for writes the worker returns S3 credentials so DuckDB can write natively via its S3 httpfs (requires a CORS policy on the R2 bucket — see `r2-cors.json`). For `r2://` URIs the bucket name is validated syntactically but not matched against a configured backend row — full dispatch for `s3`, `gcs`, and `azure` backends is deferred to a later stage.
+**Note on Stage 1 + Stage 2 storage resolution (updated — S3 proxy + URI unification):** The original per-key JWT token flow (`POST /api/storage/resolve`, `/api/storage/obj/:token`, `/api/storage/r2s3compat/obj/:token`) has been replaced by an S3-compatible proxy. `POST /api/storage/proxy-credentials` vends short-lived `{ accessKeyId, secret, endpoint, region, bucket }` credentials stored in `PROXY_CREDS_KV` with TTL. The frontend calls `acquireProxyCred()` to get a credential and `buildS3Secret()` to build a DuckDB `CREATE OR REPLACE SECRET` statement; all storage operations (GET, HEAD, PUT, ListObjectsV2) then flow through `GET|HEAD|PUT /api/storage/s3proxy/:bucket/*key` on the Worker (implemented in `src/storage/router.ts`), which forwards to the real backend (R2 binding for `r2-bound`, re-signed upstream S3 for `r2-s3compat`). This enables DuckDB `COPY TO … PARTITION_BY` (multiple PUT paths not known in advance) and `read_parquet('…/**/*.parquet', hive_partitioning=true)` (ListObjectsV2 to discover partition files). No CORS policy on the upstream bucket is needed. `POST /api/storage/resolve` is retained for `http-ds://` URI resolution only.
+
+The URI scheme has been unified: `r2://backendName/key` now works for both `r2-bound` and `r2-s3compat` backends. The Worker resolves the backend name via `getStorageBackendByNameOrId` (name lookup first, ID fallback for legacy `r2-s3compat://id/key` URIs). A `UNIQUE(user_id, name)` constraint (migration 0006) ensures names are unambiguous. Special names `r2-bound` and `data-shack` route to the Worker's R2 binding directly. Keys are `decodeURIComponent`-decoded before dispatch to handle percent-encoded characters in Hive partition paths (e.g. `col%3Dvalue` → `col=value`). Storage backends can be renamed and edited via `GET`/`PATCH /api/storage-backends/:id` and the `EditBackendDialog` in the Settings UI.
 
 **Note on HTTP data source (direct query alternative to Stage 4 ETL):** Rather than building the Akahu ETL worker first (Stage 4), a direct-query path was implemented that allows DuckDB to read from HTTP APIs in real time. A generic `http` credential type stores a base URL, configurable headers (with `{{variable}}` template interpolation), and variables in D1. The `http-ds://credentialId/path` URI scheme plugs into the existing `POST /api/storage/resolve` pipeline — DuckDB queries like `SELECT * FROM read_json('http-ds://cred_xxx/accounts') LIMIT 10` work transparently. The Worker signs a short-lived token that DuckDB uses to fetch through the proxy, which decrypts credentials and injects auth headers at request time. A test dialog in the Settings UI lets you call any HTTP data source path and see the raw response. This replaces the separate `akahu` credential type and covers the Akahu use case without requiring a cron-triggered ETL worker or catalog DO.
 
@@ -212,14 +216,14 @@ Two patterns coexist — control plane through the Worker, data plane direct wit
 
 Backends are configured in D1's `storage_backends` table and referenced by ID in catalog snapshot records. The Worker proxy resolves a URI to a readable or writable HTTPS URL based on the backend type:
 
-| Backend type  | Read resolution                       | Write resolution                     |
-| ------------- | ------------------------------------- | ------------------------------------ |
-| `r2-bound`    | Signed GET URL via R2 Worker binding  | Signed PUT URL via R2 Worker binding |
-| `s3`          | SigV4-signed GET URL                  | SigV4-signed PUT URL                 |
-| `r2-s3compat` | SigV4-signed GET URL (R2 S3 endpoint) | SigV4-signed PUT URL                 |
-| `gcs`         | Signed GET URL (service account)      | Signed GET URL (service account)     |
-| `azure`       | SAS token URL                         | SAS token URL                        |
-| `https`       | Passthrough (domain allowlist check)  | Not supported                        |
+| Backend type  | Read / write / list mechanism                        | Status      |
+| ------------- | ---------------------------------------------------- | ----------- |
+| `r2-bound`    | S3 proxy → R2 Worker binding                         | ✅ Done     |
+| `r2-s3compat` | S3 proxy → re-signed upstream SigV4 request          | ✅ Done     |
+| `s3`          | S3 proxy → re-signed upstream SigV4 request          | Not started |
+| `gcs`         | S3 proxy → signed URL via service account            | Not started |
+| `azure`       | S3 proxy → SAS token                                 | Not started |
+| `https`       | Passthrough (domain allowlist check; read-only)      | Not started |
 
 ### Data plane (large transfers)
 

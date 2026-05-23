@@ -304,6 +304,146 @@ function AddForm({
   );
 }
 
+// ── EditBackendDialog ─────────────────────────────────────────────────────
+
+function EditBackendDialog({
+  backend,
+  workerBase,
+  getAuthHeaders,
+  onSaved,
+  onClose,
+}: {
+  backend: StorageBackendRow;
+  workerBase: string;
+  getAuthHeaders: () => Promise<Record<string, string>>;
+  onSaved: () => void;
+  onClose: () => void;
+}) {
+  const [name, setName] = useState(backend.name);
+  const [config, setConfig] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const headers = await getAuthHeaders();
+        const res = await fetch(`${workerBase}/api/storage-backends/${backend.id}`, { headers });
+        if (!res.ok) throw new Error(`Failed to load config: ${res.status}`);
+        const data = (await res.json()) as { config: unknown };
+        setConfig(JSON.stringify(data.config, null, 2));
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Failed to load");
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, [backend.id, workerBase, getAuthHeaders]);
+
+  async function handleSave(e: Event) {
+    e.preventDefault();
+    setSubmitting(true);
+    setError(null);
+    try {
+      let parsedConfig: unknown;
+      try {
+        parsedConfig = JSON.parse(config ?? "{}");
+      } catch {
+        throw new Error("Config must be valid JSON");
+      }
+      const headers = await getAuthHeaders();
+      const res = await fetch(`${workerBase}/api/storage-backends/${backend.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", ...headers },
+        body: JSON.stringify({ name, config: parsedConfig }),
+      });
+      if (!res.ok) {
+        const data = (await res.json()) as { error?: string };
+        throw new Error(data.error ?? `Save failed: ${res.status}`);
+      }
+      onSaved();
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <div
+      class="modal modal-open"
+      onKeyDown={(e) => {
+        if (e.key === "Escape") onClose();
+      }}
+    >
+      <div class="modal-box max-w-2xl space-y-4">
+        <h3 class="font-bold text-lg">Edit: {backend.name}</h3>
+
+        {error && (
+          <div role="alert" class="alert alert-error py-2 text-sm">
+            <span>{error}</span>
+          </div>
+        )}
+
+        {loading ? (
+          <div class="flex justify-center py-6">
+            <span class="loading loading-spinner" />
+          </div>
+        ) : (
+          <form class="space-y-3" onSubmit={(e) => handleSave(e).catch(() => {})}>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <fieldset class="fieldset">
+                <legend class="fieldset-legend">Name</legend>
+                <input
+                  type="text"
+                  required
+                  class="input input-bordered input-sm w-full"
+                  value={name}
+                  onInput={(e) => setName((e.target as HTMLInputElement).value)}
+                />
+              </fieldset>
+              <fieldset class="fieldset">
+                <legend class="fieldset-legend">Type</legend>
+                <input
+                  type="text"
+                  class="input input-bordered input-sm w-full opacity-50"
+                  value={backend.type}
+                  disabled
+                />
+              </fieldset>
+            </div>
+            <fieldset class="fieldset">
+              <legend class="fieldset-legend">Config (JSON)</legend>
+              <textarea
+                class="textarea textarea-bordered textarea-sm font-mono w-full"
+                rows={backend.type === "http" || backend.type === "r2-s3compat" ? 8 : 3}
+                value={config ?? ""}
+                onInput={(e) => setConfig((e.target as HTMLTextAreaElement).value)}
+              />
+            </fieldset>
+            <div class="modal-action">
+              <button type="button" class="btn btn-sm" onClick={onClose}>
+                Cancel
+              </button>
+              <button
+                type="submit"
+                class="btn btn-sm btn-primary"
+                disabled={submitting || !name.trim()}
+              >
+                {submitting && <span class="loading loading-spinner loading-xs" />}
+                {submitting ? "Saving…" : "Save"}
+              </button>
+            </div>
+          </form>
+        )}
+      </div>
+      <button type="button" class="modal-backdrop" onClick={onClose} aria-label="Close dialog" />
+    </div>
+  );
+}
+
 // ── SettingsSection ───────────────────────────────────────────────────────
 
 function SettingsSection<T extends { id: string; name: string; type: string }>({
@@ -313,6 +453,7 @@ function SettingsSection<T extends { id: string; name: string; type: string }>({
   typeOptions,
   onAdd,
   onDelete,
+  onEdit,
   onTest,
 }: {
   title: string;
@@ -321,6 +462,7 @@ function SettingsSection<T extends { id: string; name: string; type: string }>({
   typeOptions: string[];
   onAdd: (name: string, type: string, config: string) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
+  onEdit?: (row: T) => void;
   onTest?: (id: string, name: string) => void;
 }) {
   return (
@@ -356,6 +498,15 @@ function SettingsSection<T extends { id: string; name: string; type: string }>({
                           Test
                         </button>
                       )}
+                      {onEdit && (
+                        <button
+                          type="button"
+                          class="btn btn-ghost btn-xs"
+                          onClick={() => onEdit(row)}
+                        >
+                          Edit
+                        </button>
+                      )}
                       <button
                         type="button"
                         class="btn btn-ghost btn-xs text-error"
@@ -388,6 +539,7 @@ export function SettingsPanel({ workerBase, getAuthHeaders }: SettingsPanelProps
   const [backends, setBackends] = useState<StorageBackendRow[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [testTarget, setTestTarget] = useState<{ id: string; name: string } | null>(null);
+  const [editTarget, setEditTarget] = useState<StorageBackendRow | null>(null);
 
   const fetchAll = useCallback(async () => {
     try {
@@ -447,7 +599,10 @@ export function SettingsPanel({ workerBase, getAuthHeaders }: SettingsPanelProps
       headers: { "Content-Type": "application/json", ...headers },
       body: JSON.stringify({ name, type, config }),
     });
-    if (!res.ok) throw new Error(`Add failed: ${res.status}`);
+    if (!res.ok) {
+      const data = (await res.json()) as { error?: string };
+      throw new Error(data.error ?? `Add failed: ${res.status}`);
+    }
     await fetchAll();
   }
 
@@ -472,6 +627,15 @@ export function SettingsPanel({ workerBase, getAuthHeaders }: SettingsPanelProps
           onClose={() => setTestTarget(null)}
         />
       )}
+      {editTarget && (
+        <EditBackendDialog
+          backend={editTarget}
+          workerBase={workerBase}
+          getAuthHeaders={getAuthHeaders}
+          onSaved={fetchAll}
+          onClose={() => setEditTarget(null)}
+        />
+      )}
       {loadError && (
         <div role="alert" class="alert alert-error">
           <span>{loadError}</span>
@@ -493,6 +657,7 @@ export function SettingsPanel({ workerBase, getAuthHeaders }: SettingsPanelProps
         typeOptions={BACKEND_TYPES}
         onAdd={addBackend}
         onDelete={deleteBackend}
+        onEdit={(row) => setEditTarget(row)}
       />
     </div>
   );
