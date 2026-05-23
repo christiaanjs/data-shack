@@ -56,7 +56,7 @@ describe("POST /mcp - MCP server", () => {
         jsonrpc: "2.0",
         id: 1,
         method: "initialize",
-        params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "test" } },
+        params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "test" } },
       }),
     });
     expect(res.status).toBe(200);
@@ -71,7 +71,7 @@ describe("POST /mcp - MCP server", () => {
     };
     expect(data.jsonrpc).toBe("2.0");
     expect(data.id).toBe(1);
-    expect(data.result.protocolVersion).toBe("2024-11-05");
+    expect(data.result.protocolVersion).toBe("2025-03-26");
     expect(data.result.serverInfo.name).toBe("data-shack");
     expect(data.result.capabilities).toHaveProperty("tools");
   });

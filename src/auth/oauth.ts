@@ -481,7 +481,7 @@ function makeAccessPayload(userId: string, issuer: string): { payload: JwtPayloa
     payload: {
       sub: userId,
       iss: issuer,
-      aud: "mcp",
+      aud: `${issuer}/mcp`,
       iat: now,
       exp: now + ACCESS_TOKEN_TTL,
       jti: crypto.randomUUID(),
@@ -501,6 +501,10 @@ const requireOAuth: MiddlewareHandler<{ Bindings: Env }> = async (c, next) => {
 export const oauthRouter = new Hono<{ Bindings: Env }>();
 
 oauthRouter.get("/.well-known/oauth-protected-resource", requireOAuth, (c) =>
+  handleProtectedResource(c.req.raw),
+);
+// RFC 9728: clients may append the resource path to the well-known prefix
+oauthRouter.get("/.well-known/oauth-protected-resource/mcp", requireOAuth, (c) =>
   handleProtectedResource(c.req.raw),
 );
 oauthRouter.get("/.well-known/oauth-authorization-server", requireOAuth, (c) =>

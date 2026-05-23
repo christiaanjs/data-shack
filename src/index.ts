@@ -633,6 +633,13 @@ app.get("/session/status", requireAuth, async (c) => {
 
 // ── MCP server ────────────────────────────────────────────────────────────
 
+// Streamable HTTP (2025-03-26): GET establishes a server-to-client SSE channel.
+// We don't send server-initiated messages, so respond with 405 to signal the
+// endpoint exists but this direction isn't used.
+app.get("/mcp", (c) => {
+  return new Response(null, { status: 405, headers: { Allow: "POST" } });
+});
+
 app.post("/mcp", requireAuth, async (c) => {
   const userId = c.get("userId");
   return mcpHandler(

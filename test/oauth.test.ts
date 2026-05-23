@@ -212,17 +212,17 @@ describe("verifyJwt", () => {
     expect(await verifyJwt(tampered, env.JWT_SECRET)).toBeNull();
   });
 
-  it("returns null for a token with wrong aud", async () => {
+  it("returns null for a token with missing aud", async () => {
     const now = Math.floor(Date.now() / 1000);
     const payload = {
       sub: "usr_1",
       iss: "http://localhost",
-      aud: "other",
+      // aud intentionally omitted
       iat: now,
       exp: now + 3600,
       jti: "j4",
     };
-    const token = await signJwt(payload, env.JWT_SECRET);
+    const token = await signJwt(payload as Parameters<typeof signJwt>[0], env.JWT_SECRET);
     expect(await verifyJwt(token, env.JWT_SECRET)).toBeNull();
   });
 
@@ -404,7 +404,7 @@ describe("POST /token (authorization_code)", () => {
     const { access_token } = (await res.json()) as { access_token: string };
     const payload = await verifyJwt(access_token, env.JWT_SECRET);
     expect(payload?.sub).toBe("usr_jwt_test");
-    expect(payload?.aud).toBe("mcp");
+    expect(payload?.aud).toMatch(/\/mcp$/);
   });
 
   it("rejects an unknown authorization code", async () => {

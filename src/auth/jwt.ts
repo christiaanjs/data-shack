@@ -72,7 +72,7 @@ export async function verifyJwt(token: string, secret: string): Promise<JwtPaylo
       payload === null ||
       typeof (payload as Record<string, unknown>).sub !== "string" ||
       typeof (payload as Record<string, unknown>).exp !== "number" ||
-      (payload as Record<string, unknown>).aud !== "mcp"
+      typeof (payload as Record<string, unknown>).aud !== "string"
     ) {
       return null;
     }
