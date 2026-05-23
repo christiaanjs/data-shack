@@ -250,8 +250,12 @@ async function handleRunQuery(
   }
 
   if (!queryRes.ok) {
-    const text = await queryRes.text();
-    return respondError(-32603, `Query failed: ${text}`);
+    try {
+      const err = (await queryRes.json()) as { message?: string };
+      return respondError(-32603, err.message ?? "Query failed");
+    } catch {
+      return respondError(-32603, "Query failed");
+    }
   }
 
   const result = (await queryRes.json()) as { columns: string[]; rows: unknown[][] };

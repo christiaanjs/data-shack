@@ -99,26 +99,32 @@ export class SessionDO implements DurableObject {
     const queryId = reqId ?? crypto.randomUUID();
     const ws = sockets[0]!;
 
-    const result = await new Promise<QueryResult>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pendingQueries.delete(queryId);
-        reject(new Error("Query timed out after 30s"));
-      }, 30_000);
+    let result: QueryResult;
+    try {
+      result = await new Promise<QueryResult>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          this.pendingQueries.delete(queryId);
+          reject(new Error("Query timed out after 30s"));
+        }, 30_000);
 
-      this.pendingQueries.set(queryId, {
-        resolve: (v) => {
-          clearTimeout(timer);
-          resolve(v);
-        },
-        reject: (e) => {
-          clearTimeout(timer);
-          reject(e);
-        },
-        ws,
+        this.pendingQueries.set(queryId, {
+          resolve: (v) => {
+            clearTimeout(timer);
+            resolve(v);
+          },
+          reject: (e) => {
+            clearTimeout(timer);
+            reject(e);
+          },
+          ws,
+        });
+
+        ws.send(JSON.stringify({ type: "query", queryId, sql }));
       });
-
-      ws.send(JSON.stringify({ type: "query", queryId, sql }));
-    });
+    } catch (e) {
+      const message = e instanceof Error ? e.message : "Query failed";
+      return Response.json({ error: "query_failed", message }, { status: 500 });
+    }
 
     return Response.json(result);
   }

@@ -184,3 +184,316 @@ describe("POST /mcp - MCP server", () => {
     expect(data.error?.code).toBe(-32601);
   });
 });
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+async function mcpCall(
+  toolName: string,
+  args: Record<string, unknown>,
+): Promise<{
+  result?: { content: Array<{ type: string; text: string }> };
+  error?: { code: number; message: string };
+}> {
+  const res = await SELF.fetch("http://localhost/mcp", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 99,
+      method: "tools/call",
+      params: { name: toolName, arguments: args },
+    }),
+  });
+  return res.json();
+}
+
+// ── list_data_sources ─────────────────────────────────────────────────────────
+
+describe("list_data_sources tool", () => {
+  it("returns empty message when no HTTP credentials configured", async () => {
+    const data = await mcpCall("list_data_sources", {});
+    expect(data.result?.content[0]?.text).toContain("No HTTP data sources");
+  });
+
+  it("lists HTTP credentials with name and baseUrl after creating one", async () => {
+    await SELF.fetch("http://localhost/api/credentials", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({
+        name: "My Sales API",
+        type: "http",
+        config: { baseUrl: "https://api.example.com/v1" },
+      }),
+    });
+
+    const data = await mcpCall("list_data_sources", {});
+    const text = data.result?.content[0]?.text ?? "";
+    expect(text).toContain("My Sales API");
+    expect(text).toContain("https://api.example.com/v1");
+  });
+
+  it("includes credential id so it can be used in http-ds:// URIs", async () => {
+    const createRes = await SELF.fetch("http://localhost/api/credentials", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({
+        name: "Another Source",
+        type: "http",
+        config: { baseUrl: "https://other.example.com" },
+      }),
+    });
+    const { id } = (await createRes.json()) as { id: string };
+
+    const data = await mcpCall("list_data_sources", {});
+    const text = data.result?.content[0]?.text ?? "";
+    expect(text).toContain(id);
+    expect(text).toContain("Another Source");
+  });
+});
+
+// ── read_data tool ────────────────────────────────────────────────────────────
+
+describe("read_data tool", () => {
+  it("returns error for unsupported URI scheme", async () => {
+    const data = await mcpCall("read_data", { uri: "ftp://example.com/file.json" });
+    expect(data.result?.content[0]?.text ?? data.error?.message).toMatch(/[Uu]nsupported/);
+  });
+
+  it("returns missing uri error when uri not provided", async () => {
+    const data = await mcpCall("read_data", {});
+    expect(data.error?.code).toBe(-32602);
+  });
+
+  it("returns error when http-ds credential not found", async () => {
+    const data = await mcpCall("read_data", { uri: "http-ds://cred_doesnotexist/path" });
+    const text = JSON.stringify(data);
+    expect(text).toMatch(/not found|credential/i);
+  });
+
+  it("returns error for http-ds credential referenced by unknown name", async () => {
+    const data = await mcpCall("read_data", { uri: "http-ds://no-such-name/path" });
+    const text = JSON.stringify(data);
+    expect(text).toMatch(/not found|credential/i);
+  });
+
+  it("reads JSON object from r2://data-shack/ URI", async () => {
+    await env.R2.put(
+      "users/usr_test/mcp-read/config.json",
+      JSON.stringify({ version: 2, active: true }),
+      {
+        httpMetadata: { contentType: "application/json" },
+      },
+    );
+
+    const data = await mcpCall("read_data", { uri: "r2://data-shack/mcp-read/config.json" });
+    const text = data.result?.content[0]?.text ?? "";
+    expect(text).toContain('"version"');
+    expect(text).toContain("2");
+    expect(text).toContain('"active"');
+  });
+
+  it("reads JSON array from r2://data-shack/ URI", async () => {
+    await env.R2.put(
+      "users/usr_test/mcp-read/list.json",
+      JSON.stringify([
+        { id: 1, name: "Alice" },
+        { id: 2, name: "Bob" },
+      ]),
+      { httpMetadata: { contentType: "application/json" } },
+    );
+
+    const data = await mcpCall("read_data", { uri: "r2://data-shack/mcp-read/list.json" });
+    const text = data.result?.content[0]?.text ?? "";
+    expect(text).toContain('"name"');
+    expect(text).toContain("Alice");
+    expect(text).toContain("Bob");
+  });
+
+  it("reads NDJSON from r2://data-shack/ URI", async () => {
+    const ndjson = ['{"id":1,"event":"click"}', '{"id":2,"event":"view"}'].join("\n");
+    await env.R2.put("users/usr_test/mcp-read/events.ndjson", ndjson, {
+      httpMetadata: { contentType: "application/x-ndjson" },
+    });
+
+    const data = await mcpCall("read_data", { uri: "r2://data-shack/mcp-read/events.ndjson" });
+    const text = data.result?.content[0]?.text ?? "";
+    expect(text).toContain('"event"');
+    expect(text).toContain("click");
+    expect(text).toContain("view");
+  });
+
+  it("returns error when R2 object does not exist", async () => {
+    const data = await mcpCall("read_data", { uri: "r2://data-shack/mcp-read/nonexistent.json" });
+    const text = JSON.stringify(data);
+    expect(text).toMatch(/[Nn]ot found/);
+  });
+
+  it("returns error when R2 object exceeds 1 MB", async () => {
+    const large = "x".repeat(1_100_000);
+    await env.R2.put("users/usr_test/mcp-read/large.json", `"${large}"`);
+
+    const data = await mcpCall("read_data", { uri: "r2://data-shack/mcp-read/large.json" });
+    const text = JSON.stringify(data);
+    expect(text).toMatch(/[Tt]oo large/);
+  });
+
+  it("can reference http-ds credential by name", async () => {
+    // Credential with name "named-api" won't reach the upstream (loopback), but the
+    // resolution by name should succeed and produce an upstream error, not a
+    // "credential not found" error.
+    await SELF.fetch("http://localhost/api/credentials", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({
+        name: "named-api",
+        type: "http",
+        config: { baseUrl: "http://localhost:1" },
+      }),
+    });
+
+    const data = await mcpCall("read_data", { uri: "http-ds://named-api/test" });
+    const text = JSON.stringify(data);
+    // Should NOT say "credential not found" — name resolved, but upstream failed
+    expect(text).not.toMatch(/credential not found/i);
+    expect(text).toMatch(/[Ff]ail|[Ee]rror|connect/i);
+  });
+});
+
+// ── run_query with mock browser session ───────────────────────────────────────
+
+describe("run_query with mock browser session", () => {
+  async function connectMockBrowser(): Promise<WebSocket> {
+    const wsRes = await SELF.fetch("http://localhost/session/ws", {
+      headers: { Upgrade: "websocket", ...DEV_HEADERS },
+    });
+    expect(wsRes.status).toBe(101);
+    const ws = wsRes.webSocket!;
+    ws.accept();
+    return ws;
+  }
+
+  function mockQueryResponder(ws: WebSocket, columns: string[], rows: unknown[][]): Promise<void> {
+    return new Promise((resolve) => {
+      ws.addEventListener("message", (event) => {
+        const msg = JSON.parse(event.data as string) as { type: string; queryId: string };
+        if (msg.type === "query") {
+          ws.send(JSON.stringify({ type: "result", queryId: msg.queryId, columns, rows }));
+          resolve();
+        }
+      });
+    });
+  }
+
+  it("returns table-formatted results (default format)", async () => {
+    const ws = await connectMockBrowser();
+    const responded = mockQueryResponder(
+      ws,
+      ["name", "score"],
+      [
+        ["Alice", 95],
+        ["Bob", 87],
+      ],
+    );
+
+    const mcpPromise = mcpCall("run_query", { sql: "SELECT * FROM scores" });
+    await Promise.all([mcpPromise, responded]).then(([data]) => {
+      const text = (data as Awaited<ReturnType<typeof mcpCall>>).result?.content[0]?.text ?? "";
+      expect(text).toContain("name\tscore");
+      expect(text).toContain("Alice\t95");
+      expect(text).toContain("Bob\t87");
+    });
+
+    ws.close();
+  });
+
+  it("returns JSON-formatted results when format=json", async () => {
+    const ws = await connectMockBrowser();
+    const responded = mockQueryResponder(ws, ["id", "value"], [[1, "hello"]]);
+
+    const mcpPromise = mcpCall("run_query", { sql: "SELECT 1", format: "json" });
+    await Promise.all([mcpPromise, responded]).then(([data]) => {
+      const text = (data as Awaited<ReturnType<typeof mcpCall>>).result?.content[0]?.text ?? "";
+      const parsed = JSON.parse(text) as Array<Record<string, unknown>>;
+      expect(parsed).toHaveLength(1);
+      expect(parsed[0]).toMatchObject({ id: 1, value: "hello" });
+    });
+
+    ws.close();
+  });
+
+  it("returns CSV-formatted results when format=csv", async () => {
+    const ws = await connectMockBrowser();
+    const responded = mockQueryResponder(
+      ws,
+      ["city", "pop"],
+      [
+        ["London", 9_000_000],
+        ["Paris", 2_100_000],
+      ],
+    );
+
+    const mcpPromise = mcpCall("run_query", { sql: "SELECT * FROM cities", format: "csv" });
+    await Promise.all([mcpPromise, responded]).then(([data]) => {
+      const text = (data as Awaited<ReturnType<typeof mcpCall>>).result?.content[0]?.text ?? "";
+      expect(text).toContain("city,pop");
+      expect(text).toContain("London,9000000");
+      expect(text).toContain("Paris,2100000");
+    });
+
+    ws.close();
+  });
+
+  it("returns error content when browser reports a query error", async () => {
+    const ws = await connectMockBrowser();
+
+    const errorResponded = new Promise<void>((resolve) => {
+      ws.addEventListener("message", (event) => {
+        const msg = JSON.parse(event.data as string) as { type: string; queryId: string };
+        if (msg.type === "query") {
+          ws.send(
+            JSON.stringify({ type: "error", queryId: msg.queryId, error: "Table 'bad' not found" }),
+          );
+          resolve();
+        }
+      });
+    });
+
+    const mcpPromise = mcpCall("run_query", { sql: "SELECT * FROM bad" });
+    await Promise.all([mcpPromise, errorResponded]).then(([data]) => {
+      const text = JSON.stringify(data as Awaited<ReturnType<typeof mcpCall>>);
+      expect(text).toMatch(/[Ee]rror|bad|fail/i);
+    });
+
+    ws.close();
+  });
+
+  it("truncates result rows to 1000 and notes truncation in table format", async () => {
+    const ws = await connectMockBrowser();
+    // Produce 1001 rows
+    const rows: unknown[][] = Array.from({ length: 1001 }, (_, i) => [i]);
+    const responded = mockQueryResponder(ws, ["n"], rows);
+
+    const mcpPromise = mcpCall("run_query", { sql: "SELECT n FROM big" });
+    await Promise.all([mcpPromise, responded]).then(([data]) => {
+      const text = (data as Awaited<ReturnType<typeof mcpCall>>).result?.content[0]?.text ?? "";
+      expect(text).toContain("truncated");
+      // Row 1000 (0-indexed) should be absent; row 999 should be present
+      expect(text).toContain("999");
+      expect(text).not.toContain("1000\n");
+    });
+
+    ws.close();
+  });
+
+  it("sessionCount reflects connected browser", async () => {
+    const ws = await connectMockBrowser();
+
+    const statusRes = await SELF.fetch("http://localhost/session/status", {
+      headers: DEV_HEADERS,
+    });
+    const { sessionCount } = (await statusRes.json()) as { sessionCount: number };
+    expect(sessionCount).toBeGreaterThanOrEqual(1);
+
+    ws.close();
+  });
+});
