@@ -50,8 +50,11 @@ export function connectSession(config: {
     const socket = new WebSocket(url);
     ws = socket;
 
-    socket.onopen = () => {
+    socket.onopen = async () => {
       onStatusChange?.(true);
+      // Register catalog views once on connect so they're ready before any query arrives.
+      const db = await getDb();
+      registerCatalogViews(db, workerBase, getAuthHeaders).catch(() => {});
     };
 
     socket.onmessage = async (event: MessageEvent) => {
@@ -107,8 +110,6 @@ async function handleQuery(
 ) {
   try {
     const db = await getDb();
-    // Ensure catalog views are registered so SQL can reference catalog table names.
-    await registerCatalogViews(db, workerBase, getAuthHeaders).catch(() => {});
     const { sql, preamble } = await resolveStorageUris(msg.sql, workerBase, getAuthHeaders);
     const result = await runQuery(db, sql, preamble.length > 0 ? preamble : undefined);
     ws.send(
