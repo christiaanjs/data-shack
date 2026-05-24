@@ -244,7 +244,10 @@ async function writePaginatedToS3Multipart(
 
 // ── Main loader ───────────────────────────────────────────────────────────────
 
-export async function runHttpLoadJob(job: LoadJob, env: Env): Promise<{ uri: string }> {
+export async function runHttpLoadJob(
+  job: LoadJob,
+  env: Env,
+): Promise<{ uri: string; triggeredJobIds: string[] }> {
   // 1. Fetch and decrypt HTTP credential
   const credRow = await getCredentialConfig(env.DB, job.credential_id, job.user_id);
   if (!credRow || credRow.type !== "http") {
