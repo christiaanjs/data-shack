@@ -9,14 +9,20 @@ export interface QueryResult {
 interface WsAttachment {
   userId: string;
   inflightJobIds: string[];
+  lastPingAt: number;
 }
+
+// Sockets that haven't pinged within this window are considered stale.
+const PING_INTERVAL_MS = 15_000;
+const STALE_AFTER_MS = PING_INTERVAL_MS * 3; // 45s — 3 missed pings
 
 type IncomingMessage =
   | { type: "result"; queryId: string; columns: string[]; rows: unknown[][] }
   | { type: "error"; queryId: string; error: string }
   | { type: "job_claimed"; jobId: string }
   | { type: "job_complete"; jobId: string }
-  | { type: "job_error"; jobId: string; error: string };
+  | { type: "job_error"; jobId: string; error: string }
+  | { type: "ping" };
 
 export class SessionDO implements DurableObject {
   // In-memory map of pending MCP queries. Safe because the DO never hibernates
@@ -70,7 +76,11 @@ export class SessionDO implements DurableObject {
     const [client, server] = Object.values(pair) as [WebSocket, WebSocket];
 
     this.ctx.acceptWebSocket(server, [userId]);
-    server.serializeAttachment({ userId, inflightJobIds: [] } satisfies WsAttachment);
+    server.serializeAttachment({
+      userId,
+      inflightJobIds: [],
+      lastPingAt: Date.now(),
+    } satisfies WsAttachment);
 
     // Dispatch any pending jobs to this new connection (fire and forget).
     this.ctx.waitUntil(this.dispatchPendingJobs(server, userId));
@@ -86,7 +96,12 @@ export class SessionDO implements DurableObject {
       return Response.json({ error: "sql and userId are required" }, { status: 400 });
 
     const sockets = this.ctx.getWebSockets(userId);
-    if (sockets.length === 0) {
+    const now = Date.now();
+    const liveSockets = sockets.filter((s) => {
+      const att = s.deserializeAttachment() as WsAttachment | null;
+      return att && now - att.lastPingAt < STALE_AFTER_MS;
+    });
+    if (liveSockets.length === 0) {
       return Response.json(
         {
           error: "no_session",
@@ -97,9 +112,9 @@ export class SessionDO implements DurableObject {
     }
 
     const queryId = reqId ?? crypto.randomUUID();
-    const ws = sockets[0]!;
+    const ws = liveSockets[0]!;
     console.log(
-      `[SessionDO] handleQuery: found ${sockets.length} socket(s) for userId=${userId}, queryId=${queryId}, readyState=${ws.readyState}`,
+      `[SessionDO] handleQuery: found ${sockets.length} socket(s) (${liveSockets.length} live) for userId=${userId}, queryId=${queryId}, readyState=${ws.readyState}`,
     );
 
     let result: QueryResult;
@@ -213,6 +228,11 @@ export class SessionDO implements DurableObject {
     }
 
     const attachment = ws.deserializeAttachment() as WsAttachment;
+
+    if (msg.type === "ping") {
+      ws.serializeAttachment({ ...attachment, lastPingAt: Date.now() });
+      return;
+    }
 
     if (msg.type === "result" || msg.type === "error") {
       console.log(

@@ -50,8 +50,16 @@ export function connectSession(config: {
     const socket = new WebSocket(url);
     ws = socket;
 
+    let pingInterval: ReturnType<typeof setInterval> | null = null;
+
     socket.onopen = async () => {
       onStatusChange?.(true);
+      // Heartbeat so the DO can detect stale sockets (15s interval, stale after 45s).
+      pingInterval = setInterval(() => {
+        if (socket.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify({ type: "ping" }));
+        }
+      }, 15_000);
       // Register catalog views once on connect so they're ready before any query arrives.
       const db = await getDb();
       registerCatalogViews(db, workerBase, getAuthHeaders).catch(() => {});
@@ -75,6 +83,10 @@ export function connectSession(config: {
     };
 
     socket.onclose = () => {
+      if (pingInterval !== null) {
+        clearInterval(pingInterval);
+        pingInterval = null;
+      }
       ws = null;
       onStatusChange?.(false);
       if (!closed) {
