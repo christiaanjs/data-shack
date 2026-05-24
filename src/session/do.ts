@@ -13,8 +13,8 @@ interface WsAttachment {
 }
 
 // Sockets that haven't pinged within this window are considered stale.
-const PING_INTERVAL_MS = 15_000;
-const STALE_AFTER_MS = PING_INTERVAL_MS * 3; // 45s — 3 missed pings
+const PING_INTERVAL_MS = 25_000;
+const STALE_AFTER_MS = PING_INTERVAL_MS * 3; // 75s — 3 missed pings
 
 type IncomingMessage =
   | { type: "result"; queryId: string; columns: string[]; rows: unknown[][] }

@@ -32,6 +32,15 @@ export function connectSession(config: {
   let closed = false;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
+  // Prevent Chrome/Edge from throttling JS in background tabs.
+  if (typeof navigator !== "undefined" && "locks" in navigator) {
+    (
+      navigator.locks as {
+        request: (name: string, opts: { mode: string }, cb: () => Promise<void>) => void;
+      }
+    ).request("data-shack-ws", { mode: "shared" }, () => new Promise<void>(() => {}));
+  }
+
   async function connect() {
     if (closed) return;
 
@@ -54,12 +63,12 @@ export function connectSession(config: {
 
     socket.onopen = async () => {
       onStatusChange?.(true);
-      // Heartbeat so the DO can detect stale sockets (15s interval, stale after 45s).
+      // Heartbeat keeps the connection alive and lets the DO detect stale sockets.
       pingInterval = setInterval(() => {
         if (socket.readyState === WebSocket.OPEN) {
           socket.send(JSON.stringify({ type: "ping" }));
         }
-      }, 15_000);
+      }, 25_000);
       // Register catalog views once on connect so they're ready before any query arrives.
       const db = await getDb();
       registerCatalogViews(db, workerBase, getAuthHeaders).catch(() => {});
@@ -99,6 +108,20 @@ export function connectSession(config: {
     socket.onerror = () => {
       socket.close();
     };
+  }
+
+  // Reconnect immediately when the tab becomes visible, rather than waiting
+  // for the 5s reconnect timer to fire after the browser may have throttled us.
+  if (typeof document !== "undefined") {
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible" && !closed && ws?.readyState !== WebSocket.OPEN) {
+        if (reconnectTimer !== null) {
+          clearTimeout(reconnectTimer);
+          reconnectTimer = null;
+        }
+        connect().catch(() => {});
+      }
+    });
   }
 
   connect().catch(() => {});

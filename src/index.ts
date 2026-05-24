@@ -824,8 +824,9 @@ export default {
           msg.ack();
           return;
         }
+        let triggeredJobIds: string[] = [];
         try {
-          await runHttpLoadJob(job, env);
+          ({ triggeredJobIds } = await runHttpLoadJob(job, env));
         } catch (err) {
           const lastError = String(err);
           console.error(`Load job ${job.id} (${job.name}) failed:`, err);
@@ -835,6 +836,18 @@ export default {
         }
         const nextRunAt = new Cron(job.cron_schedule).nextRun()?.getTime() ?? null;
         await updateLoadJobOutcome(env.DB, job.id, Date.now(), nextRunAt);
+        // Dispatch any triggered transform jobs to the connected browser session.
+        if (triggeredJobIds.length > 0) {
+          try {
+            await sessionStub(env, job.user_id).fetch("http://do/dispatch-jobs", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ userId: job.user_id }),
+            });
+          } catch {
+            // Best-effort; jobs remain pending and dispatch on next browser connect.
+          }
+        }
         msg.ack();
       }),
     );
