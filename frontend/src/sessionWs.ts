@@ -1,4 +1,5 @@
 import type { AsyncDuckDB } from "@duckdb/duckdb-wasm";
+import { registerCatalogViews } from "./catalogViews.ts";
 import { runQuery } from "./duckdb.ts";
 import { resolveStorageUris } from "./resolveQuery.ts";
 
@@ -106,6 +107,8 @@ async function handleQuery(
 ) {
   try {
     const db = await getDb();
+    // Ensure catalog views are registered so SQL can reference catalog table names.
+    await registerCatalogViews(db, workerBase, getAuthHeaders).catch(() => {});
     const { sql, preamble } = await resolveStorageUris(msg.sql, workerBase, getAuthHeaders);
     const result = await runQuery(db, sql, preamble.length > 0 ? preamble : undefined);
     ws.send(
@@ -147,6 +150,8 @@ async function handleTransformJob(
 
   try {
     const db = await getDb();
+    // Register catalog views so the transform SQL can reference catalog table names.
+    await registerCatalogViews(db, workerBase, getAuthHeaders).catch(() => {});
     const { sql, preamble } = await resolveStorageUris(msg.sql, workerBase, getAuthHeaders);
     await runQuery(db, sql, preamble.length > 0 ? preamble : undefined);
     ws.send(JSON.stringify({ type: "job_complete", jobId: msg.jobId }));
