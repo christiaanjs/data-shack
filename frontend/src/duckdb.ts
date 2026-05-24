@@ -47,13 +47,31 @@ export async function initDuckDB(): Promise<duckdb.AsyncDuckDB> {
   return db;
 }
 
-// Arrow BigInt values can't be serialized by JSON.stringify. Convert to number
-// when within safe integer range, otherwise to string to preserve precision.
+// Recursively convert Arrow values to JSON-serializable types.
+// Arrow List columns return Vector objects (with toArray()); Struct columns
+// return plain objects. Both can contain BigInt values at any depth.
 function serializeArrowValue(v: unknown): unknown {
+  if (v === null || v === undefined) return v;
   if (typeof v === "bigint") {
     const MAX = BigInt(Number.MAX_SAFE_INTEGER);
     const MIN = -MAX;
     return v >= MIN && v <= MAX ? Number(v) : String(v);
+  }
+  // Arrow List/FixedSizeList columns return a Vector with toArray().
+  if (
+    typeof v === "object" &&
+    "toArray" in v &&
+    typeof (v as Record<string, unknown>).toArray === "function"
+  ) {
+    return (v as { toArray: () => unknown[] }).toArray().map(serializeArrowValue);
+  }
+  if (Array.isArray(v)) return v.map(serializeArrowValue);
+  if (typeof v === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+      out[k] = serializeArrowValue(val);
+    }
+    return out;
   }
   return v;
 }
