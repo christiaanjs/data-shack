@@ -65,6 +65,8 @@ export function connectSession(config: {
         return;
       }
 
+      console.log("[sessionWs] received message type:", msg.type);
+
       if (msg.type === "query") {
         await handleQuery(socket, msg, workerBase, getAuthHeaders, getDb);
       } else if (msg.type === "transform_job") {
@@ -108,10 +110,14 @@ async function handleQuery(
   getAuthHeaders: () => Promise<Record<string, string>>,
   getDb: () => Promise<AsyncDuckDB>,
 ) {
+  console.log("[sessionWs] handleQuery start", msg.queryId);
   try {
     const db = await getDb();
+    console.log("[sessionWs] handleQuery: db ready");
     const { sql, preamble } = await resolveStorageUris(msg.sql, workerBase, getAuthHeaders);
+    console.log("[sessionWs] handleQuery: URIs resolved, running query");
     const result = await runQuery(db, sql, preamble.length > 0 ? preamble : undefined);
+    console.log("[sessionWs] handleQuery: query done, sending result");
     ws.send(
       JSON.stringify({
         type: "result",
@@ -120,7 +126,9 @@ async function handleQuery(
         rows: result.rows,
       }),
     );
+    console.log("[sessionWs] handleQuery: result sent");
   } catch (err) {
+    console.error("[sessionWs] handleQuery error:", err);
     ws.send(
       JSON.stringify({
         type: "error",

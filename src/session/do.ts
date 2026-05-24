@@ -98,12 +98,16 @@ export class SessionDO implements DurableObject {
 
     const queryId = reqId ?? crypto.randomUUID();
     const ws = sockets[0]!;
+    console.log(
+      `[SessionDO] handleQuery: found ${sockets.length} socket(s) for userId=${userId}, queryId=${queryId}, readyState=${ws.readyState}`,
+    );
 
     let result: QueryResult;
     try {
       result = await new Promise<QueryResult>((resolve, reject) => {
         const timer = setTimeout(() => {
           this.pendingQueries.delete(queryId);
+          console.log(`[SessionDO] handleQuery: TIMED OUT queryId=${queryId}`);
           reject(new Error("Query timed out after 30s"));
         }, 30_000);
 
@@ -119,7 +123,18 @@ export class SessionDO implements DurableObject {
           ws,
         });
 
-        ws.send(JSON.stringify({ type: "query", queryId, sql }));
+        try {
+          ws.send(JSON.stringify({ type: "query", queryId, sql }));
+          console.log(`[SessionDO] handleQuery: ws.send() succeeded for queryId=${queryId}`);
+        } catch (sendErr) {
+          console.error(
+            `[SessionDO] handleQuery: ws.send() threw for queryId=${queryId}:`,
+            sendErr,
+          );
+          clearTimeout(timer);
+          this.pendingQueries.delete(queryId);
+          reject(sendErr instanceof Error ? sendErr : new Error(String(sendErr)));
+        }
       });
     } catch (e) {
       const message = e instanceof Error ? e.message : "Query failed";
@@ -200,8 +215,14 @@ export class SessionDO implements DurableObject {
     const attachment = ws.deserializeAttachment() as WsAttachment;
 
     if (msg.type === "result" || msg.type === "error") {
+      console.log(
+        `[SessionDO] webSocketMessage: type=${msg.type}, queryId=${msg.queryId}, pendingCount=${this.pendingQueries.size}`,
+      );
       const pending = this.pendingQueries.get(msg.queryId);
-      if (!pending) return;
+      if (!pending) {
+        console.warn(`[SessionDO] webSocketMessage: no pending query for queryId=${msg.queryId}`);
+        return;
+      }
       this.pendingQueries.delete(msg.queryId);
       if (msg.type === "result") {
         pending.resolve({ columns: msg.columns, rows: msg.rows });
