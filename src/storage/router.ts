@@ -439,8 +439,9 @@ storageRouter.on(["GET", "HEAD", "PUT", "OPTIONS"], "/s3proxy/*", async (c) => {
         return corsError(502, `Sheets API error: ${msg}`);
       }
       const putHeaders = new Headers();
+      putHeaders.set("ETag", '"gsheets"');
       addCorsHeaders(putHeaders);
-      return new Response("", { status: 200, headers: putHeaders });
+      return new Response(null, { status: 200, headers: putHeaders });
     }
 
     // GET / HEAD: use Sheets API values endpoint and return a JSON array of objects.
