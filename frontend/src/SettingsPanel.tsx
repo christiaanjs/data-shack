@@ -644,19 +644,7 @@ export function SettingsPanel({ workerBase, getAuthHeaders }: SettingsPanelProps
   function connectGoogleSheets() {
     const name = window.prompt("Name for this Google Sheets credential:", "Google Sheets");
     if (!name) return;
-    getAuthHeaders()
-      .then(async (headers) => {
-        const res = await fetch(
-          `${workerBase}/api/credentials/google-sheets/auth?name=${encodeURIComponent(name)}`,
-          { headers },
-        );
-        if (!res.ok) throw new Error(`Auth init failed: ${res.status}`);
-        const { url } = (await res.json()) as { url: string };
-        window.location.href = url;
-      })
-      .catch((err) => {
-        setGsNotice({ type: "error", msg: String(err) });
-      });
+    window.location.href = `${workerBase}/connect/google-sheets?name=${encodeURIComponent(name)}`;
   }
 
   return (

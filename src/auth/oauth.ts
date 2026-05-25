@@ -1,3 +1,4 @@
+import { encryptConfig } from "../crypto.ts";
 import {
   type OAuthCodeRow,
   claimOAuthCode,
@@ -19,6 +20,7 @@ import {
   linkIdentity,
   updateUserEmail,
 } from "../db/queries.ts";
+import { insertCredential } from "../db/settings.ts";
 import type { Env } from "../types.ts";
 import {
   ACCESS_TOKEN_TTL,
@@ -38,6 +40,7 @@ interface GoogleUserInfo {
 interface ProviderIdentity {
   providerId: string;
   verifiedEmail: string | null;
+  refreshToken?: string;
 }
 
 class ForbiddenError extends Error {}
@@ -218,7 +221,46 @@ function buildProviderRedirect(
     url.searchParams.set("access_type", "online");
     return url;
   }
+  if (provider === "google-sheets") {
+    if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET) return "misconfigured";
+    const url = new URL("https://accounts.google.com/o/oauth2/v2/auth");
+    url.searchParams.set("client_id", env.GOOGLE_CLIENT_ID);
+    url.searchParams.set("redirect_uri", `${issuer}/oauth/callback`);
+    url.searchParams.set("response_type", "code");
+    url.searchParams.set("scope", "openid email https://www.googleapis.com/auth/spreadsheets");
+    url.searchParams.set("access_type", "offline");
+    url.searchParams.set("prompt", "consent");
+    return url;
+  }
   return "unsupported";
+}
+
+export async function handleConnectGoogleSheets(request: Request, env: Env): Promise<Response> {
+  const params = new URL(request.url).searchParams;
+  const credentialName = params.get("name") ?? "Google Sheets";
+  const issuer = issuerFromRequest(request);
+
+  const providerUrl = buildProviderRedirect("google-sheets", env, issuer);
+  if (providerUrl === "unsupported") return new Response("Not found", { status: 404 });
+  if (providerUrl === "misconfigured") {
+    return new Response("Google OAuth not configured", { status: 500 });
+  }
+
+  const state = crypto.randomUUID();
+  await insertOAuthState(env.DB, {
+    state,
+    client_id: "",
+    provider: "google-sheets",
+    code_challenge: "",
+    code_challenge_method: "S256",
+    redirect_uri: "",
+    original_state: null,
+    credential_name: credentialName,
+    expires_at: Date.now() + 10 * 60 * 1000,
+  });
+
+  providerUrl.searchParams.set("state", state);
+  return Response.redirect(providerUrl.toString(), 302);
 }
 
 async function resolveUserId(
@@ -268,25 +310,49 @@ export async function handleCallback(request: Request, env: Env): Promise<Respon
     return new Response("Invalid or expired state", { status: 400 });
   }
 
-  const result = await fetchProviderIdentity(
-    pending.provider,
-    code,
-    issuerFromRequest(request),
-    env,
-  );
+  const issuer = issuerFromRequest(request);
+  const result = await fetchProviderIdentity(pending.provider, code, issuer, env);
   if (result instanceof Response) return result;
 
   const { provider, providerId, verifiedEmail } = result;
+
+  const frontendOrigin = env.ALLOWED_ORIGIN || issuer;
 
   let userId: string;
   try {
     userId = await resolveUserId(env.DB, provider, providerId, verifiedEmail);
   } catch (err) {
     if (err instanceof ForbiddenError) {
+      if (pending.provider === "google-sheets") {
+        return Response.redirect(
+          `${frontendOrigin}/settings?gscred=error&reason=access_denied`,
+          302,
+        );
+      }
       return new Response("Access denied: email not permitted to sign up", { status: 403 });
     }
     const retried = await resolveUserId(env.DB, provider, providerId, verifiedEmail);
     userId = retried;
+  }
+
+  if (pending.provider === "google-sheets") {
+    if (!result.refreshToken) {
+      return Response.redirect(
+        `${frontendOrigin}/settings?gscred=error&reason=no_refresh_token`,
+        302,
+      );
+    }
+    const encryptedCfg = await encryptConfig(
+      JSON.stringify({ refreshToken: result.refreshToken }),
+      env.JWT_SECRET,
+    );
+    await insertCredential(env.DB, {
+      userId,
+      name: pending.credential_name ?? "Google Sheets",
+      type: "google-sheets",
+      encryptedConfig: encryptedCfg,
+    });
+    return Response.redirect(`${frontendOrigin}/settings?gscred=success`, 302);
   }
 
   const authCode = crypto.randomUUID() + crypto.randomUUID().replace(/-/g, "");
@@ -314,7 +380,7 @@ async function fetchProviderIdentity(
   issuer: string,
   env: Env,
 ): Promise<(ProviderIdentity & { provider: string }) | Response> {
-  if (provider === "google") {
+  if (provider === "google" || provider === "google-sheets") {
     const result = await fetchGoogleIdentity(code, issuer, env);
     if (result instanceof Response) return result;
     return { provider, ...result };
@@ -343,7 +409,11 @@ async function fetchGoogleIdentity(
   });
   if (!tokenRes.ok) return new Response("Google token exchange failed", { status: 502 });
 
-  const tokenData = (await tokenRes.json()) as { access_token?: string; error?: string };
+  const tokenData = (await tokenRes.json()) as {
+    access_token?: string;
+    refresh_token?: string;
+    error?: string;
+  };
   if (!tokenData.access_token) {
     return new Response(`Google auth error: ${tokenData.error ?? "unknown"}`, { status: 502 });
   }
@@ -356,7 +426,7 @@ async function fetchGoogleIdentity(
   const googleUser = (await userRes.json()) as GoogleUserInfo;
   const verifiedEmail = googleUser.email_verified ? googleUser.email.toLowerCase() : null;
 
-  return { providerId: googleUser.sub, verifiedEmail };
+  return { providerId: googleUser.sub, verifiedEmail, refreshToken: tokenData.refresh_token };
 }
 
 // POST /token
@@ -529,3 +599,4 @@ oauthRouter.get("/authorize/:provider{[a-z][a-z0-9]*}", requireOAuth, (c) =>
 );
 oauthRouter.get("/oauth/callback", requireOAuth, (c) => handleCallback(c.req.raw, c.env));
 oauthRouter.post("/token", requireOAuth, (c) => handleToken(c.req.raw, c.env));
+oauthRouter.get("/connect/google-sheets", (c) => handleConnectGoogleSheets(c.req.raw, c.env));
