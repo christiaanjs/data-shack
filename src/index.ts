@@ -695,7 +695,10 @@ app.get("/session/ws", async (c) => {
   const headers = new Headers(c.req.raw.headers);
   headers.set("X-User-ID", userId);
   return stub.fetch(
-    new Request(forwardUrl.toString(), { headers, cf: (c.req.raw as Request & { cf?: unknown }).cf }),
+    new Request(forwardUrl.toString(), {
+      headers,
+      cf: (c.req.raw as Request & { cf?: unknown }).cf,
+    }),
   );
 });
 
