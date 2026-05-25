@@ -669,6 +669,27 @@ describe("transform job dispatch via WebSocket", () => {
     return id;
   }
 
+  it("dispatches job to already-connected browser when Run button triggers it", async () => {
+    // Browser connects first — no pending jobs at this point.
+    const ws = await connectMockBrowser();
+
+    const jobId = await createTransformJob("dispatch_on_trigger");
+    const received = waitForTransformJob(ws, jobId);
+
+    // Simulate clicking Run: sets job pending AND dispatches to connected browser.
+    const triggerRes = await SELF.fetch(`http://localhost/api/transform-jobs/${jobId}/trigger`, {
+      method: "POST",
+      headers: DEV_HEADERS,
+    });
+    expect(triggerRes.status).toBe(204);
+
+    // Should arrive without a page refresh.
+    const msg = await received;
+    expect(msg.outputTable).toBe("dispatch_on_trigger");
+
+    ws.close();
+  });
+
   it("dispatches pending jobs to browser immediately on connect", async () => {
     const jobId = await createTransformJob("dispatch_on_connect");
 
