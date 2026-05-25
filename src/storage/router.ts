@@ -329,7 +329,7 @@ storageRouter.on(["GET", "HEAD", "PUT", "OPTIONS"], "/s3proxy/*", async (c) => {
   if (!backendRow) return new Response("Not Found", { status: 404 });
 
   if (backendRow.type === "google-sheets") {
-    let sheetsCfg: { spreadsheetId: string; sheetName: string; gid: number; credentialId: string };
+    let sheetsCfg: { spreadsheetId: string; sheetName: string; gid?: number; credentialId: string };
     try {
       sheetsCfg = JSON.parse(
         await decryptConfig(backendRow.encrypted_config, c.env.JWT_SECRET),
@@ -368,36 +368,60 @@ storageRouter.on(["GET", "HEAD", "PUT", "OPTIONS"], "/s3proxy/*", async (c) => {
     }
 
     if (method === "PUT") {
-      // DuckDB sends CSV on PUT. Parse and forward to the Sheets API values endpoint.
+      // Accept JSON array or NDJSON (DuckDB COPY TO FORMAT JSON/NDJSON), fall back to CSV.
       const bodyText = await c.req.text();
-      const rows = bodyText
-        .split("\n")
-        .filter((line) => line.trim() !== "")
-        .map((line) => {
-          const cells: string[] = [];
-          let cur = "";
-          let inQuote = false;
-          for (let i = 0; i < line.length; i++) {
-            const ch = line[i]!;
-            if (ch === '"') {
-              if (inQuote && line[i + 1] === '"') {
-                cur += '"';
-                i++;
-              } else {
-                inQuote = !inQuote;
-              }
-            } else if (ch === "," && !inQuote) {
-              cells.push(cur);
-              cur = "";
-            } else {
-              cur += ch;
-            }
-          }
-          cells.push(cur);
-          return cells;
-        });
+      const trimmed = bodyText.trimStart();
+      let rows: string[][];
 
-      const sheetsUrl = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(sheetsCfg.spreadsheetId)}/values/${encodeURIComponent(sheetsCfg.sheetName)}?valueInputOption=USER_ENTERED`;
+      if (trimmed.startsWith("[") || trimmed.startsWith("{")) {
+        // JSON array or NDJSON from DuckDB COPY TO (FORMAT JSON) or (FORMAT NDJSON)
+        const objects: Record<string, unknown>[] = [];
+        if (trimmed.startsWith("[")) {
+          const arr = JSON.parse(bodyText) as Record<string, unknown>[];
+          objects.push(...arr);
+        } else {
+          for (const line of bodyText.split("\n")) {
+            const l = line.trim();
+            if (l) objects.push(JSON.parse(l) as Record<string, unknown>);
+          }
+        }
+        if (objects.length === 0) {
+          rows = [];
+        } else {
+          const hdrs = Object.keys(objects[0]!);
+          rows = [hdrs, ...objects.map((obj) => hdrs.map((h) => String(obj[h] ?? "")))];
+        }
+      } else {
+        // CSV fallback
+        rows = bodyText
+          .split("\n")
+          .filter((line) => line.trim() !== "")
+          .map((line) => {
+            const cells: string[] = [];
+            let cur = "";
+            let inQuote = false;
+            for (let i = 0; i < line.length; i++) {
+              const ch = line[i]!;
+              if (ch === '"') {
+                if (inQuote && line[i + 1] === '"') {
+                  cur += '"';
+                  i++;
+                } else {
+                  inQuote = !inQuote;
+                }
+              } else if (ch === "," && !inQuote) {
+                cells.push(cur);
+                cur = "";
+              } else {
+                cur += ch;
+              }
+            }
+            cells.push(cur);
+            return cells;
+          });
+      }
+
+      const sheetsUrl = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(sheetsCfg.spreadsheetId)}/values/${encodeURIComponent(sheetsCfg.sheetName || "Sheet1")}?valueInputOption=USER_ENTERED`;
       const sheetsRes = await fetch(sheetsUrl, {
         method: "PUT",
         headers: {
@@ -415,22 +439,30 @@ storageRouter.on(["GET", "HEAD", "PUT", "OPTIONS"], "/s3proxy/*", async (c) => {
       return new Response(null, { status: 204, headers: putHeaders });
     }
 
-    // GET / HEAD: stream CSV export directly — zero parsing.
-    const exportUrl = `https://docs.google.com/spreadsheets/d/${encodeURIComponent(sheetsCfg.spreadsheetId)}/export?format=csv&gid=${sheetsCfg.gid}`;
-    const exportRes = await fetch(exportUrl, {
+    // GET / HEAD: use Sheets API values endpoint and return a JSON array of objects.
+    const sheetRange = encodeURIComponent(sheetsCfg.sheetName || "Sheet1");
+    const valuesUrl = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(sheetsCfg.spreadsheetId)}/values/${sheetRange}`;
+    const valuesRes = await fetch(valuesUrl, {
       headers: { Authorization: `Bearer ${accessToken}` },
     });
-    if (!exportRes.ok) {
-      return corsError(502, `Sheets export error: ${exportRes.status}`);
+    if (!valuesRes.ok) {
+      return corsError(502, `Sheets API error: ${valuesRes.status}`);
     }
-    const sheetsHeaders = new Headers({ "Content-Type": "text/csv" });
-    const contentLengthHdr = exportRes.headers.get("Content-Length");
-    if (contentLengthHdr) sheetsHeaders.set("Content-Length", contentLengthHdr);
-    addCorsHeaders(sheetsHeaders);
-    return new Response(method === "HEAD" ? null : exportRes.body, {
-      status: exportRes.status,
-      headers: sheetsHeaders,
+    const valuesData = (await valuesRes.json()) as { values?: string[][] };
+    const allRows = valuesData.values ?? [];
+    const sheetsHeaders = allRows[0] ?? [];
+    const jsonRows = allRows.slice(1).map((row) => {
+      const obj: Record<string, string> = {};
+      for (let i = 0; i < sheetsHeaders.length; i++) {
+        obj[sheetsHeaders[i]!] = row[i] ?? "";
+      }
+      return obj;
     });
+    const jsonBody = JSON.stringify(jsonRows);
+    const getHeaders = new Headers({ "Content-Type": "application/json" });
+    getHeaders.set("Content-Length", String(new TextEncoder().encode(jsonBody).length));
+    addCorsHeaders(getHeaders);
+    return new Response(method === "HEAD" ? null : jsonBody, { headers: getHeaders });
   }
 
   const row = backendRow;
