@@ -317,6 +317,15 @@ app.post("/api/credentials", requireAuth, async (c) => {
   if (typeof body.name !== "string" || typeof body.type !== "string" || !body.config) {
     return c.json({ error: "name, type, and config are required" }, 400);
   }
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(body.name) || body.name.length > 64) {
+    return c.json(
+      {
+        error:
+          "name must be 1–64 characters, start with a letter or digit, and contain only letters, digits, '.', '_', or '-'",
+      },
+      400,
+    );
+  }
   const encryptedConfig = await encryptConfig(JSON.stringify(body.config), c.env.JWT_SECRET);
   const result = await insertCredential(c.env.DB, {
     userId: c.get("userId"),

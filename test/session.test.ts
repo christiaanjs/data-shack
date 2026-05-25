@@ -220,7 +220,7 @@ describe("list_data_sources tool", () => {
       method: "POST",
       headers: { "Content-Type": "application/json", ...DEV_HEADERS },
       body: JSON.stringify({
-        name: "My Sales API",
+        name: "my-sales-api",
         type: "http",
         config: { baseUrl: "https://api.example.com/v1" },
       }),
@@ -228,7 +228,7 @@ describe("list_data_sources tool", () => {
 
     const data = await mcpCall("list_data_sources", {});
     const text = data.result?.content[0]?.text ?? "";
-    expect(text).toContain("My Sales API");
+    expect(text).toContain("my-sales-api");
     expect(text).toContain("https://api.example.com/v1");
   });
 
@@ -237,7 +237,7 @@ describe("list_data_sources tool", () => {
       method: "POST",
       headers: { "Content-Type": "application/json", ...DEV_HEADERS },
       body: JSON.stringify({
-        name: "Another Source",
+        name: "another-source",
         type: "http",
         config: { baseUrl: "https://other.example.com" },
       }),
@@ -247,7 +247,7 @@ describe("list_data_sources tool", () => {
     const data = await mcpCall("list_data_sources", {});
     const text = data.result?.content[0]?.text ?? "";
     expect(text).toContain(id);
-    expect(text).toContain("Another Source");
+    expect(text).toContain("another-source");
   });
 });
 

@@ -240,10 +240,17 @@ function AddForm({
           <input
             type="text"
             required
+            pattern="[a-zA-Z0-9][a-zA-Z0-9._\-]*"
+            maxLength={64}
             class="input input-bordered input-sm w-full"
             value={name}
             onInput={(e) => setName((e.target as HTMLInputElement).value)}
+            title="Must start with a letter or digit; only letters, digits, '.', '_', '-' allowed"
           />
+          <span class="fieldset-label text-base-content/50">
+            Letters, digits, <code>.</code> <code>_</code> <code>-</code> only — used in{" "}
+            <code>http-ds://name/…</code> URIs
+          </span>
         </fieldset>
         <fieldset class="fieldset">
           <legend class="fieldset-legend">Type</legend>

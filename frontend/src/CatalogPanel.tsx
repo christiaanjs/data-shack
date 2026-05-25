@@ -357,7 +357,7 @@ export function CatalogPanel({ workerBase, getAuthHeaders }: CatalogPanelProps) 
               />
               <datalist id="uri-credential-datalist">
                 {credentials.map((c) => (
-                  <option key={c.id} value={`http-ds://${c.id}/`} label={c.name} />
+                  <option key={c.id} value={`http-ds://${c.name}/`} />
                 ))}
               </datalist>
             </fieldset>
