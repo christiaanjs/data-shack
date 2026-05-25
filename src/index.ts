@@ -763,10 +763,22 @@ app.patch("/api/transform-jobs/:id", requireAuth, async (c) => {
 
 app.post("/api/transform-jobs/:id/trigger", requireAuth, async (c) => {
   const id = c.req.param("id");
-  const res = await catalogStub(c.env, c.get("userId")).fetch(
+  const userId = c.get("userId");
+  const res = await catalogStub(c.env, userId).fetch(
     `http://do/jobs/${encodeURIComponent(id)}/trigger`,
     { method: "POST" },
   );
+  if (res.ok) {
+    c.executionCtx.waitUntil(
+      sessionStub(c.env, userId)
+        .fetch("http://do/dispatch-jobs", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ userId }),
+        })
+        .catch(() => {}),
+    );
+  }
   return new Response(res.body, { status: res.status });
 });
 
