@@ -6,7 +6,7 @@ Each stage produces something functional and testable independently. Stages 1–
 
 | Stage | Description | Status |
 |---|---|---|
-| Auth (from Stage 2) | OAuth 2.0 + JWT worker, D1 schema | ✅ Done |
+| Auth (from Stage 2) | OAuth 2.0 + JWT worker, D1 schema, email allowlist for signup | ✅ Done |
 | Stage 1 | Skeleton with one working data path | ✅ Done |
 | Stage 2 (remainder) | Credential storage, storage backends, settings UI | ✅ Done |
 | HTTP data source | `http` credential type + `http-ds://` URI scheme + test UI | ✅ Done |
@@ -61,7 +61,8 @@ Implemented as a standalone Cloudflare Worker with D1, ahead of Stage 1, to esta
 - D1 schema: `users`, `oauth_identities`, `oauth_states`, `oauth_clients`, `oauth_codes`, `oauth_refresh_tokens`
 - HMAC-HS256 JWTs (1 h access tokens), rotating refresh tokens (30 d), stored as SHA-256 hashes
 - Bearer JWT middleware on all protected routes
-- 43 vitest tests via `@cloudflare/vitest-pool-workers`
+- 45 vitest tests via `@cloudflare/vitest-pool-workers`
+- `allowed_emails` D1 table (migration 0007): seeded with `christiaan.j.s@gmail.com`; new OAuth signups are rejected with 403 unless the verified email is in this table; existing users are unaffected. Add rows directly via D1 to grant access to additional emails.
 
 ### Remaining
 
