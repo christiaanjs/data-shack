@@ -454,19 +454,64 @@ describe("read_data tool", () => {
   });
 });
 
+// ── Shared WebSocket helpers ──────────────────────────────────────────────────
+
+async function connectMockBrowser(): Promise<WebSocket> {
+  const wsRes = await SELF.fetch("http://localhost/session/ws", {
+    headers: { Upgrade: "websocket", ...DEV_HEADERS },
+  });
+  expect(wsRes.status).toBe(101);
+  const ws = wsRes.webSocket!;
+  ws.accept();
+  return ws;
+}
+
+function waitForWsMessage<T>(ws: WebSocket, type: string, timeoutMs = 3000): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`Timed out after ${timeoutMs}ms waiting for "${type}" WS message`)),
+      timeoutMs,
+    );
+    ws.addEventListener("message", (event) => {
+      const msg = JSON.parse(event.data as string) as { type: string };
+      if (msg.type === type) {
+        clearTimeout(timer);
+        resolve(msg as unknown as T);
+      }
+    });
+  });
+}
+
+function waitForTransformJob(
+  ws: WebSocket,
+  jobId: string,
+  timeoutMs = 3000,
+): Promise<{ type: "transform_job"; jobId: string; outputTable: string; outputBackend: string }> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`Timed out after ${timeoutMs}ms waiting for transform_job ${jobId}`)),
+      timeoutMs,
+    );
+    ws.addEventListener("message", (event) => {
+      const msg = JSON.parse(event.data as string) as { type: string; jobId?: string };
+      if (msg.type === "transform_job" && msg.jobId === jobId) {
+        clearTimeout(timer);
+        resolve(
+          msg as {
+            type: "transform_job";
+            jobId: string;
+            outputTable: string;
+            outputBackend: string;
+          },
+        );
+      }
+    });
+  });
+}
+
 // ── run_query with mock browser session ───────────────────────────────────────
 
 describe("run_query with mock browser session", () => {
-  async function connectMockBrowser(): Promise<WebSocket> {
-    const wsRes = await SELF.fetch("http://localhost/session/ws", {
-      headers: { Upgrade: "websocket", ...DEV_HEADERS },
-    });
-    expect(wsRes.status).toBe(101);
-    const ws = wsRes.webSocket!;
-    ws.accept();
-    return ws;
-  }
-
   function mockQueryResponder(ws: WebSocket, columns: string[], rows: unknown[][]): Promise<void> {
     return new Promise((resolve) => {
       ws.addEventListener("message", (event) => {
@@ -590,5 +635,212 @@ describe("run_query with mock browser session", () => {
     expect(sessionCount).toBeGreaterThanOrEqual(1);
 
     ws.close();
+  });
+});
+
+// ── Transform job dispatch ────────────────────────────────────────────────────
+
+describe("transform job dispatch via WebSocket", () => {
+  interface TransformJobMsg {
+    type: "transform_job";
+    jobId: string;
+    sql: string;
+    outputTable: string;
+    outputUri: string;
+    outputBackend: string;
+    format?: string | null;
+  }
+
+  async function createTransformJob(name: string): Promise<string> {
+    const res = await SELF.fetch("http://localhost/api/transform-jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({
+        name,
+        sql: `COPY (SELECT 1 AS n) TO 'r2://data-shack/${name}.parquet'`,
+        output_table: name,
+        output_uri: `r2://data-shack/${name}.parquet`,
+        output_backend: "data-shack",
+        format: "parquet",
+      }),
+    });
+    expect(res.status).toBe(201);
+    const { id } = (await res.json()) as { id: string };
+    return id;
+  }
+
+  it("dispatches pending jobs to browser immediately on connect", async () => {
+    const jobId = await createTransformJob("dispatch_on_connect");
+
+    // Set job to pending before browser connects.
+    const triggerRes = await SELF.fetch(`http://localhost/api/transform-jobs/${jobId}/trigger`, {
+      method: "POST",
+      headers: DEV_HEADERS,
+    });
+    expect(triggerRes.status).toBe(204);
+
+    // Connect browser — Session DO calls dispatchPendingJobs in waitUntil.
+    const ws = await connectMockBrowser();
+    const msg = await waitForTransformJob(ws, jobId);
+
+    expect(msg.outputTable).toBe("dispatch_on_connect");
+    expect(msg.outputBackend).toBe("data-shack");
+
+    ws.close();
+  });
+
+  it("dispatches triggered jobs to already-connected browser after catalog commit", async () => {
+    const jobId = await createTransformJob("dispatch_on_commit");
+
+    // Create a trigger watching "dispatch_source" table.
+    const trigRes = await SELF.fetch("http://localhost/api/triggers", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({ watches: "dispatch_source", job_id: jobId }),
+    });
+    expect(trigRes.status).toBe(201);
+
+    // Connect browser first (no pending jobs yet for this job).
+    const ws = await connectMockBrowser();
+    const received = waitForTransformJob(ws, jobId);
+
+    // Commit to watched table — Worker relays triggeredJobIds to Session DO.
+    const commitRes = await SELF.fetch("http://localhost/catalog/commit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({
+        table: "dispatch_source",
+        uri: "r2://data-shack/dispatch_source/data.parquet",
+        storageBackend: "data-shack",
+        format: "parquet",
+      }),
+    });
+    expect(commitRes.status).toBe(201);
+    const commitData = (await commitRes.json()) as { triggeredJobIds: string[] };
+    expect(commitData.triggeredJobIds).toContain(jobId);
+
+    const msg = await received;
+    expect(msg.outputTable).toBe("dispatch_on_commit");
+
+    ws.close();
+  });
+
+  it("job_claimed transitions job to running status", async () => {
+    const jobId = await createTransformJob("lifecycle_claim");
+
+    await SELF.fetch(`http://localhost/api/transform-jobs/${jobId}/trigger`, {
+      method: "POST",
+      headers: DEV_HEADERS,
+    });
+
+    const ws = await connectMockBrowser();
+    await waitForTransformJob(ws, jobId);
+
+    // Browser claims the job.
+    ws.send(JSON.stringify({ type: "job_claimed", jobId }));
+
+    // Give the DO time to update catalog status.
+    await new Promise((r) => setTimeout(r, 100));
+
+    const jobsRes = await SELF.fetch("http://localhost/api/transform-jobs", {
+      headers: DEV_HEADERS,
+    });
+    const { jobs } = (await jobsRes.json()) as { jobs: Array<{ id: string; status: string }> };
+    const job = jobs.find((j) => j.id === jobId);
+    expect(job?.status).toBe("running");
+
+    ws.close();
+  });
+
+  it("job_complete marks job done and commits output to catalog", async () => {
+    const jobId = await createTransformJob("lifecycle_complete");
+
+    await SELF.fetch(`http://localhost/api/transform-jobs/${jobId}/trigger`, {
+      method: "POST",
+      headers: DEV_HEADERS,
+    });
+
+    const ws = await connectMockBrowser();
+    await waitForTransformJob(ws, jobId);
+
+    ws.send(JSON.stringify({ type: "job_claimed", jobId }));
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Browser completes the job.
+    ws.send(JSON.stringify({ type: "job_complete", jobId }));
+    await new Promise((r) => setTimeout(r, 200));
+
+    const jobsRes = await SELF.fetch("http://localhost/api/transform-jobs", {
+      headers: DEV_HEADERS,
+    });
+    const { jobs } = (await jobsRes.json()) as { jobs: Array<{ id: string; status: string }> };
+    const job = jobs.find((j) => j.id === jobId);
+    expect(job?.status).toBe("done");
+
+    // Session DO also commits the output URI to the catalog.
+    const tablesRes = await SELF.fetch("http://localhost/catalog/tables", {
+      headers: DEV_HEADERS,
+    });
+    const { tables } = (await tablesRes.json()) as { tables: Array<{ name: string }> };
+    expect(tables.some((t) => t.name === "lifecycle_complete")).toBe(true);
+
+    ws.close();
+  });
+
+  it("job_error marks job failed and stores error message", async () => {
+    const jobId = await createTransformJob("lifecycle_error");
+
+    await SELF.fetch(`http://localhost/api/transform-jobs/${jobId}/trigger`, {
+      method: "POST",
+      headers: DEV_HEADERS,
+    });
+
+    const ws = await connectMockBrowser();
+    await waitForTransformJob(ws, jobId);
+
+    ws.send(JSON.stringify({ type: "job_claimed", jobId }));
+    await new Promise((r) => setTimeout(r, 50));
+
+    ws.send(JSON.stringify({ type: "job_error", jobId, error: "DuckDB out of memory" }));
+    await new Promise((r) => setTimeout(r, 200));
+
+    const jobsRes = await SELF.fetch("http://localhost/api/transform-jobs", {
+      headers: DEV_HEADERS,
+    });
+    const { jobs } = (await jobsRes.json()) as {
+      jobs: Array<{ id: string; status: string; error: string | null }>;
+    };
+    const job = jobs.find((j) => j.id === jobId);
+    expect(job?.status).toBe("failed");
+    expect(job?.error).toBe("DuckDB out of memory");
+
+    ws.close();
+  });
+
+  it("socket close resets running jobs back to pending", async () => {
+    const jobId = await createTransformJob("lifecycle_reset");
+
+    await SELF.fetch(`http://localhost/api/transform-jobs/${jobId}/trigger`, {
+      method: "POST",
+      headers: DEV_HEADERS,
+    });
+
+    const ws = await connectMockBrowser();
+    await waitForTransformJob(ws, jobId);
+
+    // Claim the job to put it in running state.
+    ws.send(JSON.stringify({ type: "job_claimed", jobId }));
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Close socket while job is still running.
+    ws.close();
+    await new Promise((r) => setTimeout(r, 200));
+
+    const jobsRes = await SELF.fetch("http://localhost/api/transform-jobs", {
+      headers: DEV_HEADERS,
+    });
+    const { jobs } = (await jobsRes.json()) as { jobs: Array<{ id: string; status: string }> };
+    const job = jobs.find((j) => j.id === jobId);
+    expect(job?.status).toBe("pending");
   });
 });
