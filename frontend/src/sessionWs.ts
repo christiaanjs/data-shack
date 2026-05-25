@@ -3,9 +3,15 @@ import { registerCatalogViews } from "./catalogViews.ts";
 import { runQuery } from "./duckdb.ts";
 import { resolveStorageUris } from "./resolveQuery.ts";
 
+export type JobEvent =
+  | { jobId: string; status: "running" }
+  | { jobId: string; status: "done" }
+  | { jobId: string; status: "failed"; error: string };
+
 export interface SessionConnection {
   close(): void;
   isConnected(): boolean;
+  setJobEventListener(listener: ((ev: JobEvent) => void) | null): void;
 }
 
 type ServerMessage =
@@ -31,6 +37,7 @@ export function connectSession(config: {
   let ws: WebSocket | null = null;
   let closed = false;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let jobEventListener: ((ev: JobEvent) => void) | null = null;
 
   // Prevent Chrome/Edge from throttling JS in background tabs.
   if (typeof navigator !== "undefined" && "locks" in navigator) {
@@ -87,7 +94,9 @@ export function connectSession(config: {
       if (msg.type === "query") {
         await handleQuery(socket, msg, workerBase, getAuthHeaders, getDb);
       } else if (msg.type === "transform_job") {
-        await handleTransformJob(socket, msg, workerBase, getAuthHeaders, getDb);
+        await handleTransformJob(socket, msg, workerBase, getAuthHeaders, getDb, (ev) =>
+          jobEventListener?.(ev),
+        );
       }
     };
 
@@ -134,6 +143,9 @@ export function connectSession(config: {
     },
     isConnected() {
       return ws?.readyState === WebSocket.OPEN;
+    },
+    setJobEventListener(listener) {
+      jobEventListener = listener;
     },
   };
 }
@@ -188,9 +200,11 @@ async function handleTransformJob(
   workerBase: string,
   getAuthHeaders: () => Promise<Record<string, string>>,
   getDb: () => Promise<AsyncDuckDB>,
+  emitJobEvent: (ev: JobEvent) => void,
 ) {
   // Claim the job immediately so the Session DO tracks it as in-flight.
   ws.send(JSON.stringify({ type: "job_claimed", jobId: msg.jobId }));
+  emitJobEvent({ jobId: msg.jobId, status: "running" });
 
   try {
     const db = await getDb();
@@ -199,13 +213,10 @@ async function handleTransformJob(
     const { sql, preamble } = await resolveStorageUris(msg.sql, workerBase, getAuthHeaders);
     await runQuery(db, sql, preamble.length > 0 ? preamble : undefined);
     ws.send(JSON.stringify({ type: "job_complete", jobId: msg.jobId }));
+    emitJobEvent({ jobId: msg.jobId, status: "done" });
   } catch (err) {
-    ws.send(
-      JSON.stringify({
-        type: "job_error",
-        jobId: msg.jobId,
-        error: err instanceof Error ? err.message : String(err),
-      }),
-    );
+    const error = err instanceof Error ? err.message : String(err);
+    ws.send(JSON.stringify({ type: "job_error", jobId: msg.jobId, error }));
+    emitJobEvent({ jobId: msg.jobId, status: "failed", error });
   }
 }

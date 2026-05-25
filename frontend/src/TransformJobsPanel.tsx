@@ -1,9 +1,11 @@
 import { Fragment } from "preact";
 import { useCallback, useEffect, useState } from "preact/hooks";
+import type { JobEvent } from "./sessionWs.ts";
 
 interface TransformJobsPanelProps {
   workerBase: string;
   getAuthHeaders: () => Promise<Record<string, string>>;
+  setJobListener?: (listener: ((ev: JobEvent) => void) | null) => void;
 }
 
 interface TransformJob {
@@ -54,7 +56,11 @@ function statusBadgeClass(status: string): string {
   }
 }
 
-export function TransformJobsPanel({ workerBase, getAuthHeaders }: TransformJobsPanelProps) {
+export function TransformJobsPanel({
+  workerBase,
+  getAuthHeaders,
+  setJobListener,
+}: TransformJobsPanelProps) {
   const [jobs, setJobs] = useState<TransformJob[]>([]);
   const [triggers, setTriggers] = useState<Trigger[]>([]);
   const [backends, setBackends] = useState<StorageBackend[]>([]);
@@ -105,6 +111,22 @@ export function TransformJobsPanel({ workerBase, getAuthHeaders }: TransformJobs
   useEffect(() => {
     fetchAll().catch(() => {});
   }, [fetchAll]);
+
+  useEffect(() => {
+    if (!setJobListener) return;
+    setJobListener((ev) => {
+      setJobs((prev) =>
+        prev.map((j) => {
+          if (j.id !== ev.jobId) return j;
+          const now = Date.now();
+          if (ev.status === "running") return { ...j, status: "running", updated_at: now };
+          if (ev.status === "done") return { ...j, status: "done", error: null, updated_at: now };
+          return { ...j, status: "failed", error: ev.error, updated_at: now };
+        }),
+      );
+    });
+    return () => setJobListener(null);
+  }, [setJobListener]);
 
   function openCreate() {
     setFormMode("create");

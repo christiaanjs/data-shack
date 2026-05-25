@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "preact/hooks";
+import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import { CatalogPanel } from "./CatalogPanel.tsx";
 import { LoadJobsPanel } from "./LoadJobsPanel.tsx";
 import { QueryPanel } from "./QueryPanel.tsx";
@@ -6,7 +6,7 @@ import { SettingsPanel } from "./SettingsPanel.tsx";
 import { TransformJobsPanel } from "./TransformJobsPanel.tsx";
 import { clearTokens, getAccessToken, getValidToken, handleCallback, startLogin } from "./auth.ts";
 import { initDuckDB } from "./duckdb.ts";
-import { type SessionConnection, connectSession } from "./sessionWs.ts";
+import { type JobEvent, type SessionConnection, connectSession } from "./sessionWs.ts";
 
 const WORKER_BASE = import.meta.env.VITE_WORKER_URL ?? "";
 const DEV_TOKEN = import.meta.env.VITE_DEV_TOKEN as string | undefined;
@@ -27,6 +27,10 @@ export function App() {
   const [activeTab, setActiveTab] = useState<Tab>("query");
   const [sessionConnected, setSessionConnected] = useState(false);
   const sessionRef = useRef<SessionConnection | null>(null);
+  const jobEventListenerRef = useRef<((ev: JobEvent) => void) | null>(null);
+  const setJobListener = useCallback((listener: ((ev: JobEvent) => void) | null) => {
+    jobEventListenerRef.current = listener;
+  }, []);
 
   useEffect(() => {
     if (DEV_TOKEN) {
@@ -90,6 +94,7 @@ export function App() {
       getDb: initDuckDB,
       onStatusChange: setSessionConnected,
     });
+    conn.setJobEventListener((ev) => jobEventListenerRef.current?.(ev));
     sessionRef.current = conn;
 
     return () => {
@@ -210,7 +215,11 @@ export function App() {
           <LoadJobsPanel workerBase={WORKER_BASE} getAuthHeaders={getAuthHeaders} />
         )}
         {activeTab === "transforms" && (
-          <TransformJobsPanel workerBase={WORKER_BASE} getAuthHeaders={getAuthHeaders} />
+          <TransformJobsPanel
+            workerBase={WORKER_BASE}
+            getAuthHeaders={getAuthHeaders}
+            setJobListener={setJobListener}
+          />
         )}
         {activeTab === "settings" && (
           <SettingsPanel workerBase={WORKER_BASE} getAuthHeaders={getAuthHeaders} />
