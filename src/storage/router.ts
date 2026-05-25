@@ -367,6 +367,10 @@ storageRouter.on(["GET", "HEAD", "PUT", "OPTIONS"], "/s3proxy/*", async (c) => {
       return corsError(502, "Failed to refresh Google access token");
     }
 
+    // S3 key → sheet name: strip extension, fall back to configured sheetName.
+    const keyBase = key.includes(".") ? key.slice(0, key.lastIndexOf(".")) : key;
+    const sheetName = keyBase || sheetsCfg.sheetName || "Sheet1";
+
     if (method === "PUT") {
       // Accept JSON array or NDJSON (DuckDB COPY TO FORMAT JSON/NDJSON), fall back to CSV.
       const bodyText = await c.req.text();
@@ -421,7 +425,7 @@ storageRouter.on(["GET", "HEAD", "PUT", "OPTIONS"], "/s3proxy/*", async (c) => {
           });
       }
 
-      const sheetsUrl = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(sheetsCfg.spreadsheetId)}/values/${encodeURIComponent(sheetsCfg.sheetName || "Sheet1")}?valueInputOption=USER_ENTERED`;
+      const sheetsUrl = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(sheetsCfg.spreadsheetId)}/values/${encodeURIComponent(sheetName)}?valueInputOption=USER_ENTERED`;
       const sheetsRes = await fetch(sheetsUrl, {
         method: "PUT",
         headers: {
@@ -440,8 +444,7 @@ storageRouter.on(["GET", "HEAD", "PUT", "OPTIONS"], "/s3proxy/*", async (c) => {
     }
 
     // GET / HEAD: use Sheets API values endpoint and return a JSON array of objects.
-    const sheetRange = encodeURIComponent(sheetsCfg.sheetName || "Sheet1");
-    const valuesUrl = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(sheetsCfg.spreadsheetId)}/values/${sheetRange}`;
+    const valuesUrl = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(sheetsCfg.spreadsheetId)}/values/${encodeURIComponent(sheetName)}`;
     const valuesRes = await fetch(valuesUrl, {
       headers: { Authorization: `Bearer ${accessToken}` },
     });
