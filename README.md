@@ -7,7 +7,8 @@ A personal data integration platform built on Cloudflare that brings your data t
 | Component | Status |
 |---|---|
 | OAuth 2.0 worker (Google, PKCE, DCR, JWT, refresh rotation) | ✅ Done |
-| D1 schema: users, oauth tables, credentials, storage_backends | ✅ Done |
+| Email allowlist: `allowed_emails` table gates new signups; existing users unaffected | ✅ Done |
+| D1 schema: users, oauth tables, credentials, storage_backends, allowed_emails | ✅ Done |
 | Credential + storage backend vault (AES-GCM encrypted in D1) | ✅ Done |
 | S3-compatible storage proxy: KV-backed proxy credentials, GET/HEAD/PUT/LIST/OPTIONS with CORS and ETags | ✅ Done |
 | Partitioned writes and hive-partitioned reads: DuckDB `COPY TO … PARTITION_BY` and `read_parquet('…/**/*.parquet', hive_partitioning=true)` | ✅ Done |

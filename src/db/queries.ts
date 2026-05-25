@@ -51,6 +51,14 @@ export async function linkIdentity(
     .run();
 }
 
+export async function isEmailAllowed(db: D1Database, email: string): Promise<boolean> {
+  const row = await db
+    .prepare("SELECT 1 FROM allowed_emails WHERE email = ?")
+    .bind(email.toLowerCase())
+    .first();
+  return row !== null;
+}
+
 export async function createUserWithIdentity(
   db: D1Database,
   provider: string,
