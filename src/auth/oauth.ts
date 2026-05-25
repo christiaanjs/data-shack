@@ -295,6 +295,20 @@ async function resolveUserId(
   return createUserWithIdentity(db, provider, providerId, verifiedEmail);
 }
 
+function popupResultHtml(
+  type: "success" | "error",
+  frontendOrigin: string,
+  opts: { reason?: string; credentialName?: string } = {},
+): Response {
+  const msg = JSON.stringify({ type: `gscred-${type}`, ...opts });
+  const body = type === "success" ? "Connected! Closing…" : `Failed: ${opts.reason ?? "unknown"}`;
+  const html = `<!DOCTYPE html><html><head><title>${type === "success" ? "Connected" : "Failed"}</title></head>
+<body><p>${body}</p>
+<script>try{window.opener.postMessage(${msg},"${frontendOrigin}")}catch(e){}window.close()</script>
+</body></html>`;
+  return new Response(html, { headers: { "Content-Type": "text/html" } });
+}
+
 // GET /oauth/callback
 export async function handleCallback(request: Request, env: Env): Promise<Response> {
   const params = new URL(request.url).searchParams;
@@ -324,10 +338,7 @@ export async function handleCallback(request: Request, env: Env): Promise<Respon
   } catch (err) {
     if (err instanceof ForbiddenError) {
       if (pending.provider === "google-sheets") {
-        return Response.redirect(
-          `${frontendOrigin}/settings?gscred=error&reason=access_denied`,
-          302,
-        );
+        return popupResultHtml("error", frontendOrigin, { reason: "access_denied" });
       }
       return new Response("Access denied: email not permitted to sign up", { status: 403 });
     }
@@ -337,10 +348,7 @@ export async function handleCallback(request: Request, env: Env): Promise<Respon
 
   if (pending.provider === "google-sheets") {
     if (!result.refreshToken) {
-      return Response.redirect(
-        `${frontendOrigin}/settings?gscred=error&reason=no_refresh_token`,
-        302,
-      );
+      return popupResultHtml("error", frontendOrigin, { reason: "no_refresh_token" });
     }
     const encryptedCfg = await encryptConfig(
       JSON.stringify({ refreshToken: result.refreshToken }),
@@ -352,7 +360,9 @@ export async function handleCallback(request: Request, env: Env): Promise<Respon
       type: "google-sheets",
       encryptedConfig: encryptedCfg,
     });
-    return Response.redirect(`${frontendOrigin}/settings?gscred=success`, 302);
+    return popupResultHtml("success", frontendOrigin, {
+      credentialName: pending.credential_name ?? undefined,
+    });
   }
 
   const authCode = crypto.randomUUID() + crypto.randomUUID().replace(/-/g, "");

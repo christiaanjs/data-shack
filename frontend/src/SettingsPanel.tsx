@@ -552,19 +552,7 @@ export function SettingsPanel({ workerBase, getAuthHeaders }: SettingsPanelProps
   const [loadError, setLoadError] = useState<string | null>(null);
   const [testTarget, setTestTarget] = useState<{ id: string; name: string } | null>(null);
   const [editTarget, setEditTarget] = useState<StorageBackendRow | null>(null);
-  const [gsNotice, setGsNotice] = useState<{ type: "success" | "error"; msg: string } | null>(
-    () => {
-      const params = new URLSearchParams(window.location.search);
-      const status = params.get("gscred");
-      if (status === "success") return { type: "success", msg: "Google Sheets connected." };
-      if (status === "error")
-        return {
-          type: "error",
-          msg: `Google Sheets auth failed: ${params.get("reason") ?? "unknown"}`,
-        };
-      return null;
-    },
-  );
+  const [gsNotice, setGsNotice] = useState<{ type: "success" | "error"; msg: string } | null>(null);
 
   const fetchAll = useCallback(async () => {
     try {
@@ -644,7 +632,27 @@ export function SettingsPanel({ workerBase, getAuthHeaders }: SettingsPanelProps
   function connectGoogleSheets() {
     const name = window.prompt("Name for this Google Sheets credential:", "Google Sheets");
     if (!name) return;
-    window.location.href = `${workerBase}/connect/google-sheets?name=${encodeURIComponent(name)}`;
+    const workerOrigin = new URL(workerBase).origin;
+    window.open(
+      `${workerBase}/connect/google-sheets?name=${encodeURIComponent(name)}`,
+      "_blank",
+      "popup,width=600,height=700",
+    );
+    function handleMessage(e: MessageEvent) {
+      if (e.origin !== workerOrigin) return;
+      window.removeEventListener("message", handleMessage);
+      if (e.data?.type === "gscred-success") {
+        const credName = e.data.credentialName ? ` "${e.data.credentialName}"` : "";
+        setGsNotice({ type: "success", msg: `Google Sheets${credName} connected.` });
+        fetchAll().catch(() => {});
+      } else if (e.data?.type === "gscred-error") {
+        setGsNotice({
+          type: "error",
+          msg: `Google Sheets auth failed: ${e.data.reason ?? "unknown"}`,
+        });
+      }
+    }
+    window.addEventListener("message", handleMessage);
   }
 
   return (
