@@ -98,6 +98,8 @@ function makeJob(credId: string, backendId: string, tableName: string, tablePath
     updated_at: Date.now(),
     date_range_config: null,
     pagination_config: null,
+    source_type: "http",
+    source_config: null,
   };
 }
 

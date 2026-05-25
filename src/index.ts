@@ -34,6 +34,7 @@ import {
 } from "./db/settings.ts";
 import { decryptHttpConfig, resolveHeaderTemplates } from "./http-config.ts";
 import { validateDateRangeConfig, validatePaginationConfig } from "./loaders/config-types.ts";
+import { runGoogleSheetsLoadJob } from "./loaders/google-sheets.ts";
 import { runHttpLoadJob } from "./loaders/http.ts";
 import { mcpHandler } from "./mcp/server.ts";
 import { parseHttpDsUri, signDataSourceToken, verifyDataSourceToken } from "./storage/resolve.ts";
@@ -342,6 +343,94 @@ app.delete("/api/credentials/:id", requireAuth, async (c) => {
   return new Response(null, { status: 204 });
 });
 
+// ── Google Sheets OAuth credential flow ──────────────────────────────────
+
+app.get("/api/credentials/google-sheets/auth", requireAuth, async (c) => {
+  if (!c.env.GOOGLE_CLIENT_ID || !c.env.GOOGLE_CLIENT_SECRET) {
+    return c.json({ error: "Google OAuth not configured" }, 500);
+  }
+  const userId = c.get("userId");
+  const name = c.req.query("name") ?? "Google Sheets";
+
+  const state = crypto.randomUUID();
+  await c.env.PROXY_CREDS_KV.put(`gscred_${state}`, JSON.stringify({ userId, name }), {
+    expirationTtl: 600,
+  });
+
+  const issuer = new URL(c.req.url).origin;
+  const url = new URL("https://accounts.google.com/o/oauth2/v2/auth");
+  url.searchParams.set("client_id", c.env.GOOGLE_CLIENT_ID);
+  url.searchParams.set("redirect_uri", `${issuer}/api/credentials/google-sheets/callback`);
+  url.searchParams.set("response_type", "code");
+  url.searchParams.set("scope", "https://www.googleapis.com/auth/spreadsheets");
+  url.searchParams.set("access_type", "offline");
+  url.searchParams.set("prompt", "consent");
+  url.searchParams.set("state", state);
+  // Return URL as JSON so the frontend can do window.location.href (can't carry auth headers in a redirect).
+  return c.json({ url: url.toString() });
+});
+
+app.get("/api/credentials/google-sheets/callback", async (c) => {
+  const code = c.req.query("code");
+  const state = c.req.query("state");
+  const error = c.req.query("error");
+
+  const issuer = new URL(c.req.url).origin;
+  const frontendOrigin = c.env.ALLOWED_ORIGIN || issuer;
+
+  if (error || !code || !state) {
+    return Response.redirect(
+      `${frontendOrigin}/settings?gscred=error&reason=${encodeURIComponent(error ?? "missing_code")}`,
+      302,
+    );
+  }
+
+  const pendingJson = await c.env.PROXY_CREDS_KV.get(`gscred_${state}`);
+  if (!pendingJson) {
+    return Response.redirect(`${frontendOrigin}/settings?gscred=error&reason=invalid_state`, 302);
+  }
+  await c.env.PROXY_CREDS_KV.delete(`gscred_${state}`);
+  const pending = JSON.parse(pendingJson) as { userId: string; name: string };
+
+  const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      code,
+      client_id: c.env.GOOGLE_CLIENT_ID,
+      client_secret: c.env.GOOGLE_CLIENT_SECRET,
+      redirect_uri: `${issuer}/api/credentials/google-sheets/callback`,
+      grant_type: "authorization_code",
+    }),
+  });
+  if (!tokenRes.ok) {
+    return Response.redirect(
+      `${frontendOrigin}/settings?gscred=error&reason=token_exchange_failed`,
+      302,
+    );
+  }
+  const tokens = (await tokenRes.json()) as { refresh_token?: string };
+  if (!tokens.refresh_token) {
+    return Response.redirect(
+      `${frontendOrigin}/settings?gscred=error&reason=no_refresh_token`,
+      302,
+    );
+  }
+
+  const encryptedConfig = await encryptConfig(
+    JSON.stringify({ refreshToken: tokens.refresh_token }),
+    c.env.JWT_SECRET,
+  );
+  await insertCredential(c.env.DB, {
+    userId: pending.userId,
+    name: pending.name,
+    type: "google-sheets",
+    encryptedConfig,
+  });
+
+  return Response.redirect(`${frontendOrigin}/settings?gscred=success`, 302);
+});
+
 // ── Storage backends endpoints ────────────────────────────────────────────
 
 app.get("/api/storage-backends", requireAuth, async (c) => {
@@ -580,6 +669,11 @@ app.post("/api/load-jobs", requireAuth, async (c) => {
       cron_schedule: typeof body.cron_schedule === "string" ? body.cron_schedule : undefined,
       date_range_config: dateRangeConfig,
       pagination_config: paginationConfig,
+      source_type: typeof body.source_type === "string" ? body.source_type : undefined,
+      source_config:
+        body.source_config !== undefined && body.source_config !== null
+          ? JSON.stringify(body.source_config)
+          : undefined,
     });
   } catch (err) {
     if (err instanceof Error && err.message.startsWith("Invalid cron_schedule")) {
@@ -647,6 +741,11 @@ app.patch("/api/load-jobs/:id", requireAuth, async (c) => {
       cron_schedule: typeof body.cron_schedule === "string" ? body.cron_schedule : "0 * * * *",
       date_range_config: patchDateRangeConfig,
       pagination_config: patchPaginationConfig,
+      source_type: typeof body.source_type === "string" ? body.source_type : undefined,
+      source_config:
+        body.source_config !== undefined && body.source_config !== null
+          ? JSON.stringify(body.source_config)
+          : null,
     });
   } catch (err) {
     if (err instanceof Error && err.message.startsWith("Invalid cron_schedule")) {
@@ -855,7 +954,11 @@ export default {
         }
         let triggeredJobIds: string[] = [];
         try {
-          ({ triggeredJobIds } = await runHttpLoadJob(job, env));
+          if (job.source_type === "google-sheets") {
+            ({ triggeredJobIds } = await runGoogleSheetsLoadJob(job, env));
+          } else {
+            ({ triggeredJobIds } = await runHttpLoadJob(job, env));
+          }
         } catch (err) {
           const lastError = String(err);
           console.error(`Load job ${job.id} (${job.name}) failed:`, err);

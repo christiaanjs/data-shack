@@ -4,6 +4,15 @@ function genId(prefix: string): string {
   return `${prefix}_${crypto.randomUUID().replace(/-/g, "")}`;
 }
 
+function parseWatches(raw: string): string[] {
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as string[]) : [raw];
+  } catch {
+    return [raw];
+  }
+}
+
 // Safe SQL identifier: must start with a letter or underscore, then alphanumeric/underscore only.
 const SAFE_TABLE_NAME = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
 
@@ -28,6 +37,7 @@ export interface TransformJob {
   requires_browser: number;
   created_at: number;
   updated_at: number;
+  last_completed_at: number | null;
   error: string | null;
 }
 
@@ -94,6 +104,25 @@ export class CatalogDO implements DurableObject {
     // Add deleted_at for soft-delete support.
     try {
       ctx.storage.sql.exec("ALTER TABLE tables ADD COLUMN deleted_at INTEGER");
+    } catch {
+      // Column already exists — nothing to do.
+    }
+
+    // Migrate watches to JSON array format (e.g. "transactions" → '["transactions"]').
+    ctx.storage.sql.exec(
+      "UPDATE triggers SET watches = json_array(watches) WHERE watches NOT LIKE '[%'",
+    );
+
+    // Add policy column (multi-table trigger coordination).
+    try {
+      ctx.storage.sql.exec("ALTER TABLE triggers ADD COLUMN policy TEXT NOT NULL DEFAULT 'any'");
+    } catch {
+      // Column already exists — nothing to do.
+    }
+
+    // Add last_completed_at for 'all' policy freshness tracking.
+    try {
+      ctx.storage.sql.exec("ALTER TABLE transform_jobs ADD COLUMN last_completed_at INTEGER");
     } catch {
       // Column already exists — nothing to do.
     }
@@ -322,19 +351,61 @@ export class CatalogDO implements DurableObject {
       );
 
       // Check for transform job triggers watching this table.
-      const triggerRows = this.ctx.storage.sql
-        .exec("SELECT job_id FROM triggers WHERE watches = ?", table)
-        .toArray();
-
       const fired: string[] = [];
-      for (const row of triggerRows) {
-        const jobId = row.job_id as string;
+
+      // 'any' policy: fire whenever any watched table commits.
+      const anyRows = this.ctx.storage.sql
+        .exec(
+          `SELECT t.job_id FROM triggers t
+           JOIN transform_jobs tj ON t.job_id = tj.id
+           WHERE t.policy = 'any'
+             AND EXISTS (SELECT 1 FROM json_each(t.watches) WHERE value = ?)
+             AND tj.status IN ('idle', 'done', 'failed')`,
+          table,
+        )
+        .toArray();
+      for (const row of anyRows) {
         const result = this.ctx.storage.sql.exec(
           "UPDATE transform_jobs SET status = 'pending', updated_at = ? WHERE id = ? AND status IN ('idle', 'done', 'failed')",
           now,
-          jobId,
+          row.job_id,
         );
-        if (result.rowsWritten > 0) fired.push(jobId);
+        if (result.rowsWritten > 0) fired.push(row.job_id as string);
+      }
+
+      // 'all' policy: fire only when ALL watched tables have snapshots newer than last completion.
+      const allRows = this.ctx.storage.sql
+        .exec(
+          `SELECT t.job_id, t.watches, tj.last_completed_at FROM triggers t
+           JOIN transform_jobs tj ON t.job_id = tj.id
+           WHERE t.policy = 'all'
+             AND EXISTS (SELECT 1 FROM json_each(t.watches) WHERE value = ?)
+             AND tj.status IN ('idle', 'done', 'failed')`,
+          table,
+        )
+        .toArray();
+      for (const row of allRows) {
+        const baseline = (row.last_completed_at as number | null) ?? 0;
+        const missingRow = this.ctx.storage.sql
+          .exec(
+            `SELECT COUNT(*) as cnt FROM json_each(?)
+             WHERE value NOT IN (
+               SELECT tbl.name FROM snapshots s
+               JOIN tables tbl ON s.table_id = tbl.id
+               WHERE s.created_at > ?
+             )`,
+            row.watches,
+            baseline,
+          )
+          .toArray()[0];
+        if ((missingRow?.cnt as number) === 0) {
+          const result = this.ctx.storage.sql.exec(
+            "UPDATE transform_jobs SET status = 'pending', updated_at = ? WHERE id = ? AND status IN ('idle', 'done', 'failed')",
+            now,
+            row.job_id,
+          );
+          if (result.rowsWritten > 0) fired.push(row.job_id as string);
+        }
       }
 
       return { tableId: resolvedId, triggeredJobIds: fired };
@@ -537,9 +608,11 @@ export class CatalogDO implements DurableObject {
       .exec("SELECT status FROM transform_jobs WHERE id = ?", jobId)
       .toArray();
     if (rows.length === 0) return new Response("Not Found", { status: 404 });
+    const now = Date.now();
     this.ctx.storage.sql.exec(
-      "UPDATE transform_jobs SET status = 'done', updated_at = ?, error = NULL WHERE id = ?",
-      Date.now(),
+      "UPDATE transform_jobs SET status = 'done', updated_at = ?, last_completed_at = ?, error = NULL WHERE id = ?",
+      now,
+      now,
       jobId,
     );
     return new Response(null, { status: 204 });
@@ -601,15 +674,37 @@ export class CatalogDO implements DurableObject {
 
   private listTriggers(): Response {
     const rows = this.ctx.storage.sql
-      .exec("SELECT id, watches, job_id, created_at FROM triggers ORDER BY created_at DESC")
+      .exec("SELECT id, watches, policy, job_id, created_at FROM triggers ORDER BY created_at DESC")
       .toArray();
-    return Response.json({ triggers: rows });
+    const triggers = rows.map((r) => ({
+      ...r,
+      watches: parseWatches(r.watches as string),
+    }));
+    return Response.json({ triggers });
   }
 
   private createTrigger(body: Record<string, unknown>): Response {
-    if (typeof body.watches !== "string" || !SAFE_TABLE_NAME.test(body.watches)) {
-      return new Response("watches must be a valid table name", { status: 400 });
+    // watches accepts a single table name string or an array of table names.
+    const rawWatches = Array.isArray(body.watches)
+      ? body.watches
+      : typeof body.watches === "string"
+        ? [body.watches]
+        : null;
+    if (!rawWatches || rawWatches.length === 0) {
+      return new Response("watches must be a table name or array of table names", { status: 400 });
     }
+    for (const w of rawWatches) {
+      if (typeof w !== "string" || !SAFE_TABLE_NAME.test(w)) {
+        return new Response(`watches contains invalid table name: ${w}`, { status: 400 });
+      }
+    }
+    const watchesJson = JSON.stringify(rawWatches);
+
+    const policy = body.policy ?? "any";
+    if (policy !== "any" && policy !== "all") {
+      return new Response("policy must be 'any' or 'all'", { status: 400 });
+    }
+
     if (typeof body.job_id !== "string" || !body.job_id) {
       return new Response("job_id is required", { status: 400 });
     }
@@ -622,17 +717,21 @@ export class CatalogDO implements DurableObject {
     const id = genId("trg");
     const now = Date.now();
     this.ctx.storage.sql.exec(
-      "INSERT INTO triggers (id, watches, job_id, created_at) VALUES (?, ?, ?, ?)",
+      "INSERT INTO triggers (id, watches, policy, job_id, created_at) VALUES (?, ?, ?, ?, ?)",
       id,
-      body.watches,
+      watchesJson,
+      policy,
       body.job_id,
       now,
     );
 
     const row = this.ctx.storage.sql
-      .exec("SELECT id, watches, job_id, created_at FROM triggers WHERE id = ?", id)
+      .exec("SELECT id, watches, policy, job_id, created_at FROM triggers WHERE id = ?", id)
       .toArray()[0];
-    return Response.json(row, { status: 201 });
+    return Response.json(
+      { ...row, watches: parseWatches(row!.watches as string) },
+      { status: 201 },
+    );
   }
 
   private deleteTrigger(triggerId: string): Response {

@@ -510,8 +510,14 @@ describe("Transform jobs", () => {
       body: JSON.stringify({ watches: "trigger_source", job_id: job.id }),
     });
     expect(trigRes.status).toBe(201);
-    const trigger = (await trigRes.json()) as { id: string; watches: string; job_id: string };
-    expect(trigger.watches).toBe("trigger_source");
+    const trigger = (await trigRes.json()) as {
+      id: string;
+      watches: string[];
+      policy: string;
+      job_id: string;
+    };
+    expect(trigger.watches).toEqual(["trigger_source"]);
+    expect(trigger.policy).toBe("any");
     expect(trigger.job_id).toBe(job.id);
 
     // Commit to the watched table — should trigger the job.
@@ -632,5 +638,180 @@ describe("Transform jobs", () => {
     const list = await SELF.fetch("http://localhost/api/triggers", { headers: DEV_HEADERS });
     const { triggers } = (await list.json()) as { triggers: Array<{ id: string }> };
     expect(triggers.find((t) => t.id === trigger.id)).toBeUndefined();
+  });
+
+  it("trigger with watches array is stored and returned as array", async () => {
+    const jobRes = await SELF.fetch("http://localhost/api/transform-jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({
+        sql: "SELECT 1",
+        output_table: "multi_watch_out",
+        output_uri: "r2://data-shack/multi_watch.parquet",
+        output_backend: "data-shack",
+      }),
+    });
+    const job = (await jobRes.json()) as { id: string };
+
+    const trigRes = await SELF.fetch("http://localhost/api/triggers", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({ watches: ["table_a", "table_b"], policy: "all", job_id: job.id }),
+    });
+    expect(trigRes.status).toBe(201);
+    const trigger = (await trigRes.json()) as {
+      id: string;
+      watches: string[];
+      policy: string;
+      job_id: string;
+    };
+    expect(trigger.watches).toEqual(["table_a", "table_b"]);
+    expect(trigger.policy).toBe("all");
+  });
+
+  it("policy:all trigger does not fire after only one watched table commits", async () => {
+    const jobRes = await SELF.fetch("http://localhost/api/transform-jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({
+        sql: "SELECT 1",
+        output_table: "all_policy_out",
+        output_uri: "r2://data-shack/all_policy.parquet",
+        output_backend: "data-shack",
+      }),
+    });
+    const job = (await jobRes.json()) as { id: string };
+
+    await SELF.fetch("http://localhost/api/triggers", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({ watches: ["source_a", "source_b"], policy: "all", job_id: job.id }),
+    });
+
+    // Commit only source_a — should NOT trigger the job.
+    const commitRes = await SELF.fetch("http://localhost/catalog/commit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({
+        table: "source_a",
+        uri: "r2://data-shack/source_a.ndjson",
+        storageBackend: "data-shack",
+      }),
+    });
+    expect(commitRes.status).toBe(201);
+    const commitData = (await commitRes.json()) as { triggeredJobIds: string[] };
+    expect(commitData.triggeredJobIds).not.toContain(job.id);
+
+    // Job should still be idle.
+    const jobRes2 = await SELF.fetch("http://localhost/api/transform-jobs", {
+      headers: DEV_HEADERS,
+    });
+    const { jobs } = (await jobRes2.json()) as { jobs: Array<{ id: string; status: string }> };
+    expect(jobs.find((j) => j.id === job.id)?.status).toBe("idle");
+  });
+
+  it("policy:all trigger fires after all watched tables have committed", async () => {
+    const jobRes = await SELF.fetch("http://localhost/api/transform-jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({
+        sql: "SELECT 1",
+        output_table: "all_policy_both_out",
+        output_uri: "r2://data-shack/all_policy_both.parquet",
+        output_backend: "data-shack",
+      }),
+    });
+    const job = (await jobRes.json()) as { id: string };
+
+    await SELF.fetch("http://localhost/api/triggers", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({ watches: ["both_a", "both_b"], policy: "all", job_id: job.id }),
+    });
+
+    // Commit both_a first — not triggered yet.
+    await SELF.fetch("http://localhost/catalog/commit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({
+        table: "both_a",
+        uri: "r2://data-shack/both_a.ndjson",
+        storageBackend: "data-shack",
+      }),
+    });
+
+    // Commit both_b — now both are fresh → trigger fires.
+    const commitRes = await SELF.fetch("http://localhost/catalog/commit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({
+        table: "both_b",
+        uri: "r2://data-shack/both_b.ndjson",
+        storageBackend: "data-shack",
+      }),
+    });
+    expect(commitRes.status).toBe(201);
+    const commitData = (await commitRes.json()) as { triggeredJobIds: string[] };
+    expect(commitData.triggeredJobIds).toContain(job.id);
+  });
+
+  it("policy:all trigger does not fire again until job completes and both tables re-commit", async () => {
+    const jobRes = await SELF.fetch("http://localhost/api/transform-jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({
+        sql: "SELECT 1",
+        output_table: "all_idempotent_out",
+        output_uri: "r2://data-shack/all_idempotent.parquet",
+        output_backend: "data-shack",
+      }),
+    });
+    const job = (await jobRes.json()) as { id: string };
+
+    await SELF.fetch("http://localhost/api/triggers", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({ watches: ["idem_a", "idem_b"], policy: "all", job_id: job.id }),
+    });
+
+    // Commit both — job fires and goes to pending.
+    for (const tbl of ["idem_a", "idem_b"]) {
+      await SELF.fetch("http://localhost/catalog/commit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+        body: JSON.stringify({
+          table: tbl,
+          uri: `r2://data-shack/${tbl}.ndjson`,
+          storageBackend: "data-shack",
+        }),
+      });
+    }
+
+    // Simulate job claim + complete (sets last_completed_at).
+    await SELF.fetch(`http://localhost/api/transform-jobs/${job.id}/trigger`, {
+      method: "POST",
+      headers: DEV_HEADERS,
+    });
+    await SELF.fetch(`http://localhost/do/catalog/jobs/${job.id}/claim`, {
+      method: "POST",
+      headers: DEV_HEADERS,
+    });
+    await SELF.fetch(`http://localhost/do/catalog/jobs/${job.id}/complete`, {
+      method: "POST",
+      headers: DEV_HEADERS,
+    });
+
+    // Now commit only idem_a — should NOT re-trigger (idem_b hasn't recommitted).
+    const commitRes = await SELF.fetch("http://localhost/catalog/commit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({
+        table: "idem_a",
+        uri: "r2://data-shack/idem_a_v2.ndjson",
+        storageBackend: "data-shack",
+      }),
+    });
+    const commitData = (await commitRes.json()) as { triggeredJobIds: string[] };
+    expect(commitData.triggeredJobIds).not.toContain(job.id);
   });
 });

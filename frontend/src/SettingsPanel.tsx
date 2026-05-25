@@ -19,8 +19,8 @@ interface StorageBackendRow {
   created_at: number;
 }
 
-const CREDENTIAL_TYPES = ["http", "google_oauth", "generic_token"];
-const BACKEND_TYPES = ["r2-bound", "s3", "r2-s3compat", "gcs", "azure", "https"];
+const CREDENTIAL_TYPES = ["http", "google-sheets", "google_oauth", "generic_token"];
+const BACKEND_TYPES = ["r2-bound", "s3", "r2-s3compat", "google-sheets", "gcs", "azure", "https"];
 
 const HTTP_CONFIG_TEMPLATE = JSON.stringify(
   {
@@ -462,6 +462,7 @@ function SettingsSection<T extends { id: string; name: string; type: string }>({
   onDelete,
   onEdit,
   onTest,
+  extraActions,
 }: {
   title: string;
   addTitle: string;
@@ -471,11 +472,15 @@ function SettingsSection<T extends { id: string; name: string; type: string }>({
   onDelete: (id: string) => Promise<void>;
   onEdit?: (row: T) => void;
   onTest?: (id: string, name: string) => void;
+  extraActions?: preact.ComponentChildren;
 }) {
   return (
     <div class="card bg-base-200">
       <div class="card-body gap-4">
-        <h2 class="card-title">{title}</h2>
+        <div class="flex items-center justify-between">
+          <h2 class="card-title">{title}</h2>
+          {extraActions && <div class="flex gap-2">{extraActions}</div>}
+        </div>
         {rows.length > 0 ? (
           <div class="overflow-x-auto">
             <table class="table table-sm">
@@ -547,6 +552,19 @@ export function SettingsPanel({ workerBase, getAuthHeaders }: SettingsPanelProps
   const [loadError, setLoadError] = useState<string | null>(null);
   const [testTarget, setTestTarget] = useState<{ id: string; name: string } | null>(null);
   const [editTarget, setEditTarget] = useState<StorageBackendRow | null>(null);
+  const [gsNotice, setGsNotice] = useState<{ type: "success" | "error"; msg: string } | null>(
+    () => {
+      const params = new URLSearchParams(window.location.search);
+      const status = params.get("gscred");
+      if (status === "success") return { type: "success", msg: "Google Sheets connected." };
+      if (status === "error")
+        return {
+          type: "error",
+          msg: `Google Sheets auth failed: ${params.get("reason") ?? "unknown"}`,
+        };
+      return null;
+    },
+  );
 
   const fetchAll = useCallback(async () => {
     try {
@@ -623,6 +641,24 @@ export function SettingsPanel({ workerBase, getAuthHeaders }: SettingsPanelProps
     await fetchAll();
   }
 
+  function connectGoogleSheets() {
+    const name = window.prompt("Name for this Google Sheets credential:", "Google Sheets");
+    if (!name) return;
+    getAuthHeaders()
+      .then(async (headers) => {
+        const res = await fetch(
+          `${workerBase}/api/credentials/google-sheets/auth?name=${encodeURIComponent(name)}`,
+          { headers },
+        );
+        if (!res.ok) throw new Error(`Auth init failed: ${res.status}`);
+        const { url } = (await res.json()) as { url: string };
+        window.location.href = url;
+      })
+      .catch((err) => {
+        setGsNotice({ type: "error", msg: String(err) });
+      });
+  }
+
   return (
     <div class="max-w-4xl mx-auto p-6 space-y-4">
       {testTarget && (
@@ -648,6 +684,17 @@ export function SettingsPanel({ workerBase, getAuthHeaders }: SettingsPanelProps
           <span>{loadError}</span>
         </div>
       )}
+      {gsNotice && (
+        <div
+          role="alert"
+          class={`alert ${gsNotice.type === "success" ? "alert-success" : "alert-error"}`}
+        >
+          <span>{gsNotice.msg}</span>
+          <button type="button" class="btn btn-xs btn-ghost" onClick={() => setGsNotice(null)}>
+            ✕
+          </button>
+        </div>
+      )}
       <SettingsSection
         title="Credentials"
         addTitle="Add Credential"
@@ -656,6 +703,11 @@ export function SettingsPanel({ workerBase, getAuthHeaders }: SettingsPanelProps
         onAdd={addCredential}
         onDelete={deleteCredential}
         onTest={(id, name) => setTestTarget({ id, name })}
+        extraActions={
+          <button type="button" class="btn btn-sm btn-outline" onClick={connectGoogleSheets}>
+            Connect Google Sheets
+          </button>
+        }
       />
       <SettingsSection
         title="Storage Backends"

@@ -225,6 +225,9 @@ async function handleTransformJob(
 
   try {
     const db = await getDb();
+    // Refresh all catalog views so the job runs against the latest committed snapshots,
+    // not the views registered at session connect time.
+    await registerCatalogViews(db, workerBase, getAuthHeaders);
     const { sql, preamble } = await resolveStorageUris(msg.sql, workerBase, getAuthHeaders);
     await runQuery(db, sql, preamble.length > 0 ? preamble : undefined);
     ws.send(JSON.stringify({ type: "job_complete", jobId: msg.jobId }));
