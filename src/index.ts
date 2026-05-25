@@ -491,7 +491,7 @@ app.post("/catalog/commit", requireAuth, async (c) => {
             await sessionStub(c.env, userId).fetch("http://do/dispatch-jobs", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ userId }),
+              body: JSON.stringify({ userId, jobIds: data.triggeredJobIds }),
             });
           } catch {
             // Best-effort: jobs remain pending and will be dispatched on next browser connect.
@@ -668,16 +668,19 @@ app.get("/session/ws", async (c) => {
   if (c.req.header("Upgrade") !== "websocket") {
     return c.text("Expected Upgrade: websocket", 426);
   }
-  // WebSocket API can't set custom headers, so also accept a `token` query param.
+  // Prefer Sec-WebSocket-Protocol for auth (avoids token appearing in URL logs).
+  // Fall back to ?token= query param for backward compatibility.
+  const wsProtocol = c.req.header("Sec-WebSocket-Protocol");
   const url = new URL(c.req.url);
   const queryToken = url.searchParams.get("token");
+  const rawToken = wsProtocol ?? queryToken;
   let authRequest = c.req.raw;
-  if (queryToken) {
+  if (rawToken) {
     const augmented = new Headers(c.req.raw.headers);
-    if (c.env.DEV_TOKEN && queryToken === c.env.DEV_TOKEN) {
-      augmented.set("X-Dev-Token", queryToken);
+    if (c.env.DEV_TOKEN && rawToken === c.env.DEV_TOKEN) {
+      augmented.set("X-Dev-Token", rawToken);
     } else {
-      augmented.set("Authorization", `Bearer ${queryToken}`);
+      augmented.set("Authorization", `Bearer ${rawToken}`);
     }
     authRequest = new Request(c.req.url, { headers: augmented, method: c.req.method });
   }
@@ -685,12 +688,14 @@ app.get("/session/ws", async (c) => {
   if (!auth) return new Response("Unauthorized", { status: 401 });
   const userId = auth.userId;
 
+  // Strip token from forwarded URL and set X-User-ID for the Session DO.
+  const forwardUrl = new URL(c.req.url);
+  forwardUrl.searchParams.delete("token");
   const stub = sessionStub(c.env, userId);
-  // Forward the WebSocket upgrade to the Session DO, carrying the authenticated userId.
   const headers = new Headers(c.req.raw.headers);
   headers.set("X-User-ID", userId);
   return stub.fetch(
-    new Request(c.req.url, { headers, cf: (c.req.raw as Request & { cf?: unknown }).cf }),
+    new Request(forwardUrl.toString(), { headers, cf: (c.req.raw as Request & { cf?: unknown }).cf }),
   );
 });
 

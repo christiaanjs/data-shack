@@ -85,7 +85,10 @@ export class SessionDO implements DurableObject {
     // Dispatch any pending jobs to this new connection (fire and forget).
     this.ctx.waitUntil(this.dispatchPendingJobs(server, userId));
 
-    return new Response(null, { status: 101, webSocket: client });
+    // Echo Sec-WebSocket-Protocol so browsers that pass the token as a subprotocol don't fail handshake.
+    const protocol = request.headers.get("Sec-WebSocket-Protocol");
+    const headers = protocol ? { "Sec-WebSocket-Protocol": protocol } : undefined;
+    return new Response(null, { status: 101, webSocket: client, headers });
   }
 
   private async handleQuery(request: Request): Promise<Response> {
@@ -161,22 +164,26 @@ export class SessionDO implements DurableObject {
 
   private async handleDispatchJobs(request: Request): Promise<Response> {
     const body = (await request.json()) as { userId: string; jobIds?: string[] };
-    const { userId } = body;
+    const { userId, jobIds } = body;
     if (!userId) return Response.json({ error: "userId is required" }, { status: 400 });
 
-    const sockets = this.ctx.getWebSockets(userId);
-    if (sockets.length === 0) return Response.json({ dispatched: 0 });
+    const now = Date.now();
+    const liveSockets = this.ctx.getWebSockets(userId).filter((s) => {
+      const att = s.deserializeAttachment() as WsAttachment | null;
+      return att && now - att.lastPingAt < STALE_AFTER_MS;
+    });
+    if (liveSockets.length === 0) return Response.json({ dispatched: 0 });
 
-    // Fetch pending jobs from Catalog DO.
+    // Fetch pending jobs from Catalog DO, optionally filtered to a specific subset.
     const catalogRes = await this.catalogStub(userId).fetch("http://do/jobs/pending");
     if (!catalogRes.ok) return Response.json({ dispatched: 0 });
 
     const { jobs } = (await catalogRes.json()) as { jobs: TransformJob[] };
-    if (jobs.length === 0) return Response.json({ dispatched: 0 });
+    const toDispatch = jobIds ? jobs.filter((j) => jobIds.includes(j.id)) : jobs;
+    if (toDispatch.length === 0) return Response.json({ dispatched: 0 });
 
-    const ws = sockets[0]!;
-    let dispatched = 0;
-    for (const job of jobs) {
+    const ws = liveSockets[0]!;
+    for (const job of toDispatch) {
       ws.send(
         JSON.stringify({
           type: "transform_job",
@@ -188,21 +195,20 @@ export class SessionDO implements DurableObject {
           format: job.format,
         }),
       );
-      dispatched++;
     }
 
-    return Response.json({ dispatched });
+    return Response.json({ dispatched: toDispatch.length });
   }
 
   private async dispatchPendingJobs(ws: WebSocket, userId: string): Promise<void> {
     try {
-      // Collect all job IDs actively claimed by any live socket for this user.
-      // Any "running" job NOT in this set was left behind by a socket that closed
-      // without cleanup (DO restart, Cloudflare eviction, etc.) — reset it to pending
-      // so it gets re-dispatched below.
+      // Collect job IDs actively claimed by live (non-stale) sockets for this user.
+      // Stale socket attachments are excluded so their abandoned jobs get reset below.
+      const now = Date.now();
       const claimedJobIds = this.ctx.getWebSockets(userId).flatMap((s) => {
         const att = s.deserializeAttachment() as WsAttachment | null;
-        return att?.inflightJobIds ?? [];
+        if (!att || now - att.lastPingAt >= STALE_AFTER_MS) return [];
+        return att.inflightJobIds;
       });
       await this.catalogStub(userId).fetch("http://do/jobs/reset-orphaned", {
         method: "POST",
@@ -272,7 +278,16 @@ export class SessionDO implements DurableObject {
         inflightJobIds.push(msg.jobId);
         ws.serializeAttachment({ ...attachment, inflightJobIds });
       }
-      await this.catalogStub(userId).fetch(`http://do/jobs/${msg.jobId}/claim`, { method: "POST" });
+      const claimRes = await this.catalogStub(userId).fetch(`http://do/jobs/${msg.jobId}/claim`, {
+        method: "POST",
+      });
+      if (!claimRes.ok) {
+        // Another socket won the race — remove from inflightJobIds so socket close
+        // doesn't reset the legitimate owner's job back to pending.
+        const cleaned = inflightJobIds.filter((id) => id !== msg.jobId);
+        ws.serializeAttachment({ ...attachment, inflightJobIds: cleaned });
+        return;
+      }
       this.broadcastJobStatus(userId, msg.jobId, "running");
       return;
     }

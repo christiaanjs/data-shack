@@ -39,6 +39,8 @@ export function connectSession(config: {
   let closed = false;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let jobEventListener: ((ev: JobEvent) => void) | null = null;
+  let catalogViewsReady: Promise<void> | null = null;
+  let visibilityHandler: (() => void) | null = null;
 
   // Prevent Chrome/Edge from throttling JS in background tabs.
   if (typeof navigator !== "undefined" && "locks" in navigator) {
@@ -61,10 +63,9 @@ export function connectSession(config: {
 
     // Build WebSocket URL from workerBase (http → ws, https → wss).
     const wsBase = workerBase.replace(/^http/, "ws");
-    // Pass auth token as query param since WebSocket API can't set custom headers.
-    const url = `${wsBase}/session/ws?token=${encodeURIComponent(token)}`;
-
-    const socket = new WebSocket(url);
+    const url = `${wsBase}/session/ws`;
+    // Pass auth token as Sec-WebSocket-Protocol (avoids token appearing in URL logs).
+    const socket = new WebSocket(url, [token]);
     ws = socket;
 
     let pingInterval: ReturnType<typeof setInterval> | null = null;
@@ -77,12 +78,19 @@ export function connectSession(config: {
           socket.send(JSON.stringify({ type: "ping" }));
         }
       }, 25_000);
-      // Register catalog views once on connect so they're ready before any query arrives.
+      // Register catalog views eagerly; gate all incoming messages on this promise
+      // so queries never run against a partially-registered catalog.
       const db = await getDb();
-      registerCatalogViews(db, workerBase, getAuthHeaders).catch(() => {});
+      catalogViewsReady = registerCatalogViews(db, workerBase, getAuthHeaders).then(
+        () => {},
+        () => {},
+      );
     };
 
     socket.onmessage = async (event: MessageEvent) => {
+      // Ensure catalog views are ready before processing any query or job.
+      if (catalogViewsReady) await catalogViewsReady;
+
       let msg: ServerMessage;
       try {
         msg = JSON.parse(event.data as string) as ServerMessage;
@@ -110,6 +118,7 @@ export function connectSession(config: {
         clearInterval(pingInterval);
         pingInterval = null;
       }
+      catalogViewsReady = null;
       ws = null;
       onStatusChange?.(false);
       if (!closed) {
@@ -127,7 +136,7 @@ export function connectSession(config: {
   // Reconnect immediately when the tab becomes visible, rather than waiting
   // for the 5s reconnect timer to fire after the browser may have throttled us.
   if (typeof document !== "undefined") {
-    document.addEventListener("visibilitychange", () => {
+    visibilityHandler = () => {
       if (document.visibilityState === "visible" && !closed && ws?.readyState !== WebSocket.OPEN) {
         if (reconnectTimer !== null) {
           clearTimeout(reconnectTimer);
@@ -135,7 +144,8 @@ export function connectSession(config: {
         }
         connect().catch(() => {});
       }
-    });
+    };
+    document.addEventListener("visibilitychange", visibilityHandler);
   }
 
   connect().catch(() => {});
@@ -145,6 +155,10 @@ export function connectSession(config: {
       closed = true;
       if (reconnectTimer !== null) clearTimeout(reconnectTimer);
       ws?.close();
+      if (visibilityHandler !== null) {
+        document.removeEventListener("visibilitychange", visibilityHandler);
+        visibilityHandler = null;
+      }
     },
     isConnected() {
       return ws?.readyState === WebSocket.OPEN;
@@ -211,8 +225,6 @@ async function handleTransformJob(
 
   try {
     const db = await getDb();
-    // Register catalog views so the transform SQL can reference catalog table names.
-    await registerCatalogViews(db, workerBase, getAuthHeaders).catch(() => {});
     const { sql, preamble } = await resolveStorageUris(msg.sql, workerBase, getAuthHeaders);
     await runQuery(db, sql, preamble.length > 0 ? preamble : undefined);
     ws.send(JSON.stringify({ type: "job_complete", jobId: msg.jobId }));
