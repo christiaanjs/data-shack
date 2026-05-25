@@ -25,7 +25,8 @@ interface TransformJob {
 
 interface Trigger {
   id: string;
-  watches: string;
+  watches: string[];
+  policy: string;
   job_id: string;
   created_at: number;
 }
@@ -80,6 +81,7 @@ export function TransformJobsPanel({
 
   // New trigger form
   const [newTriggerWatch, setNewTriggerWatch] = useState("");
+  const [newTriggerPolicy, setNewTriggerPolicy] = useState<"any" | "all">("any");
   const [addingTrigger, setAddingTrigger] = useState(false);
   const [triggerError, setTriggerError] = useState<string | null>(null);
 
@@ -138,6 +140,7 @@ export function TransformJobsPanel({
     setFormFormat("");
     setFormError(null);
     setNewTriggerWatch("");
+    setNewTriggerPolicy("any");
     setTriggerError(null);
   }
 
@@ -151,6 +154,7 @@ export function TransformJobsPanel({
     setFormFormat(job.format ?? "");
     setFormError(null);
     setNewTriggerWatch("");
+    setNewTriggerPolicy("any");
     setTriggerError(null);
   }
 
@@ -235,7 +239,11 @@ export function TransformJobsPanel({
   }
 
   async function addTrigger(jobId: string) {
-    if (!newTriggerWatch.trim()) return;
+    const watchesList = newTriggerWatch
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (watchesList.length === 0) return;
     setAddingTrigger(true);
     setTriggerError(null);
     try {
@@ -243,13 +251,14 @@ export function TransformJobsPanel({
       const res = await fetch(`${workerBase}/api/triggers`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...headers },
-        body: JSON.stringify({ watches: newTriggerWatch.trim(), job_id: jobId }),
+        body: JSON.stringify({ watches: watchesList, policy: newTriggerPolicy, job_id: jobId }),
       });
       if (!res.ok) {
         const data = (await res.json()) as { error?: string };
         throw new Error(data.error ?? `Failed: ${res.status}`);
       }
       setNewTriggerWatch("");
+      setNewTriggerPolicy("any");
       await fetchAll();
     } catch (err) {
       setTriggerError(err instanceof Error ? err.message : "Failed to add trigger");
@@ -508,7 +517,8 @@ export function TransformJobsPanel({
                       {jobTriggers.map((t) => (
                         <div key={t.id} class="flex items-center justify-between gap-2">
                           <span class="font-mono text-xs">
-                            watches: <strong>{t.watches}</strong>
+                            watches: <strong>{t.watches.join(", ")}</strong>{" "}
+                            <span class="badge badge-ghost badge-xs">{t.policy}</span>
                           </span>
                           <button
                             type="button"
@@ -521,27 +531,43 @@ export function TransformJobsPanel({
                       ))}
                     </div>
                   )}
-                  <div class="flex gap-2 items-end">
-                    <fieldset class="fieldset flex-1">
-                      <legend class="fieldset-legend">Watch table</legend>
+                  <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <fieldset class="fieldset">
+                      <legend class="fieldset-legend">Watch tables</legend>
                       <input
                         type="text"
                         class="input input-bordered input-sm w-full font-mono"
                         value={newTriggerWatch}
                         onInput={(e) => setNewTriggerWatch((e.target as HTMLInputElement).value)}
-                        placeholder="source_table"
+                        placeholder="table_a, table_b"
                       />
+                      <span class="fieldset-label text-base-content/40">Comma-separated</span>
                     </fieldset>
-                    <button
-                      type="button"
-                      class="btn btn-sm btn-outline mb-0.5"
-                      disabled={addingTrigger || !newTriggerWatch.trim()}
-                      onClick={() => addTrigger(editingJob.id).catch(() => {})}
-                    >
-                      {addingTrigger && <span class="loading loading-spinner loading-xs" />}
-                      Add
-                    </button>
+                    <fieldset class="fieldset">
+                      <legend class="fieldset-legend">Policy</legend>
+                      <select
+                        class="select select-bordered select-sm w-full"
+                        value={newTriggerPolicy}
+                        onChange={(e) =>
+                          setNewTriggerPolicy(
+                            (e.target as HTMLSelectElement).value as "any" | "all",
+                          )
+                        }
+                      >
+                        <option value="any">any — fire on any watched table</option>
+                        <option value="all">all — fire when all tables are fresh</option>
+                      </select>
+                    </fieldset>
                   </div>
+                  <button
+                    type="button"
+                    class="btn btn-sm btn-outline"
+                    disabled={addingTrigger || !newTriggerWatch.trim()}
+                    onClick={() => addTrigger(editingJob.id).catch(() => {})}
+                  >
+                    {addingTrigger && <span class="loading loading-spinner loading-xs" />}
+                    Add Trigger
+                  </button>
                 </div>
               )}
             </form>
