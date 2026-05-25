@@ -273,6 +273,7 @@ export class SessionDO implements DurableObject {
         ws.serializeAttachment({ ...attachment, inflightJobIds });
       }
       await this.catalogStub(userId).fetch(`http://do/jobs/${msg.jobId}/claim`, { method: "POST" });
+      this.broadcastJobStatus(userId, msg.jobId, "running");
       return;
     }
 
@@ -310,6 +311,7 @@ export class SessionDO implements DurableObject {
       await this.catalogStub(userId).fetch(`http://do/jobs/${msg.jobId}/complete`, {
         method: "POST",
       });
+      this.broadcastJobStatus(userId, msg.jobId, "done");
       return;
     }
 
@@ -323,6 +325,7 @@ export class SessionDO implements DurableObject {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ error: msg.error }),
       });
+      this.broadcastJobStatus(userId, msg.jobId, "failed", msg.error);
     }
   }
 
@@ -373,6 +376,22 @@ export class SessionDO implements DurableObject {
       return jobs.find((j) => j.id === jobId) ?? null;
     } catch {
       return null;
+    }
+  }
+
+  private broadcastJobStatus(
+    userId: string,
+    jobId: string,
+    status: "running" | "done" | "failed",
+    error?: string,
+  ): void {
+    const msg = JSON.stringify({ type: "job_status", jobId, status, ...(error ? { error } : {}) });
+    for (const s of this.ctx.getWebSockets(userId)) {
+      try {
+        s.send(msg);
+      } catch {
+        // Ignore closed sockets.
+      }
     }
   }
 }

@@ -651,6 +651,47 @@ describe("transform job dispatch via WebSocket", () => {
     format?: string | null;
   }
 
+  function waitForJobStatus(
+    ws: WebSocket,
+    jobId: string,
+    status: string,
+    timeoutMs = 3000,
+  ): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error(`Timeout waiting for job_status '${status}' for job ${jobId}`)),
+        timeoutMs,
+      );
+      ws.addEventListener("message", function handler(event) {
+        const msg = JSON.parse(event.data as string) as {
+          type: string;
+          jobId?: string;
+          status?: string;
+        };
+        if (msg.type === "job_status" && msg.jobId === jobId && msg.status === status) {
+          clearTimeout(timer);
+          ws.removeEventListener("message", handler);
+          resolve();
+        }
+      });
+    });
+  }
+
+  async function pollJobStatus(
+    jobId: string,
+    expectedStatus: string,
+    timeoutMs = 3000,
+  ): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const res = await SELF.fetch("http://localhost/api/transform-jobs", { headers: DEV_HEADERS });
+      const { jobs } = (await res.json()) as { jobs: Array<{ id: string; status: string }> };
+      if (jobs.find((j) => j.id === jobId)?.status === expectedStatus) return;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    throw new Error(`Job ${jobId} did not reach status '${expectedStatus}' within ${timeoutMs}ms`);
+  }
+
   async function createTransformJob(name: string): Promise<string> {
     const res = await SELF.fetch("http://localhost/api/transform-jobs", {
       method: "POST",
@@ -757,11 +798,9 @@ describe("transform job dispatch via WebSocket", () => {
     const ws = await connectMockBrowser();
     await waitForTransformJob(ws, jobId);
 
-    // Browser claims the job.
+    // Browser claims the job; wait for DO to echo job_status: running.
     ws.send(JSON.stringify({ type: "job_claimed", jobId }));
-
-    // Give the DO time to update catalog status.
-    await new Promise((r) => setTimeout(r, 100));
+    await waitForJobStatus(ws, jobId, "running");
 
     const jobsRes = await SELF.fetch("http://localhost/api/transform-jobs", {
       headers: DEV_HEADERS,
@@ -785,11 +824,11 @@ describe("transform job dispatch via WebSocket", () => {
     await waitForTransformJob(ws, jobId);
 
     ws.send(JSON.stringify({ type: "job_claimed", jobId }));
-    await new Promise((r) => setTimeout(r, 50));
+    await waitForJobStatus(ws, jobId, "running");
 
-    // Browser completes the job.
+    // Browser completes the job; wait for DO to echo job_status: done.
     ws.send(JSON.stringify({ type: "job_complete", jobId }));
-    await new Promise((r) => setTimeout(r, 200));
+    await waitForJobStatus(ws, jobId, "done");
 
     const jobsRes = await SELF.fetch("http://localhost/api/transform-jobs", {
       headers: DEV_HEADERS,
@@ -820,10 +859,10 @@ describe("transform job dispatch via WebSocket", () => {
     await waitForTransformJob(ws, jobId);
 
     ws.send(JSON.stringify({ type: "job_claimed", jobId }));
-    await new Promise((r) => setTimeout(r, 50));
+    await waitForJobStatus(ws, jobId, "running");
 
     ws.send(JSON.stringify({ type: "job_error", jobId, error: "DuckDB out of memory" }));
-    await new Promise((r) => setTimeout(r, 200));
+    await waitForJobStatus(ws, jobId, "failed");
 
     const jobsRes = await SELF.fetch("http://localhost/api/transform-jobs", {
       headers: DEV_HEADERS,
@@ -849,20 +888,13 @@ describe("transform job dispatch via WebSocket", () => {
     const ws = await connectMockBrowser();
     await waitForTransformJob(ws, jobId);
 
-    // Claim the job to put it in running state.
+    // Claim the job; wait for DO to confirm it's running.
     ws.send(JSON.stringify({ type: "job_claimed", jobId }));
-    await new Promise((r) => setTimeout(r, 100));
+    await waitForJobStatus(ws, jobId, "running");
 
-    // Close socket while job is still running.
+    // Close socket while job is still running; poll until DO resets it.
     ws.close();
-    await new Promise((r) => setTimeout(r, 200));
-
-    const jobsRes = await SELF.fetch("http://localhost/api/transform-jobs", {
-      headers: DEV_HEADERS,
-    });
-    const { jobs } = (await jobsRes.json()) as { jobs: Array<{ id: string; status: string }> };
-    const job = jobs.find((j) => j.id === jobId);
-    expect(job?.status).toBe("pending");
+    await pollJobStatus(jobId, "pending");
   });
 
   it("does not reset a running job that is still claimed by an active socket", async () => {
@@ -877,7 +909,7 @@ describe("transform job dispatch via WebSocket", () => {
     const ws1 = await connectMockBrowser();
     await waitForTransformJob(ws1, jobId);
     ws1.send(JSON.stringify({ type: "job_claimed", jobId }));
-    await new Promise((r) => setTimeout(r, 100));
+    await waitForJobStatus(ws1, jobId, "running");
 
     // ws2 connects — dispatchPendingJobs runs reset-orphaned with ws1's claimedJobIds,
     // so the running job must NOT be reset and must NOT be dispatched to ws2.
@@ -906,9 +938,9 @@ describe("transform job dispatch via WebSocket", () => {
     const ws1 = await connectMockBrowser();
     await waitForTransformJob(ws1, jobId);
     ws1.send(JSON.stringify({ type: "job_claimed", jobId }));
-    await new Promise((r) => setTimeout(r, 100));
+    await waitForJobStatus(ws1, jobId, "running");
     ws1.close();
-    await new Promise((r) => setTimeout(r, 200));
+    await pollJobStatus(jobId, "pending");
 
     // Reconnect — dispatchPendingJobs: reset-orphaned (no active sockets → reset all
     // running jobs) then dispatch pending. The job was already reset by webSocketClose,

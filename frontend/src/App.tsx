@@ -79,16 +79,6 @@ export function App() {
     fetchUserId().catch(() => {});
   }, [authed]);
 
-  // Forward job events broadcast from other tabs to the active panel listener.
-  useEffect(() => {
-    if (!authed || typeof BroadcastChannel === "undefined") return;
-    const bc = new BroadcastChannel("data-shack-jobs");
-    bc.onmessage = (event: MessageEvent) => {
-      jobEventListenerRef.current?.(event.data as JobEvent);
-    };
-    return () => bc.close();
-  }, [authed]);
-
   // Establish Session DO WebSocket after auth to receive MCP queries and transform jobs.
   useEffect(() => {
     if (!authed) {

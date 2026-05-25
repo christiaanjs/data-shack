@@ -24,7 +24,8 @@ type ServerMessage =
       outputUri: string;
       outputBackend: string;
       format?: string | null;
-    };
+    }
+  | { type: "job_status"; jobId: string; status: "running" | "done" | "failed"; error?: string };
 
 export function connectSession(config: {
   workerBase: string;
@@ -38,9 +39,6 @@ export function connectSession(config: {
   let closed = false;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let jobEventListener: ((ev: JobEvent) => void) | null = null;
-
-  const bc =
-    typeof BroadcastChannel !== "undefined" ? new BroadcastChannel("data-shack-jobs") : null;
 
   // Prevent Chrome/Edge from throttling JS in background tabs.
   if (typeof navigator !== "undefined" && "locks" in navigator) {
@@ -97,10 +95,13 @@ export function connectSession(config: {
       if (msg.type === "query") {
         await handleQuery(socket, msg, workerBase, getAuthHeaders, getDb);
       } else if (msg.type === "transform_job") {
-        await handleTransformJob(socket, msg, workerBase, getAuthHeaders, getDb, (ev) => {
-          jobEventListener?.(ev);
-          bc?.postMessage(ev);
-        });
+        await handleTransformJob(socket, msg, workerBase, getAuthHeaders, getDb);
+      } else if (msg.type === "job_status") {
+        const ev: JobEvent =
+          msg.status === "failed"
+            ? { jobId: msg.jobId, status: "failed", error: msg.error ?? "Unknown error" }
+            : { jobId: msg.jobId, status: msg.status };
+        jobEventListener?.(ev);
       }
     };
 
@@ -144,7 +145,6 @@ export function connectSession(config: {
       closed = true;
       if (reconnectTimer !== null) clearTimeout(reconnectTimer);
       ws?.close();
-      bc?.close();
     },
     isConnected() {
       return ws?.readyState === WebSocket.OPEN;
@@ -205,11 +205,9 @@ async function handleTransformJob(
   workerBase: string,
   getAuthHeaders: () => Promise<Record<string, string>>,
   getDb: () => Promise<AsyncDuckDB>,
-  emitJobEvent: (ev: JobEvent) => void,
 ) {
-  // Claim the job immediately so the Session DO tracks it as in-flight.
+  // Claim the job — Session DO will broadcast job_status: running to all connected sockets.
   ws.send(JSON.stringify({ type: "job_claimed", jobId: msg.jobId }));
-  emitJobEvent({ jobId: msg.jobId, status: "running" });
 
   try {
     const db = await getDb();
@@ -218,10 +216,8 @@ async function handleTransformJob(
     const { sql, preamble } = await resolveStorageUris(msg.sql, workerBase, getAuthHeaders);
     await runQuery(db, sql, preamble.length > 0 ? preamble : undefined);
     ws.send(JSON.stringify({ type: "job_complete", jobId: msg.jobId }));
-    emitJobEvent({ jobId: msg.jobId, status: "done" });
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);
     ws.send(JSON.stringify({ type: "job_error", jobId: msg.jobId, error }));
-    emitJobEvent({ jobId: msg.jobId, status: "failed", error });
   }
 }
