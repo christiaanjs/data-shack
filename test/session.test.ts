@@ -864,4 +864,59 @@ describe("transform job dispatch via WebSocket", () => {
     const job = jobs.find((j) => j.id === jobId);
     expect(job?.status).toBe("pending");
   });
+
+  it("does not reset a running job that is still claimed by an active socket", async () => {
+    const jobId = await createTransformJob("orphan_no_reset");
+
+    await SELF.fetch(`http://localhost/api/transform-jobs/${jobId}/trigger`, {
+      method: "POST",
+      headers: DEV_HEADERS,
+    });
+
+    // ws1 claims the job — it's now running and tracked in ws1's inflightJobIds.
+    const ws1 = await connectMockBrowser();
+    await waitForTransformJob(ws1, jobId);
+    ws1.send(JSON.stringify({ type: "job_claimed", jobId }));
+    await new Promise((r) => setTimeout(r, 100));
+
+    // ws2 connects — dispatchPendingJobs runs reset-orphaned with ws1's claimedJobIds,
+    // so the running job must NOT be reset and must NOT be dispatched to ws2.
+    const ws2 = await connectMockBrowser();
+    const notDispatched = await Promise.race([
+      waitForTransformJob(ws2, jobId).then(() => "dispatched" as const),
+      new Promise<"timeout">((r) => setTimeout(() => r("timeout"), 600)),
+    ]);
+    expect(notDispatched).toBe("timeout");
+
+    ws1.close();
+    ws2.close();
+  });
+
+  it("re-dispatches a running job that has no active socket claiming it on reconnect", async () => {
+    const jobId = await createTransformJob("orphan_reset");
+
+    await SELF.fetch(`http://localhost/api/transform-jobs/${jobId}/trigger`, {
+      method: "POST",
+      headers: DEV_HEADERS,
+    });
+
+    // ws1 claims the job, then closes. webSocketClose resets the job to pending —
+    // this is the normal cleanup path. The orphan-reset in dispatchPendingJobs is a
+    // second safety net for when webSocketClose doesn't fire (DO restart, eviction).
+    const ws1 = await connectMockBrowser();
+    await waitForTransformJob(ws1, jobId);
+    ws1.send(JSON.stringify({ type: "job_claimed", jobId }));
+    await new Promise((r) => setTimeout(r, 100));
+    ws1.close();
+    await new Promise((r) => setTimeout(r, 200));
+
+    // Reconnect — dispatchPendingJobs: reset-orphaned (no active sockets → reset all
+    // running jobs) then dispatch pending. The job was already reset by webSocketClose,
+    // so this also verifies the two cleanup paths don't conflict.
+    const ws2 = await connectMockBrowser();
+    const msg = await waitForTransformJob(ws2, jobId);
+    expect(msg.outputTable).toBe("orphan_reset");
+
+    ws2.close();
+  });
 });

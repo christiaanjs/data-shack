@@ -201,6 +201,11 @@ export class CatalogDO implements DurableObject {
       return this.resetJobsPending(body);
     }
 
+    if (request.method === "POST" && pathname === "/jobs/reset-orphaned") {
+      const body = (await request.json()) as Record<string, unknown>;
+      return this.resetOrphanedJobs(body);
+    }
+
     // ── Trigger endpoints ─────────────────────────────────────────────────
 
     if (request.method === "GET" && pathname === "/triggers") {
@@ -551,6 +556,27 @@ export class CatalogDO implements DurableObject {
       error,
       jobId,
     );
+    return new Response(null, { status: 204 });
+  }
+
+  private resetOrphanedJobs(body: Record<string, unknown>): Response {
+    const claimedJobIds = Array.isArray(body.claimedJobIds)
+      ? (body.claimedJobIds as unknown[]).filter((id): id is string => typeof id === "string")
+      : [];
+    const now = Date.now();
+    if (claimedJobIds.length === 0) {
+      this.ctx.storage.sql.exec(
+        "UPDATE transform_jobs SET status = 'pending', updated_at = ? WHERE status = 'running'",
+        now,
+      );
+    } else {
+      const placeholders = claimedJobIds.map(() => "?").join(", ");
+      this.ctx.storage.sql.exec(
+        `UPDATE transform_jobs SET status = 'pending', updated_at = ? WHERE status = 'running' AND id NOT IN (${placeholders})`,
+        now,
+        ...claimedJobIds,
+      );
+    }
     return new Response(null, { status: 204 });
   }
 

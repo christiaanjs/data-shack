@@ -196,6 +196,20 @@ export class SessionDO implements DurableObject {
 
   private async dispatchPendingJobs(ws: WebSocket, userId: string): Promise<void> {
     try {
+      // Collect all job IDs actively claimed by any live socket for this user.
+      // Any "running" job NOT in this set was left behind by a socket that closed
+      // without cleanup (DO restart, Cloudflare eviction, etc.) — reset it to pending
+      // so it gets re-dispatched below.
+      const claimedJobIds = this.ctx.getWebSockets(userId).flatMap((s) => {
+        const att = s.deserializeAttachment() as WsAttachment | null;
+        return att?.inflightJobIds ?? [];
+      });
+      await this.catalogStub(userId).fetch("http://do/jobs/reset-orphaned", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ claimedJobIds }),
+      });
+
       const catalogRes = await this.catalogStub(userId).fetch("http://do/jobs/pending");
       if (!catalogRes.ok) return;
 
@@ -256,7 +270,7 @@ export class SessionDO implements DurableObject {
       const { userId, inflightJobIds } = attachment;
       if (!inflightJobIds.includes(msg.jobId)) {
         inflightJobIds.push(msg.jobId);
-        ws.serializeAttachment({ userId, inflightJobIds });
+        ws.serializeAttachment({ ...attachment, inflightJobIds });
       }
       await this.catalogStub(userId).fetch(`http://do/jobs/${msg.jobId}/claim`, { method: "POST" });
       return;
@@ -265,7 +279,7 @@ export class SessionDO implements DurableObject {
     if (msg.type === "job_complete") {
       const { userId, inflightJobIds } = attachment;
       const updated = inflightJobIds.filter((id) => id !== msg.jobId);
-      ws.serializeAttachment({ userId, inflightJobIds: updated });
+      ws.serializeAttachment({ ...attachment, inflightJobIds: updated });
 
       // Mark job done in catalog DO, which may trigger further jobs.
       const job = await this.getJobSpec(userId, msg.jobId);
@@ -302,7 +316,7 @@ export class SessionDO implements DurableObject {
     if (msg.type === "job_error") {
       const { userId, inflightJobIds } = attachment;
       const updated = inflightJobIds.filter((id) => id !== msg.jobId);
-      ws.serializeAttachment({ userId, inflightJobIds: updated });
+      ws.serializeAttachment({ ...attachment, inflightJobIds: updated });
 
       await this.catalogStub(userId).fetch(`http://do/jobs/${msg.jobId}/fail`, {
         method: "POST",
