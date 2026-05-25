@@ -440,7 +440,7 @@ storageRouter.on(["GET", "HEAD", "PUT", "OPTIONS"], "/s3proxy/*", async (c) => {
       }
       const putHeaders = new Headers();
       addCorsHeaders(putHeaders);
-      return new Response(null, { status: 204, headers: putHeaders });
+      return new Response("", { status: 200, headers: putHeaders });
     }
 
     // GET / HEAD: use Sheets API values endpoint and return a JSON array of objects.
