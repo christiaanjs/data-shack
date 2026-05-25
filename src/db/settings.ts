@@ -78,6 +78,7 @@ export async function insertStorageBackend(
 }
 
 interface CredentialConfigRow {
+  id: string;
   type: string;
   encrypted_config: string;
 }
@@ -88,10 +89,43 @@ export async function getCredentialConfig(
   userId: string,
 ): Promise<CredentialConfigRow | null> {
   const result = await db
-    .prepare("SELECT type, encrypted_config FROM credentials WHERE id = ? AND user_id = ?")
+    .prepare("SELECT id, type, encrypted_config FROM credentials WHERE id = ? AND user_id = ?")
     .bind(id, userId)
     .first<CredentialConfigRow>();
   return result ?? null;
+}
+
+export async function getCredentialByNameOrId(
+  db: D1Database,
+  nameOrId: string,
+  userId: string,
+): Promise<CredentialConfigRow | null> {
+  // Try name first
+  const byName = await db
+    .prepare("SELECT id, type, encrypted_config FROM credentials WHERE user_id = ? AND name = ?")
+    .bind(userId, nameOrId)
+    .first<CredentialConfigRow>();
+  if (byName) return byName;
+  // Fall back to ID
+  return (
+    (await db
+      .prepare("SELECT id, type, encrypted_config FROM credentials WHERE user_id = ? AND id = ?")
+      .bind(userId, nameOrId)
+      .first<CredentialConfigRow>()) ?? null
+  );
+}
+
+export async function listHttpCredentials(
+  db: D1Database,
+  userId: string,
+): Promise<CredentialRow[]> {
+  const result = await db
+    .prepare(
+      "SELECT id, name, type, created_at FROM credentials WHERE user_id = ? AND type = 'http' ORDER BY name ASC",
+    )
+    .bind(userId)
+    .all<CredentialRow>();
+  return result.results;
 }
 
 export async function updateStorageBackend(

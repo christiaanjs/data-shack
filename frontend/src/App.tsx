@@ -1,14 +1,17 @@
-import { useEffect, useState } from "preact/hooks";
+import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import { CatalogPanel } from "./CatalogPanel.tsx";
 import { LoadJobsPanel } from "./LoadJobsPanel.tsx";
 import { QueryPanel } from "./QueryPanel.tsx";
 import { SettingsPanel } from "./SettingsPanel.tsx";
+import { TransformJobsPanel } from "./TransformJobsPanel.tsx";
 import { clearTokens, getAccessToken, getValidToken, handleCallback, startLogin } from "./auth.ts";
+import { initDuckDB } from "./duckdb.ts";
+import { type JobEvent, type SessionConnection, connectSession } from "./sessionWs.ts";
 
 const WORKER_BASE = import.meta.env.VITE_WORKER_URL ?? "";
 const DEV_TOKEN = import.meta.env.VITE_DEV_TOKEN as string | undefined;
 
-type Tab = "query" | "catalog" | "jobs" | "settings";
+type Tab = "query" | "catalog" | "jobs" | "transforms" | "settings";
 
 async function getAuthHeaders(): Promise<Record<string, string>> {
   if (DEV_TOKEN) return { "X-Dev-Token": DEV_TOKEN };
@@ -22,6 +25,12 @@ export function App() {
   const [callbackError, setCallbackError] = useState<string | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<Tab>("query");
+  const [sessionConnected, setSessionConnected] = useState(false);
+  const sessionRef = useRef<SessionConnection | null>(null);
+  const jobEventListenerRef = useRef<((ev: JobEvent) => void) | null>(null);
+  const setJobListener = useCallback((listener: ((ev: JobEvent) => void) | null) => {
+    jobEventListenerRef.current = listener;
+  }, []);
 
   useEffect(() => {
     if (DEV_TOKEN) {
@@ -68,6 +77,30 @@ export function App() {
       }
     };
     fetchUserId().catch(() => {});
+  }, [authed]);
+
+  // Establish Session DO WebSocket after auth to receive MCP queries and transform jobs.
+  useEffect(() => {
+    if (!authed) {
+      sessionRef.current?.close();
+      sessionRef.current = null;
+      setSessionConnected(false);
+      return;
+    }
+
+    const conn = connectSession({
+      workerBase: WORKER_BASE,
+      getAuthHeaders,
+      getDb: initDuckDB,
+      onStatusChange: setSessionConnected,
+    });
+    conn.setJobEventListener((ev) => jobEventListenerRef.current?.(ev));
+    sessionRef.current = conn;
+
+    return () => {
+      conn.close();
+      sessionRef.current = null;
+    };
   }, [authed]);
 
   if (authed === null) {
@@ -132,6 +165,14 @@ export function App() {
             <button
               type="button"
               role="tab"
+              class={`tab${activeTab === "transforms" ? " tab-active" : ""}`}
+              onClick={() => setActiveTab("transforms")}
+            >
+              Transforms
+            </button>
+            <button
+              type="button"
+              role="tab"
               class={`tab${activeTab === "settings" ? " tab-active" : ""}`}
               onClick={() => setActiveTab("settings")}
             >
@@ -140,6 +181,10 @@ export function App() {
           </div>
         </div>
         <div class="navbar-end gap-3 pr-2">
+          <span
+            class={`w-2 h-2 rounded-full flex-shrink-0 ${sessionConnected ? "bg-success" : "bg-base-content/20"}`}
+            title={sessionConnected ? "Browser session active" : "No MCP session"}
+          />
           {userId && (
             <span class="text-xs text-base-content/50 font-mono hidden sm:block">{userId}</span>
           )}
@@ -168,6 +213,13 @@ export function App() {
         )}
         {activeTab === "jobs" && (
           <LoadJobsPanel workerBase={WORKER_BASE} getAuthHeaders={getAuthHeaders} />
+        )}
+        {activeTab === "transforms" && (
+          <TransformJobsPanel
+            workerBase={WORKER_BASE}
+            getAuthHeaders={getAuthHeaders}
+            setJobListener={setJobListener}
+          />
         )}
         {activeTab === "settings" && (
           <SettingsPanel workerBase={WORKER_BASE} getAuthHeaders={getAuthHeaders} />

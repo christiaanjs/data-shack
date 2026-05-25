@@ -2,6 +2,10 @@ name = "data-shack"
 main = "src/index.ts"
 compatibility_date = "2025-05-06"
 
+[observability.logs]
+enabled = true
+invocation_logs = true
+
 [[d1_databases]]
 binding = "DB"
 database_name = "data-shack-db"
@@ -19,9 +23,17 @@ id = "bead93e6e210407094d6fa99327784b5"
 name = "CATALOG"
 class_name = "CatalogDO"
 
+[[durable_objects.bindings]]
+name = "SESSION_DO"
+class_name = "SessionDO"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["CatalogDO"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["SessionDO"]
 
 [[queues.producers]]
 binding = "LOAD_JOB_QUEUE"
@@ -68,6 +80,10 @@ id = "122d990587e9476e95dedb426b5fbf37"
 [[env.staging.durable_objects.bindings]]
 name = "CATALOG"
 class_name = "CatalogDO"
+
+[[env.staging.durable_objects.bindings]]
+name = "SESSION_DO"
+class_name = "SessionDO"
 
 [[env.staging.queues.producers]]
 binding = "LOAD_JOB_QUEUE"

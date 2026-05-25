@@ -15,7 +15,9 @@ Each stage produces something functional and testable independently. Stages 1–
 | Stage 4 | Load jobs: cron-triggered HTTP→storage ETL with catalog commit | ✅ Done |
 | URI unification | `r2://name/key` for both backend types; name-based resolution; `UNIQUE(user_id, name)` | ✅ Done |
 | Storage backend edit | `GET`/`PATCH /api/storage-backends/:id`; `EditBackendDialog` in settings UI | ✅ Done |
-| Stage 5–10 | See below | Not started |
+| Stage 6 | Session DO + MCP server (`get_warehouse_schema`, `run_query`, `read_data`) | ✅ Done |
+| Stage 7 | Transform jobs + triggers; session DO dispatch; browser execution in DuckDB-WASM | ✅ Done |
+| Stage 5, 8–10 | See below | Not started |
 
 **Note on Stage 1 + Stage 2 storage resolution (updated — S3 proxy + URI unification):** The original per-key JWT token flow (`POST /api/storage/resolve`, `/api/storage/obj/:token`, `/api/storage/r2s3compat/obj/:token`) has been replaced by an S3-compatible proxy. `POST /api/storage/proxy-credentials` vends short-lived `{ accessKeyId, secret, endpoint, region, bucket }` credentials stored in `PROXY_CREDS_KV` with TTL. The frontend calls `acquireProxyCred()` to get a credential and `buildS3Secret()` to build a DuckDB `CREATE OR REPLACE SECRET` statement; all storage operations (GET, HEAD, PUT, ListObjectsV2) then flow through `GET|HEAD|PUT /api/storage/s3proxy/:bucket/*key` on the Worker (implemented in `src/storage/router.ts`), which forwards to the real backend (R2 binding for `r2-bound`, re-signed upstream S3 for `r2-s3compat`). This enables DuckDB `COPY TO … PARTITION_BY` (multiple PUT paths not known in advance) and `read_parquet('…/**/*.parquet', hive_partitioning=true)` (ListObjectsV2 to discover partition files). No CORS policy on the upstream bucket is needed. `POST /api/storage/resolve` is retained for `http-ds://` URI resolution only.
 
@@ -98,7 +100,6 @@ Implemented as a standalone Cloudflare Worker with D1, ahead of Stage 1, to esta
 
 ### Deferred
 
-- `jobs` and `triggers` tables (Stage 7 — transform job queue)
 - WebSocket broadcast on commit (Stage 5 — live sync)
 
 ---
@@ -135,36 +136,32 @@ Implemented as a standalone Cloudflare Worker with D1, ahead of Stage 1, to esta
 
 ---
 
-## Stage 6 — Session DO and MCP server
+## Stage 6 — Session DO and MCP server ✅ Done
 
 **Goal:** Claude can query the warehouse.
 
-- Session Durable Object: accepts a WebSocket from the browser, registers the session, forwards inbound query requests to the browser and streams results back
-- MCP server (Worker) with two initial tools:
-  - `get_warehouse_schema` — reads from catalog DO, no browser session needed
-  - `run_query` — routes through session DO, requires an active browser tab
+### ✅ Implemented
+
+- `SessionDO` (`src/session/do.ts`): accepts browser WebSocket via `ctx.acceptWebSocket` (hibernation API). Routes MCP queries: `POST /query` stores a resolver in an in-memory `pendingQueries` map, sends `{ type: "query", queryId, sql }` to the browser, and awaits `{ type: "result" | "error" }` back. `GET /session/status` returns connected socket count. `GET /session/ws` upgrades the browser connection.
+- MCP server (`src/mcp/server.ts`): Streamable HTTP transport (MCP 2025-03-26 spec), mounted at `/mcp` behind `requireAuth`. Four tools: `get_warehouse_schema` (catalog DO — no browser session required), `list_data_sources` (lists HTTP credentials — no browser session required), `run_query` and `read_data` (both route through session DO).
+- 13 integration tests in `test/session.test.ts`
 
 **Test:** Connect Claude Desktop to the MCP server. Ask Claude what tables exist — should answer without a browser tab open. Open a tab, ask Claude to query transactions — should return real results. Close the tab, ask Claude to query — should report no session available rather than hanging.
 
 ---
 
-## Stage 7 — Compaction (first transform job)
+## Stage 7 — Compaction (first transform job) ✅ Done
 
 **Goal:** The query format improves automatically.
 
-- Transform job queue in the catalog DO: `jobs` table with `type`, `status`, `requires_browser`, `watches`
-- Trigger-on-commit logic: after each load commit, check `triggers` table and enqueue matching pending transform jobs
-- Session DO job dispatch: on browser connect, check for pending transform jobs and forward over session WebSocket
-- Browser-side transform runner:
-  1. Receives job spec including input URIs and output URI
-  2. Resolves each input URI to a readable HTTPS URL via the Worker proxy storage resolver
-  3. Registers DuckDB views per input table using the resolved URLs
-  4. Runs `COPY … TO … (FORMAT PARQUET)` query — ✅ write URL resolution and DuckDB WASM write path already implemented (steps 5–6 below are done)
-  5. Requests a writable URL for the output URI from the Worker proxy (`method: "PUT"` in `POST /api/storage/resolve`) — ✅ Done for `r2://` and `r2-s3compat://`
-  6. Writes Parquet directly to the storage backend — ✅ Done (`r2://` via virtual FS + fetch, `r2-s3compat://` via DuckDB native S3 httpfs)
-  7. Commits result URI to catalog DO
-- Re-claim logic: if session drops mid-job, session DO resets job to `pending`
-- Compaction trigger added for the `transactions` table
+### ✅ Implemented
+
+- `transform_jobs` SQLite table in the catalog DO: `id`, `name`, `sql`, `output_table`, `output_uri`, `output_backend`, `format`, `status` (`idle → pending → running → done/failed`), `requires_browser`. `triggers` table maps a watched table name to a job ID.
+- Trigger-on-commit: `POST /commit` in catalog DO checks the `triggers` table for each committed table, sets matching jobs from `idle/done/failed` to `pending`, and returns `{ triggeredJobIds }` in the response body.
+- Worker relays `triggeredJobIds` to the session DO in a `waitUntil` `POST /dispatch-jobs`, which forwards pending jobs to any connected browser socket.
+- Session DO dispatch on connect: `dispatchPendingJobs` fetches `GET /jobs/pending` from catalog DO and sends each as `{ type: "transform_job", jobId, sql, outputTable, outputUri, outputBackend, format }` over the WebSocket.
+- Browser transform runner (`frontend/src/sessionWs.ts`): sends `job_claimed`, acquires proxy credentials for the output backend, runs the COPY TO SQL in DuckDB, then sends `job_complete` (with the output URI) or `job_error`. The Session DO receives `job_complete`, commits the output URI to the catalog DO, and marks the job `done`. Session DO resets `running` jobs to `pending` on WebSocket close so the next browser session re-claims them.
+- Worker API: `GET/POST/DELETE /api/transform-jobs`, `GET/POST/DELETE /api/triggers`.
 
 **Test:** Trigger an Akahu load. Verify compact job appears as pending. Open a browser tab. Verify job is claimed and executed. Verify catalog has a Parquet snapshot URI replacing NDJSON staging URIs. Close tab mid-compaction, reopen — verify job re-runs cleanly.
 

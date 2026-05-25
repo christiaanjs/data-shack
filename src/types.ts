@@ -9,6 +9,7 @@ export interface Env {
   R2: R2Bucket;
   PROXY_CREDS_KV: KVNamespace;
   CATALOG: DurableObjectNamespace;
+  SESSION_DO: DurableObjectNamespace;
   LOAD_JOB_QUEUE: Queue<{ jobId: string }>;
   DEV_TOKEN: string;
   DEV_USER_ID: string;

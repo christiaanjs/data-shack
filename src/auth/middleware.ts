@@ -18,7 +18,9 @@ export async function authenticate(request: Request, env: Env): Promise<AuthCont
     if (authHeader?.startsWith("Bearer ")) {
       const token = authHeader.slice(7);
       try {
-        const payload = await verifyJwt(token, env.JWT_SECRET);
+        const url = new URL(request.url);
+        const issuer = `${url.protocol}//${url.host}`;
+        const payload = await verifyJwt(token, env.JWT_SECRET, `${issuer}/mcp`);
         if (payload) return { userId: payload.sub };
       } catch {
         // treat any crypto error as an invalid token

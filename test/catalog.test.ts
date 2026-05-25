@@ -441,3 +441,196 @@ describe("DELETE /catalog/tables/:table", () => {
     expect(tables.find((t) => t.name === "restore_me")).toBeDefined();
   });
 });
+
+describe("Transform jobs", () => {
+  it("POST /api/transform-jobs creates a job", async () => {
+    const res = await SELF.fetch("http://localhost/api/transform-jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({
+        name: "compact transactions",
+        sql: "COPY (SELECT * FROM transactions) TO 'r2://data-shack/compacted/txn.parquet' (FORMAT PARQUET)",
+        output_table: "transactions_compacted",
+        output_uri: "r2://data-shack/compacted/txn.parquet",
+        output_backend: "data-shack",
+        format: "parquet",
+      }),
+    });
+    expect(res.status).toBe(201);
+    const job = (await res.json()) as {
+      id: string;
+      status: string;
+      sql: string;
+      output_table: string;
+    };
+    expect(job.id.startsWith("tj_")).toBe(true);
+    expect(job.status).toBe("idle");
+    expect(job.output_table).toBe("transactions_compacted");
+  });
+
+  it("GET /api/transform-jobs lists jobs", async () => {
+    await SELF.fetch("http://localhost/api/transform-jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({
+        sql: "SELECT 1",
+        output_table: "list_test",
+        output_uri: "r2://data-shack/list_test.parquet",
+        output_backend: "data-shack",
+      }),
+    });
+
+    const res = await SELF.fetch("http://localhost/api/transform-jobs", { headers: DEV_HEADERS });
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as { jobs: unknown[] };
+    expect(Array.isArray(data.jobs)).toBe(true);
+    expect(data.jobs.length).toBeGreaterThan(0);
+  });
+
+  it("POST /api/triggers creates a trigger and commit fires it", async () => {
+    // Create a transform job.
+    const jobRes = await SELF.fetch("http://localhost/api/transform-jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({
+        name: "trigger test job",
+        sql: "SELECT 1",
+        output_table: "trigger_output",
+        output_uri: "r2://data-shack/trigger_output.parquet",
+        output_backend: "data-shack",
+      }),
+    });
+    expect(jobRes.status).toBe(201);
+    const job = (await jobRes.json()) as { id: string };
+
+    // Create a trigger that watches "trigger_source" table.
+    const trigRes = await SELF.fetch("http://localhost/api/triggers", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({ watches: "trigger_source", job_id: job.id }),
+    });
+    expect(trigRes.status).toBe(201);
+    const trigger = (await trigRes.json()) as { id: string; watches: string; job_id: string };
+    expect(trigger.watches).toBe("trigger_source");
+    expect(trigger.job_id).toBe(job.id);
+
+    // Commit to the watched table — should trigger the job.
+    const commitRes = await SELF.fetch("http://localhost/catalog/commit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({
+        table: "trigger_source",
+        uri: "r2://data-shack/trigger_source/file.ndjson",
+        storageBackend: "data-shack",
+      }),
+    });
+    expect(commitRes.status).toBe(201);
+    const commitData = (await commitRes.json()) as { triggeredJobIds: string[] };
+    expect(commitData.triggeredJobIds).toContain(job.id);
+
+    // Job should now be pending.
+    const jobsRes = await SELF.fetch("http://localhost/api/transform-jobs", {
+      headers: DEV_HEADERS,
+    });
+    const { jobs } = (await jobsRes.json()) as { jobs: Array<{ id: string; status: string }> };
+    const found = jobs.find((j) => j.id === job.id);
+    expect(found?.status).toBe("pending");
+  });
+
+  it("commit to an unwatched table does not trigger the job", async () => {
+    const jobRes = await SELF.fetch("http://localhost/api/transform-jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({
+        sql: "SELECT 1",
+        output_table: "not_triggered_out",
+        output_uri: "r2://data-shack/not_triggered.parquet",
+        output_backend: "data-shack",
+      }),
+    });
+    const job = (await jobRes.json()) as { id: string };
+
+    // Trigger watches a different table.
+    await SELF.fetch("http://localhost/api/triggers", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({ watches: "watched_table_x", job_id: job.id }),
+    });
+
+    // Commit to a different table.
+    const commitRes = await SELF.fetch("http://localhost/catalog/commit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({
+        table: "different_table_y",
+        uri: "r2://data-shack/different.ndjson",
+        storageBackend: "data-shack",
+      }),
+    });
+    const commitData = (await commitRes.json()) as { triggeredJobIds: string[] };
+    expect(commitData.triggeredJobIds).not.toContain(job.id);
+  });
+
+  it("DELETE /api/transform-jobs/:id removes the job", async () => {
+    const jobRes = await SELF.fetch("http://localhost/api/transform-jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({
+        sql: "SELECT 1",
+        output_table: "to_delete_job",
+        output_uri: "r2://data-shack/to_delete.parquet",
+        output_backend: "data-shack",
+      }),
+    });
+    const job = (await jobRes.json()) as { id: string };
+
+    const del = await SELF.fetch(`http://localhost/api/transform-jobs/${job.id}`, {
+      method: "DELETE",
+      headers: DEV_HEADERS,
+    });
+    expect(del.status).toBe(204);
+
+    // Should no longer appear in list.
+    const list = await SELF.fetch("http://localhost/api/transform-jobs", { headers: DEV_HEADERS });
+    const { jobs } = (await list.json()) as { jobs: Array<{ id: string }> };
+    expect(jobs.find((j) => j.id === job.id)).toBeUndefined();
+  });
+
+  it("GET /api/triggers lists triggers", async () => {
+    const res = await SELF.fetch("http://localhost/api/triggers", { headers: DEV_HEADERS });
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as { triggers: unknown[] };
+    expect(Array.isArray(data.triggers)).toBe(true);
+  });
+
+  it("DELETE /api/triggers/:id removes the trigger", async () => {
+    const jobRes = await SELF.fetch("http://localhost/api/transform-jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({
+        sql: "SELECT 1",
+        output_table: "trig_del_out",
+        output_uri: "r2://data-shack/trig_del.parquet",
+        output_backend: "data-shack",
+      }),
+    });
+    const job = (await jobRes.json()) as { id: string };
+
+    const trigRes = await SELF.fetch("http://localhost/api/triggers", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({ watches: "trig_del_source", job_id: job.id }),
+    });
+    const trigger = (await trigRes.json()) as { id: string };
+
+    const del = await SELF.fetch(`http://localhost/api/triggers/${trigger.id}`, {
+      method: "DELETE",
+      headers: DEV_HEADERS,
+    });
+    expect(del.status).toBe(204);
+
+    const list = await SELF.fetch("http://localhost/api/triggers", { headers: DEV_HEADERS });
+    const { triggers } = (await list.json()) as { triggers: Array<{ id: string }> };
+    expect(triggers.find((t) => t.id === trigger.id)).toBeUndefined();
+  });
+});

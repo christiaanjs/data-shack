@@ -6,6 +6,8 @@ import { authenticate } from "./auth/middleware.ts";
 import { oauthRouter } from "./auth/oauth.ts";
 import { CatalogDO } from "./catalog/do.ts";
 export { CatalogDO };
+import { SessionDO } from "./session/do.ts";
+export { SessionDO };
 import { decryptConfig, encryptConfig } from "./crypto.ts";
 import {
   advanceNextRunAt,
@@ -21,6 +23,7 @@ import {
 import {
   deleteCredential,
   deleteStorageBackend,
+  getCredentialByNameOrId,
   getCredentialConfig,
   getStorageBackendConfig,
   insertCredential,
@@ -32,6 +35,7 @@ import {
 import { decryptHttpConfig, resolveHeaderTemplates } from "./http-config.ts";
 import { validateDateRangeConfig, validatePaginationConfig } from "./loaders/config-types.ts";
 import { runHttpLoadJob } from "./loaders/http.ts";
+import { mcpHandler } from "./mcp/server.ts";
 import { parseHttpDsUri, signDataSourceToken, verifyDataSourceToken } from "./storage/resolve.ts";
 import { storageRouter } from "./storage/router.ts";
 import type { Env } from "./types.ts";
@@ -107,7 +111,7 @@ async function resolveHttpDsUri(
   const parsed = parseHttpDsUri(uri);
   if (!parsed) throw new Error(`Invalid http-ds URI: ${uri}`);
 
-  const row = await getCredentialConfig(env.DB, parsed.credentialId, userId);
+  const row = await getCredentialByNameOrId(env.DB, parsed.credentialId, userId);
   if (!row || row.type !== "http")
     throw new Error(`HTTP credential not found: ${parsed.credentialId}`);
 
@@ -119,7 +123,7 @@ async function resolveHttpDsUri(
       iat: now,
       exp: now + 3600,
       jti: crypto.randomUUID(),
-      c: parsed.credentialId,
+      c: row.id,
       p: parsed.path,
       u: userId,
     },
@@ -141,23 +145,77 @@ app.on(["GET", "HEAD"], "/api/data-sources/obj/:token", async (c) => {
   const config = await decryptHttpConfig(row.encrypted_config, c.env.JWT_SECRET);
   if (!config) return new Response("Bad Gateway", { status: 502 });
 
-  const url = config.baseUrl.replace(/\/$/, "") + payload.p;
+  // Parse path for pagination params
+  const pathUrl = new URL(payload.p, "http://x");
+  const pagCursorParam = pathUrl.searchParams.get("_pag_cursor_param");
+  const pagCursorPath = pathUrl.searchParams.get("_pag_cursor_path");
+  const pagDataPath = pathUrl.searchParams.get("_pag_data_path");
+  // Strip _pag_* and build clean path
+  pathUrl.searchParams.delete("_pag_cursor_param");
+  pathUrl.searchParams.delete("_pag_cursor_path");
+  pathUrl.searchParams.delete("_pag_data_path");
+  const cleanPath = pathUrl.pathname + (pathUrl.search !== "?" ? pathUrl.search : "");
+
+  const baseUrl = config.baseUrl.replace(/\/$/, "") + cleanPath;
   const resolvedHeaders = resolveHeaderTemplates(config.headers, config.variables);
 
-  // Always GET upstream — many APIs don't support HEAD. Strip body ourselves for HEAD requests.
-  let upstream: Response;
-  try {
-    upstream = await fetch(url, { method: "GET", headers: resolvedHeaders });
-  } catch {
-    return new Response("Bad Gateway", { status: 502 });
+  function getAtPath(obj: unknown, path: string): unknown {
+    return path.split(".").reduce<unknown>((cur, key) => {
+      if (cur && typeof cur === "object" && !Array.isArray(cur)) {
+        return (cur as Record<string, unknown>)[key];
+      }
+      return undefined;
+    }, obj);
   }
 
+  const isPaginated = pagCursorParam && pagCursorPath;
   const isHead = c.req.method === "HEAD";
-  return new Response(isHead ? null : upstream.body, {
-    status: upstream.status,
-    headers: {
-      "Content-Type": upstream.headers.get("Content-Type") ?? "application/octet-stream",
-    },
+
+  if (!isPaginated) {
+    let upstream: Response;
+    try {
+      upstream = await fetch(baseUrl, { method: "GET", headers: resolvedHeaders });
+    } catch {
+      return new Response("Bad Gateway", { status: 502 });
+    }
+    return new Response(isHead ? null : upstream.body, {
+      status: upstream.status,
+      headers: {
+        "Content-Type": upstream.headers.get("Content-Type") ?? "application/octet-stream",
+      },
+    });
+  }
+
+  // HEAD requests don't need a body — skip the fetch loop entirely.
+  if (isHead) return new Response(null, { headers: { "Content-Type": "application/x-ndjson" } });
+
+  // Paginated: fetch all pages, concatenate as NDJSON
+  const maxPages = 45;
+  const chunks: string[] = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < maxPages; page++) {
+    const pageUrl = new URL(baseUrl);
+    if (cursor) pageUrl.searchParams.set(pagCursorParam, cursor);
+    let res: Response;
+    try {
+      res = await fetch(pageUrl.toString(), { method: "GET", headers: resolvedHeaders });
+    } catch {
+      return new Response("Bad Gateway", { status: 502 });
+    }
+    if (!res.ok) return new Response(`Upstream error: ${res.status}`, { status: 502 });
+    const json = (await res.json()) as unknown;
+    const items = pagDataPath ? getAtPath(json, pagDataPath) : json;
+    if (Array.isArray(items)) {
+      for (const item of items) chunks.push(JSON.stringify(item));
+    } else if (items !== undefined) {
+      chunks.push(JSON.stringify(items));
+    }
+    const nextCursor = getAtPath(json, pagCursorPath);
+    if (!nextCursor || typeof nextCursor !== "string") break;
+    cursor = nextCursor;
+  }
+  return new Response(isHead ? null : chunks.join("\n"), {
+    headers: { "Content-Type": "application/x-ndjson" },
   });
 });
 
@@ -234,6 +292,22 @@ app.get("/api/credentials", requireAuth, async (c) => {
   return c.json({ credentials });
 });
 
+app.get("/api/credentials/:id", requireAuth, async (c) => {
+  const row = await c.env.DB.prepare(
+    "SELECT id, name, type, encrypted_config FROM credentials WHERE id = ? AND user_id = ?",
+  )
+    .bind(c.req.param("id"), c.get("userId"))
+    .first<{ id: string; name: string; type: string; encrypted_config: string }>();
+  if (!row) return c.json({ error: "not found" }, 404);
+  let config: unknown = {};
+  try {
+    config = JSON.parse(await decryptConfig(row.encrypted_config, c.env.JWT_SECRET));
+  } catch {
+    // return empty config if decryption fails rather than erroring
+  }
+  return c.json({ id: row.id, name: row.name, type: row.type, config });
+});
+
 app.post("/api/credentials", requireAuth, async (c) => {
   const body = await c.req.json<{
     name?: unknown;
@@ -242,6 +316,15 @@ app.post("/api/credentials", requireAuth, async (c) => {
   }>();
   if (typeof body.name !== "string" || typeof body.type !== "string" || !body.config) {
     return c.json({ error: "name, type, and config are required" }, 400);
+  }
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(body.name) || body.name.length > 64) {
+    return c.json(
+      {
+        error:
+          "name must be 1–64 characters, start with a letter or digit, and contain only letters, digits, '.', '_', or '-'",
+      },
+      400,
+    );
   }
   const encryptedConfig = await encryptConfig(JSON.stringify(body.config), c.env.JWT_SECRET);
   const result = await insertCredential(c.env.DB, {
@@ -359,6 +442,10 @@ function catalogStub(env: Env, userId: string) {
   return env.CATALOG.get(env.CATALOG.idFromName(userId));
 }
 
+function sessionStub(env: Env, userId: string) {
+  return env.SESSION_DO.get(env.SESSION_DO.idFromName(userId));
+}
+
 app.get("/catalog/tables", requireAuth, async (c) => {
   const res = await catalogStub(c.env, c.get("userId")).fetch("http://do/tables");
   return new Response(res.body, { status: res.status, headers: res.headers });
@@ -397,11 +484,31 @@ app.delete("/catalog/tables/:table", requireAuth, async (c) => {
 
 app.post("/catalog/commit", requireAuth, async (c) => {
   const body = await c.req.json();
-  const res = await catalogStub(c.env, c.get("userId")).fetch("http://do/commit", {
+  const userId = c.get("userId");
+  const res = await catalogStub(c.env, userId).fetch("http://do/commit", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
+  if (res.ok) {
+    const cloned = res.clone();
+    c.executionCtx.waitUntil(
+      (async () => {
+        const data = (await cloned.json()) as { triggeredJobIds?: string[] };
+        if (data.triggeredJobIds && data.triggeredJobIds.length > 0) {
+          try {
+            await sessionStub(c.env, userId).fetch("http://do/dispatch-jobs", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ userId, jobIds: data.triggeredJobIds }),
+            });
+          } catch {
+            // Best-effort: jobs remain pending and will be dispatched on next browser connect.
+          }
+        }
+      })(),
+    );
+  }
   return new Response(res.body, { status: res.status, headers: res.headers });
 });
 
@@ -564,6 +671,157 @@ app.post("/api/load-jobs/:id/trigger", requireAuth, async (c) => {
   return c.json({ queued: true }, 202);
 });
 
+// ── Session WebSocket ─────────────────────────────────────────────────────
+
+app.get("/session/ws", async (c) => {
+  if (c.req.header("Upgrade") !== "websocket") {
+    return c.text("Expected Upgrade: websocket", 426);
+  }
+  // Prefer Sec-WebSocket-Protocol for auth (avoids token appearing in URL logs).
+  // Fall back to ?token= query param for backward compatibility.
+  const wsProtocol = c.req.header("Sec-WebSocket-Protocol");
+  const url = new URL(c.req.url);
+  const queryToken = url.searchParams.get("token");
+  const rawToken = wsProtocol ?? queryToken;
+  let authRequest = c.req.raw;
+  if (rawToken) {
+    const augmented = new Headers(c.req.raw.headers);
+    if (c.env.DEV_TOKEN && rawToken === c.env.DEV_TOKEN) {
+      augmented.set("X-Dev-Token", rawToken);
+    } else {
+      augmented.set("Authorization", `Bearer ${rawToken}`);
+    }
+    authRequest = new Request(c.req.url, { headers: augmented, method: c.req.method });
+  }
+  const auth = await authenticate(authRequest, c.env);
+  if (!auth) return new Response("Unauthorized", { status: 401 });
+  const userId = auth.userId;
+
+  // Strip token from forwarded URL and set X-User-ID for the Session DO.
+  const forwardUrl = new URL(c.req.url);
+  forwardUrl.searchParams.delete("token");
+  const stub = sessionStub(c.env, userId);
+  const headers = new Headers(c.req.raw.headers);
+  headers.set("X-User-ID", userId);
+  return stub.fetch(
+    new Request(forwardUrl.toString(), {
+      headers,
+      cf: (c.req.raw as Request & { cf?: unknown }).cf,
+    }),
+  );
+});
+
+app.get("/session/status", requireAuth, async (c) => {
+  const userId = c.get("userId");
+  const res = await sessionStub(c.env, userId).fetch("http://do/status", {
+    headers: { "X-User-ID": userId },
+  });
+  return new Response(res.body, { status: res.status, headers: res.headers });
+});
+
+// ── MCP server ────────────────────────────────────────────────────────────
+
+// Streamable HTTP (2025-03-26): GET establishes a server-to-client SSE channel.
+// We don't send server-initiated messages, so respond with 405 to signal the
+// endpoint exists but this direction isn't used.
+app.get("/mcp", (c) => {
+  return new Response(null, { status: 405, headers: { Allow: "POST" } });
+});
+
+app.post("/mcp", requireAuth, async (c) => {
+  const userId = c.get("userId");
+  return mcpHandler(
+    c.req.raw,
+    c.env,
+    userId,
+    sessionStub(c.env, userId),
+    catalogStub(c.env, userId),
+  );
+});
+
+// ── Transform job endpoints (relay to Catalog DO) ─────────────────────────
+
+app.get("/api/transform-jobs", requireAuth, async (c) => {
+  const res = await catalogStub(c.env, c.get("userId")).fetch("http://do/jobs");
+  return new Response(res.body, { status: res.status, headers: res.headers });
+});
+
+app.post("/api/transform-jobs", requireAuth, async (c) => {
+  const body = await c.req.json();
+  const res = await catalogStub(c.env, c.get("userId")).fetch("http://do/jobs", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return new Response(res.body, { status: res.status, headers: res.headers });
+});
+
+app.delete("/api/transform-jobs/:id", requireAuth, async (c) => {
+  const res = await catalogStub(c.env, c.get("userId")).fetch(
+    `http://do/jobs/${encodeURIComponent(c.req.param("id"))}`,
+    { method: "DELETE" },
+  );
+  return new Response(res.body, { status: res.status });
+});
+
+app.patch("/api/transform-jobs/:id", requireAuth, async (c) => {
+  const id = c.req.param("id");
+  const body = await c.req.json();
+  const res = await catalogStub(c.env, c.get("userId")).fetch(
+    `http://do/jobs/${encodeURIComponent(id)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+  );
+  return new Response(res.body, { status: res.status, headers: res.headers });
+});
+
+app.post("/api/transform-jobs/:id/trigger", requireAuth, async (c) => {
+  const id = c.req.param("id");
+  const userId = c.get("userId");
+  const res = await catalogStub(c.env, userId).fetch(
+    `http://do/jobs/${encodeURIComponent(id)}/trigger`,
+    { method: "POST" },
+  );
+  if (res.ok) {
+    c.executionCtx.waitUntil(
+      sessionStub(c.env, userId)
+        .fetch("http://do/dispatch-jobs", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ userId }),
+        })
+        .catch(() => {}),
+    );
+  }
+  return new Response(res.body, { status: res.status });
+});
+
+app.get("/api/triggers", requireAuth, async (c) => {
+  const res = await catalogStub(c.env, c.get("userId")).fetch("http://do/triggers");
+  return new Response(res.body, { status: res.status, headers: res.headers });
+});
+
+app.post("/api/triggers", requireAuth, async (c) => {
+  const body = await c.req.json();
+  const res = await catalogStub(c.env, c.get("userId")).fetch("http://do/triggers", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return new Response(res.body, { status: res.status, headers: res.headers });
+});
+
+app.delete("/api/triggers/:id", requireAuth, async (c) => {
+  const res = await catalogStub(c.env, c.get("userId")).fetch(
+    `http://do/triggers/${encodeURIComponent(c.req.param("id"))}`,
+    { method: "DELETE" },
+  );
+  return new Response(res.body, { status: res.status });
+});
+
 // ── Root ─────────────────────────────────────────────────────────────────
 
 app.get("/", (c) => c.text("data-shack worker"));
@@ -595,8 +853,9 @@ export default {
           msg.ack();
           return;
         }
+        let triggeredJobIds: string[] = [];
         try {
-          await runHttpLoadJob(job, env);
+          ({ triggeredJobIds } = await runHttpLoadJob(job, env));
         } catch (err) {
           const lastError = String(err);
           console.error(`Load job ${job.id} (${job.name}) failed:`, err);
@@ -606,6 +865,18 @@ export default {
         }
         const nextRunAt = new Cron(job.cron_schedule).nextRun()?.getTime() ?? null;
         await updateLoadJobOutcome(env.DB, job.id, Date.now(), nextRunAt);
+        // Dispatch any triggered transform jobs to the connected browser session.
+        if (triggeredJobIds.length > 0) {
+          try {
+            await sessionStub(env, job.user_id).fetch("http://do/dispatch-jobs", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ userId: job.user_id }),
+            });
+          } catch {
+            // Best-effort; jobs remain pending and dispatch on next browser connect.
+          }
+        }
         msg.ack();
       }),
     );

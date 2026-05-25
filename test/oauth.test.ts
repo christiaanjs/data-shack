@@ -212,18 +212,33 @@ describe("verifyJwt", () => {
     expect(await verifyJwt(tampered, env.JWT_SECRET)).toBeNull();
   });
 
-  it("returns null for a token with wrong aud", async () => {
+  it("returns null for a token with missing aud", async () => {
     const now = Math.floor(Date.now() / 1000);
     const payload = {
       sub: "usr_1",
       iss: "http://localhost",
-      aud: "other",
+      // aud intentionally omitted
       iat: now,
       exp: now + 3600,
       jti: "j4",
     };
-    const token = await signJwt(payload, env.JWT_SECRET);
+    const token = await signJwt(payload as Parameters<typeof signJwt>[0], env.JWT_SECRET);
     expect(await verifyJwt(token, env.JWT_SECRET)).toBeNull();
+  });
+
+  it("returns null for a token with wrong audience when expectedAud is set", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const payload = {
+      sub: "usr_1",
+      iss: "http://localhost",
+      aud: "http://localhost/mcp",
+      iat: now,
+      exp: now + 3600,
+      jti: "j5",
+    };
+    const token = await signJwt(payload, env.JWT_SECRET);
+    expect(await verifyJwt(token, env.JWT_SECRET, "http://other/mcp")).toBeNull();
+    expect(await verifyJwt(token, env.JWT_SECRET, "http://localhost/mcp")).not.toBeNull();
   });
 
   it("returns null for malformed base64url input", async () => {
@@ -404,7 +419,7 @@ describe("POST /token (authorization_code)", () => {
     const { access_token } = (await res.json()) as { access_token: string };
     const payload = await verifyJwt(access_token, env.JWT_SECRET);
     expect(payload?.sub).toBe("usr_jwt_test");
-    expect(payload?.aud).toBe("mcp");
+    expect(payload?.aud).toMatch(/\/mcp$/);
   });
 
   it("rejects an unknown authorization code", async () => {
@@ -722,7 +737,7 @@ describe("authenticate (via /me)", () => {
     const payload = {
       sub: "usr_test",
       iss: "http://localhost",
-      aud: "mcp",
+      aud: "http://localhost/mcp",
       iat: now,
       exp: now + 3600,
       jti: crypto.randomUUID(),
@@ -734,12 +749,29 @@ describe("authenticate (via /me)", () => {
     expect(res.status).toBe(200);
   });
 
+  it("rejects a JWT with wrong audience with 401", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const payload = {
+      sub: "usr_test",
+      iss: "http://localhost",
+      aud: "http://other-host/mcp",
+      iat: now,
+      exp: now + 3600,
+      jti: crypto.randomUUID(),
+    };
+    const token = await signJwt(payload, env.JWT_SECRET);
+    const res = await SELF.fetch("http://localhost/me", {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(res.status).toBe(401);
+  });
+
   it("rejects an expired Bearer JWT with 401", async () => {
     const now = Math.floor(Date.now() / 1000);
     const payload = {
       sub: "usr_test",
       iss: "http://localhost",
-      aud: "mcp",
+      aud: "http://localhost/mcp",
       iat: now - 7200,
       exp: now - 3600,
       jti: crypto.randomUUID(),

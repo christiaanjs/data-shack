@@ -25,7 +25,7 @@ describe("GET /api/credentials", () => {
     const res = await SELF.fetch("http://localhost/api/credentials", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...DEV_HEADERS },
-      body: JSON.stringify({ name: "My Akahu", type: "akahu", config: { token: "abc123" } }),
+      body: JSON.stringify({ name: "my-akahu", type: "akahu", config: { token: "abc123" } }),
     });
     expect(res.status).toBe(201);
     const data = (await res.json()) as { id: string };
@@ -38,7 +38,7 @@ describe("GET /api/credentials", () => {
       method: "POST",
       headers: { "Content-Type": "application/json", ...DEV_HEADERS },
       body: JSON.stringify({
-        name: "List Test Cred",
+        name: "list-test-cred",
         type: "generic_token",
         config: { key: "val" },
       }),
@@ -55,7 +55,7 @@ describe("GET /api/credentials", () => {
     };
     const found = data.credentials.find((c) => c.id === id);
     expect(found).toBeDefined();
-    expect(found?.name).toBe("List Test Cred");
+    expect(found?.name).toBe("list-test-cred");
     expect(found?.type).toBe("generic_token");
     expect((found as Record<string, unknown>)?.config).toBeUndefined();
   });
@@ -64,7 +64,7 @@ describe("GET /api/credentials", () => {
     const createRes = await SELF.fetch("http://localhost/api/credentials", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...DEV_HEADERS },
-      body: JSON.stringify({ name: "To Delete", type: "akahu", config: {} }),
+      body: JSON.stringify({ name: "to-delete", type: "akahu", config: {} }),
     });
     const { id } = (await createRes.json()) as { id: string };
 
@@ -132,7 +132,7 @@ describe("GET /api/storage-backends", () => {
     const createRes = await SELF.fetch("http://localhost/api/storage-backends", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...DEV_HEADERS },
-      body: JSON.stringify({ name: "To Delete", type: "r2-bound", config: {} }),
+      body: JSON.stringify({ name: "to-delete", type: "r2-bound", config: {} }),
     });
     const { id } = (await createRes.json()) as { id: string };
 

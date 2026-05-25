@@ -19,7 +19,7 @@ async function createCredential(): Promise<string> {
     method: "POST",
     headers: { "Content-Type": "application/json", ...DEV_HEADERS },
     body: JSON.stringify({
-      name: "Test Cred",
+      name: "test-cred",
       type: "http",
       config: { baseUrl: "http://localhost" },
     }),

@@ -1,38 +1,8 @@
 import type { AsyncDuckDB } from "@duckdb/duckdb-wasm";
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
+import { type CatalogTable, registerCatalogViews as loadCatalogViews } from "./catalogViews.ts";
 import { initDuckDB, runQuery } from "./duckdb.ts";
-import { acquireProxyCred, buildS3Secret, parseStorageUri } from "./storage.ts";
-
-interface CatalogTable {
-  id: string;
-  name: string;
-  description: string | null;
-  created_at: number;
-}
-
-interface CatalogSnapshot {
-  id: string;
-  table_id: string;
-  uri: string;
-  storage_backend: string;
-  access_mode: string;
-  format: string | null;
-  created_at: number;
-}
-
-function readerFn(uri: string, format?: string | null): string {
-  const fmt = format ?? inferFormat(uri);
-  if (fmt === "parquet") return "read_parquet";
-  if (fmt === "csv") return "read_csv_auto";
-  return "read_json"; // ndjson, jsonl, json, and unknown
-}
-
-function inferFormat(uri: string): string {
-  if (uri.endsWith(".parquet")) return "parquet";
-  if (uri.endsWith(".csv")) return "csv";
-  if (uri.endsWith(".ndjson") || uri.endsWith(".jsonl")) return "ndjson";
-  return "json";
-}
+import { resolveStorageUris } from "./resolveQuery.ts";
 
 interface QueryPanelProps {
   workerBase: string;
@@ -50,10 +20,6 @@ interface CredentialRow {
   type: string;
 }
 
-// Matches all storage URIs in SQL text
-const STORAGE_URI_REGEX = /(?:r2-s3compat|r2|http-ds):\/\/[^\s'"]+/g;
-// Matches storage URIs that appear after a SQL TO keyword (write destinations)
-const WRITE_URI_REGEX = /\bTO\s+['"]?((?:r2-s3compat|r2):\/\/[^\s'"]+)/gi;
 const PLACEHOLDER_SQL = "SELECT * FROM read_json('r2://data-shack-storage/sample.ndjson') LIMIT 10";
 
 export function QueryPanel({ workerBase, getAuthHeaders }: QueryPanelProps) {
@@ -93,83 +59,14 @@ export function QueryPanel({ workerBase, getAuthHeaders }: QueryPanelProps) {
   }, [workerBase, getAuthHeaders, selectedCredId]);
 
   const registerCatalogViews = useCallback(async () => {
+    const db = dbRef.current;
+    if (!db) return;
     setCatalogLoading(true);
     setCatalogError(null);
     setFailedViews([]);
     try {
-      const headers = await getAuthHeaders();
-
-      const tablesRes = await fetch(`${workerBase}/catalog/tables`, { headers });
-      if (!tablesRes.ok) throw new Error(`Catalog fetch failed: ${tablesRes.status}`);
-      const { tables } = (await tablesRes.json()) as { tables: CatalogTable[] };
-
+      const { tables, failed } = await loadCatalogViews(db, workerBase, getAuthHeaders);
       setCatalogTables(tables);
-
-      if (tables.length === 0) return;
-
-      const snapEntries = await Promise.all(
-        tables.map(async (t) => {
-          const res = await fetch(`${workerBase}/catalog/snapshots/${encodeURIComponent(t.name)}`, {
-            headers,
-          });
-          if (!res.ok) return null;
-          const { snapshots } = (await res.json()) as { snapshots: CatalogSnapshot[] };
-          return snapshots.length > 0
-            ? { table: t, snapshot: snapshots[0] as CatalogSnapshot }
-            : null;
-        }),
-      );
-      const withSnaps = snapEntries.filter(
-        (e): e is { table: CatalogTable; snapshot: CatalogSnapshot } => e !== null,
-      );
-
-      if (withSnaps.length === 0) return;
-
-      const db = dbRef.current;
-      if (!db) return;
-
-      // Acquire one proxy credential per backend (cached)
-      const secretsByBackend = new Map<string, string>();
-      const failed: string[] = [];
-
-      for (const { table, snapshot } of withSnaps) {
-        const parsed = parseStorageUri(snapshot.uri);
-        if (!parsed) {
-          failed.push(table.name);
-          continue;
-        }
-        const { backend, key } = parsed;
-
-        if (!secretsByBackend.has(backend)) {
-          try {
-            const cred = await acquireProxyCred(backend, "", workerBase, getAuthHeaders);
-            secretsByBackend.set(backend, buildS3Secret(cred));
-          } catch {
-            failed.push(table.name);
-            continue;
-          }
-        }
-
-        const preamble = secretsByBackend.get(backend);
-        if (!preamble) {
-          failed.push(table.name);
-          continue;
-        }
-
-        // Partitioned tables (URI ends with /) use glob pattern; single files use exact path.
-        const readExpr = key.endsWith("/")
-          ? `read_parquet('s3://${backend}/${key}**/*.parquet', hive_partitioning=true)`
-          : `${readerFn(snapshot.uri, snapshot.format)}('s3://${backend}/${key}')`;
-
-        const safeId = table.name.replace(/"/g, '""');
-        try {
-          await runQuery(db, `CREATE OR REPLACE VIEW "${safeId}" AS SELECT * FROM ${readExpr}`, [
-            preamble,
-          ]);
-        } catch {
-          failed.push(table.name);
-        }
-      }
       if (failed.length > 0) setFailedViews(failed);
     } catch (err) {
       setCatalogError(err instanceof Error ? err.message : "Catalog load failed");
@@ -227,75 +124,11 @@ export function QueryPanel({ workerBase, getAuthHeaders }: QueryPanelProps) {
     setQueryResult(null);
 
     try {
-      const writeUris = [
-        ...new Set([...rawSql.matchAll(WRITE_URI_REGEX)].map((m) => m[1] as string)),
-      ];
-      const allUris = Array.from(new Set(rawSql.match(STORAGE_URI_REGEX) ?? []));
-
-      if (allUris.length === 0) {
-        const result = await runQuery(db, rawSql);
-        setQueryResult(result);
-        return;
-      }
-
-      // Separate S3-proxied URIs (r2://, r2-s3compat://) from token-resolved (http-ds://)
-      const s3Uris = allUris.filter((u) => !u.startsWith("http-ds://"));
-      const httpDsUris = allUris.filter((u) => u.startsWith("http-ds://"));
-
-      // Acquire proxy credentials per backend (read scope for all; writes go natively via DuckDB)
-      const secretsByBackend = new Map<string, string>();
-      const s3UriMap = new Map<string, string>(); // original URI → s3:// URI
-
-      for (const uri of s3Uris) {
-        const parsed = parseStorageUri(uri);
-        if (!parsed) continue;
-        const { backend, key } = parsed;
-
-        if (!secretsByBackend.has(backend)) {
-          const cred = await acquireProxyCred(backend, "", workerBase, getAuthHeaders);
-          secretsByBackend.set(backend, buildS3Secret(cred));
-        }
-
-        s3UriMap.set(uri, `s3://${backend}/${key}`);
-      }
-
-      // Resolve http-ds:// URIs via token endpoint
-      const httpDsUrlMap = new Map<string, string>();
-      if (httpDsUris.length > 0) {
-        const authHeaders = await getAuthHeaders();
-        const res = await fetch(`${workerBase}/api/storage/resolve`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", ...authHeaders },
-          body: JSON.stringify({ uris: httpDsUris.map((uri) => ({ uri, method: "GET" })) }),
-        });
-        if (!res.ok) throw new Error(`URI resolution failed: ${res.status}`);
-        const data = (await res.json()) as { urls: Record<string, string> };
-        for (const uri of httpDsUris) {
-          const url = data.urls[uri];
-          if (url) httpDsUrlMap.set(uri, url);
-        }
-      }
-
-      // Rewrite SQL — longest URIs first to avoid prefix-clobber
-      let resolvedSql = rawSql;
-      for (const uri of [...allUris].sort((a, b) => b.length - a.length)) {
-        const s3Uri = s3UriMap.get(uri);
-        if (s3Uri) {
-          resolvedSql = resolvedSql.replaceAll(uri, s3Uri);
-        } else {
-          const tokenUrl = httpDsUrlMap.get(uri);
-          if (tokenUrl) resolvedSql = resolvedSql.replaceAll(uri, tokenUrl);
-        }
-      }
-
-      const preamble = [...secretsByBackend.values()];
-
-      // Write URIs are rewritten to s3:// — DuckDB's httpfs handles PUT natively via the proxy.
-      // No manual buffer-copy needed; the proxy endpoint accepts AWS Sig V4 PUT requests.
-      if (writeUris.length > 0 && s3Uris.some((u) => writeUris.includes(u))) {
-        // Ensure write-destination backends have a credential in the preamble (already acquired above)
-      }
-
+      const { sql: resolvedSql, preamble } = await resolveStorageUris(
+        rawSql,
+        workerBase,
+        getAuthHeaders,
+      );
       const result = await runQuery(db, resolvedSql, preamble.length > 0 ? preamble : undefined);
       setQueryResult(result);
     } catch (err) {

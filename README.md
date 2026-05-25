@@ -23,8 +23,9 @@ A personal data integration platform built on Cloudflare that brings your data t
 | Browser auto-registers DuckDB views from catalog on startup | ✅ Done |
 | Load jobs: cron-triggered HTTP→R2/S3 ETL with catalog commit, Queue-based execution | ✅ Done |
 | Load Jobs UI: create/edit/delete jobs, "Run now" trigger, last-run status | ✅ Done |
-| Session Durable Object + MCP server | Not started |
-| Transform jobs (compaction) | Not started |
+| Session Durable Object: WebSocket hibernation, MCP query relay, transform job dispatch on connect | ✅ Done |
+| MCP server: Streamable HTTP (2025-03-26), `get_warehouse_schema` / `list_data_sources` / `run_query` / `read_data` tools | ✅ Done |
+| Transform jobs + triggers: catalog DO queue, session DO dispatch, browser DuckDB execution | ✅ Done |
 | Dashboarding platform | Not started |
 
 See [`build-plan.md`](./build-plan.md) for the full sequenced plan.
@@ -92,7 +93,7 @@ The **Catalog** tab lets you register files in object storage as named tables th
    ```sql
    SELECT * FROM transactions LIMIT 100
    ```
-   Tables with unresolvable URIs (missing files, wrong backend) show a ⚠ badge but don't block other tables from loading.
+   Both `r2://` and `http-ds://` snapshot URIs are supported. `r2://` tables create views via S3 proxy credentials; `http-ds://` tables are resolved to token URLs and create `read_json` views. Tables with unresolvable URIs (missing files, wrong backend, expired token) show a ⚠ badge but don't block other tables from loading.
 
 4. To correct a committed snapshot, click **Edit** on its row in the Catalog tab to update the URI or format in-place.
 
@@ -212,13 +213,17 @@ Supported data sources:
 
 An MCP server exposes the warehouse to AI clients like Claude. Because the catalog DO holds all schema and snapshot metadata, many operations do not require an active browser session:
 
-- `get_warehouse_schema` — table list, schemas, snapshot metadata, last sync times
+Currently implemented:
+- `get_warehouse_schema` — table list, schemas, snapshot metadata (no browser session required)
+- `list_data_sources` — lists HTTP credentials with their names and base URLs (no browser session required)
+- `run_query` — execute SQL in the browser DuckDB session; requires an active browser tab
+- `read_data` — read JSON/NDJSON directly from an `http-ds://` or `r2://` URI (no browser session required, 1 MB limit)
+
+Planned (not yet implemented):
 - `list_etl_jobs` — active job definitions and schedules
 - `create_load_job` — define a new source connector and cron schedule
 - `create_transform_job` — define a derived table with its SQL and input dependencies
 - `pause_etl_job` — disable a job without deleting it
-- `list_data_sources` — available connectors and required config
-- `run_query` — execute SQL; requires an active browser session
 - `submit_dashboard` — persist a Claude-authored dashboard artifact
 
 ### Dashboarding Platform

@@ -25,7 +25,7 @@ Requires: `wrangler` (or npx), `openssl`, `jq`.
 **Always run all three checks before every commit** — CI enforces the same checks and will fail otherwise:
 
 ```bash
-npm test          # 166 vitest tests across 8 test files via @cloudflare/vitest-pool-workers
+npm test          # 187 vitest tests across 9 test files via @cloudflare/vitest-pool-workers
 npm run typecheck # tsc for worker + tsc -p test/tsconfig.json
 npm run lint      # biome check . (lint + format + import order)
 ```
@@ -58,9 +58,10 @@ They have separate `node_modules`, `package.json`, and `tsconfig.json`. The work
 **Entry point:** `src/index.ts` — Hono app with CORS middleware, `requireAuth` middleware, and two route groups: the OAuth router and authenticated endpoints.
 
 **Auth flow:**
-1. `authenticate()` in `src/auth/middleware.ts` checks for `X-Dev-Token` header first (when `ENABLE_DEV_AUTH=true`), then validates a Bearer JWT via `src/auth/jwt.ts` (HMAC-HS256).
-2. All OAuth endpoints live in `src/auth/oauth.ts` via `oauthRouter`. The flow: `/authorize/:provider` → Google OAuth → `/oauth/callback` → exchange code → issue MCP auth code → redirect to client → client POSTs to `/token` → receives JWT + refresh token.
-3. Provider support is Google-only. Passing any other provider to `/authorize/:provider` returns `400 invalid_request`.
+1. `authenticate()` in `src/auth/middleware.ts` checks for `X-Dev-Token` header first (when `ENABLE_DEV_AUTH=true`), then validates a Bearer JWT via `src/auth/jwt.ts` (HMAC-HS256). Audience is validated against `${issuer}/mcp` — tokens minted for other resources are rejected.
+2. `verifyJwt` in `src/auth/jwt.ts` accepts an optional `expectedAud` parameter; when supplied, it rejects tokens where `payload.aud !== expectedAud`.
+3. All OAuth endpoints live in `src/auth/oauth.ts` via `oauthRouter`. The flow: `/authorize/:provider` → Google OAuth → `/oauth/callback` → exchange code → issue MCP auth code → redirect to client → client POSTs to `/token` → receives JWT + refresh token.
+4. Provider support is Google-only. Passing any other provider to `/authorize/:provider` returns `400 invalid_request`.
 
 **D1 query layer:** `src/db/queries.ts` for user/identity operations, `src/db/oauth.ts` for OAuth table operations, `src/db/settings.ts` for credentials/storage backends, `src/db/load-jobs.ts` for load job CRUD. All SQL is in these files — no inline SQL elsewhere.
 
@@ -71,6 +72,12 @@ They have separate `node_modules`, `package.json`, and `tsconfig.json`. The work
 **Key D1 tables:** `users`, `oauth_identities`, `oauth_states`, `oauth_clients`, `oauth_codes`, `oauth_refresh_tokens`, `credentials`, `storage_backends`, `load_jobs`. All timestamp columns are Unix milliseconds (`Date.now()`).
 
 **Load jobs:** Cron-triggered HTTP→storage ETL jobs. The `scheduled()` handler queries D1 for due jobs and enqueues `{ jobId }` messages to `LOAD_JOB_QUEUE`. The `queue()` consumer fetches the job, runs `runHttpLoadJob` from `src/loaders/http.ts` (HTTP fetch → R2/S3 write → catalog commit), then updates `last_run_at`/`last_error`/`next_run_at` in D1. On failure, the job error is persisted and the message is retried (up to `max_retries = 3`). `POST /api/load-jobs/:id/trigger` enqueues directly for on-demand runs.
+
+**Session DO:** `src/session/do.ts` — pairs MCP query requests with an active browser tab. Uses `ctx.acceptWebSocket(server, [userId])` (hibernation API) so the DO sleeps between events. An in-memory `pendingQueries` map (keyed by `queryId`) holds `{ resolve, reject }` closures while awaiting a browser response — safe because active `POST /query` fetch handlers prevent hibernation. On browser connect, dispatches any pending transform jobs via `dispatchPendingJobs` (fetches `GET /jobs/pending` from catalog DO, sends each as `{ type: "transform_job", ... }` over the socket). On socket close, resets any `running` transform jobs back to `pending` via `POST /jobs/reset-pending`. `GET /session/status` returns the count of connected sockets; `POST /dispatch-jobs` can be called by the Worker to push freshly triggered jobs.
+
+**MCP server:** `src/mcp/server.ts` — Streamable HTTP transport (MCP 2025-03-26 spec), mounted at `/mcp` on the main Hono app behind `requireAuth`. Four tools: `get_warehouse_schema` (fetches tables + snapshots from catalog DO — no browser session required), `list_data_sources` (lists HTTP credentials with their base URLs — no browser session required), `run_query` and `read_data` (both POST to the session DO's `/query` endpoint and await a DuckDB result from the browser).
+
+**Transform jobs and triggers:** Managed entirely inside the catalog DO's SQLite. `transform_jobs` tracks `id, name, sql, output_table, output_uri, output_backend, format, status, requires_browser`. `triggers` maps a watched table name to a job. Status lifecycle: `idle → pending → running → done/failed`. On every `POST /commit`, the catalog DO queries triggers matching the committed table and moves qualifying jobs to `pending`, returning `{ triggeredJobIds }`. The Worker's commit relay picks up `triggeredJobIds` in a `waitUntil` and calls `POST /dispatch-jobs` on the session DO. Worker REST API: `GET/POST/DELETE /api/transform-jobs`, `GET/POST/DELETE /api/triggers`. Browser execution lives in `frontend/src/sessionWs.ts`: receives `transform_job`, sends `job_claimed`, runs the COPY TO SQL in DuckDB (acquiring proxy credentials for the output backend first), then sends `job_complete` or `job_error`. The Session DO receives `job_complete`, looks up the job spec to get the output URI, commits it to the catalog DO, and marks the job `done`.
 
 **S3-compatible storage proxy:** All storage routes live in `src/storage/router.ts` (a Hono sub-router mounted at `/api/storage` in `src/index.ts`). `POST /api/storage/proxy-credentials` (behind `requireAuth`) vends a short-lived `{ accessKeyId, secret, endpoint, region, bucket }` credential stored in `PROXY_CREDS_KV` with TTL. `GET|HEAD|PUT|OPTIONS /api/storage/s3proxy/:bucket/*key` (no `requireAuth` — the `accessKeyId` from the AWS4 `Authorization` header is the auth) forwards to the real backend: R2 binding for `r2-bound`, re-signed upstream S3 request for `r2-s3compat`. A `GET` with `?list-type=2` triggers `R2.list()` and returns S3 `ListBucketResult` XML. All responses carry CORS headers. The frontend (`frontend/src/storage.ts`) calls `acquireProxyCred()` and `buildS3Secret()` to configure DuckDB's httpfs via `CREATE OR REPLACE SECRET`.
 
@@ -85,6 +92,10 @@ Single-file auth client in `frontend/src/auth.ts` — handles DCR (Dynamic Clien
 `frontend/src/App.tsx` is an auth state machine: `null` (loading) → `false` (login screen) → `true` (authenticated). On load it either handles the `/callback` route (token exchange) or checks for an existing access token. After authentication it calls `GET /me` to resolve `userId`.
 
 `VITE_DEV_TOKEN` in the frontend environment skips OAuth entirely — the token is sent as `X-Dev-Token` on every request.
+
+`frontend/src/sessionWs.ts` — connects to the session DO WebSocket (`GET /session/ws`) after auth. Handles three inbound message types: `query` (runs SQL in DuckDB, streams row batches back), `transform_job` (acknowledges with `job_claimed`, acquires proxy credentials, runs COPY TO SQL, sends `job_complete` or `job_error`), `job_status` (server broadcast of running/done/failed — updates UI across all connected tabs and machines). The Session DO receives `job_complete`, looks up the job spec, commits the output URI to the catalog DO, and marks the job `done`. Status indicators surface in App.tsx.
+
+`frontend/src/QueryPanel.tsx` `registerCatalogViews` — on startup, loads all catalog snapshots and creates DuckDB views. For `r2://` and `r2-s3compat://` URIs it acquires S3 proxy credentials and creates views over `s3://` paths. For `http-ds://` URIs it batch-resolves them via `POST /api/storage/resolve` first and creates `read_json('{tokenUrl}')` views. Tables that fail (missing backend, unresolvable URI) are reported as failed views without blocking the others.
 
 ## Local development
 
@@ -150,6 +161,7 @@ The `TEST_MIGRATIONS` binding in `vitest.config.ts` is populated from the `migra
 - `test/storage.test.ts` — Credentials and storage backends CRUD
 - `test/proxy.test.ts` — S3 proxy: credential vending, GET/HEAD/PUT/LIST/OPTIONS, path enforcement, CORS, ETags
 - `test/proxy-s3client.test.ts` — Functional S3 client tests using `aws4fetch` against Miniflare; exercises the full Sig V4 → proxy → R2 round-trip
-- `test/catalog.test.ts` — Catalog DO: tables, snapshots, commits
+- `test/catalog.test.ts` — Catalog DO: tables, snapshots, commits, transform jobs, triggers
+- `test/session.test.ts` — Session DO: WebSocket upgrade, status endpoint, MCP query relay, transform job dispatch
 - `test/load-jobs.test.ts` — Load jobs CRUD, trigger endpoint, scheduler/consumer helpers
 - `test/loader.test.ts` — `runHttpLoadJob` unit tests (mocked fetch, both backend types)
