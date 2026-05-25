@@ -34,6 +34,8 @@ interface LoadJob {
   enabled: number;
   date_range_config: string | null;
   pagination_config: string | null;
+  source_type: string;
+  source_config: string | null;
 }
 
 function formatTs(ms: number | null): string {
@@ -76,6 +78,12 @@ export function LoadJobsPanel({ workerBase, getAuthHeaders }: LoadJobsPanelProps
   const [formPagCursorPath, setFormPagCursorPath] = useState("cursor.next");
   const [formPagDataPath, setFormPagDataPath] = useState("");
 
+  // Google Sheets source state
+  const [formSourceType, setFormSourceType] = useState<"http" | "google-sheets">("http");
+  const [formSpreadsheetId, setFormSpreadsheetId] = useState("");
+  const [formSheetName, setFormSheetName] = useState("");
+  const [formRange, setFormRange] = useState("");
+
   function openCreate() {
     setFormMode("create");
     setFormName("");
@@ -97,6 +105,10 @@ export function LoadJobsPanel({ workerBase, getAuthHeaders }: LoadJobsPanelProps
     setFormPagCursorParam("cursor");
     setFormPagCursorPath("cursor.next");
     setFormPagDataPath("");
+    setFormSourceType("http");
+    setFormSpreadsheetId("");
+    setFormSheetName("");
+    setFormRange("");
   }
 
   function openEdit(job: LoadJob) {
@@ -135,6 +147,29 @@ export function LoadJobsPanel({ workerBase, getAuthHeaders }: LoadJobsPanelProps
     setFormPagCursorParam(pag?.cursor_param ?? "cursor");
     setFormPagCursorPath(pag?.cursor_path ?? "cursor.next");
     setFormPagDataPath(pag?.data_path ?? "");
+
+    const srcType = (job.source_type ?? "http") as "http" | "google-sheets";
+    setFormSourceType(srcType);
+    if (srcType === "google-sheets" && job.source_config) {
+      try {
+        const sc = JSON.parse(job.source_config) as {
+          spreadsheetId?: string;
+          sheetName?: string;
+          range?: string;
+        };
+        setFormSpreadsheetId(sc.spreadsheetId ?? "");
+        setFormSheetName(sc.sheetName ?? "");
+        setFormRange(sc.range ?? "");
+      } catch {
+        setFormSpreadsheetId("");
+        setFormSheetName("");
+        setFormRange("");
+      }
+    } else {
+      setFormSpreadsheetId("");
+      setFormSheetName("");
+      setFormRange("");
+    }
   }
 
   const fetchAll = useCallback(async () => {
@@ -150,7 +185,9 @@ export function LoadJobsPanel({ workerBase, getAuthHeaders }: LoadJobsPanelProps
       setJobs(jobsData.jobs);
       if (credRes.ok) {
         const cd = (await credRes.json()) as { credentials: CredentialRow[] };
-        setCredentials(cd.credentials.filter((c) => c.type === "http"));
+        setCredentials(
+          cd.credentials.filter((c) => c.type === "http" || c.type === "google-sheets"),
+        );
       }
       if (backendRes.ok) {
         const bd = (await backendRes.json()) as { backends: StorageBackendRow[] };
@@ -218,26 +255,37 @@ export function LoadJobsPanel({ workerBase, getAuthHeaders }: LoadJobsPanelProps
           storage_backend_id: formSbId,
           table_name: formTable,
           table_path: formTablePath || undefined,
-          http_path: formPath,
-          http_method: formMethod,
           format: formFormat,
           cron_schedule: formCron,
-          date_range_config: formDrEnabled
+          source_type: formSourceType,
+          ...(formSourceType === "google-sheets"
             ? {
-                param_from: formDrParamFrom,
-                param_to: formDrParamTo,
-                format: formDrFormat,
-                lookback_days: Number(formDrLookbackDays),
+                source_config: {
+                  spreadsheetId: formSpreadsheetId,
+                  ...(formSheetName ? { sheetName: formSheetName } : {}),
+                  ...(formRange ? { range: formRange } : {}),
+                },
               }
-            : null,
-          pagination_config: formPagEnabled
-            ? {
-                type: "cursor",
-                cursor_param: formPagCursorParam,
-                cursor_path: formPagCursorPath,
-                ...(formPagDataPath ? { data_path: formPagDataPath } : {}),
-              }
-            : null,
+            : {
+                http_path: formPath,
+                http_method: formMethod,
+                date_range_config: formDrEnabled
+                  ? {
+                      param_from: formDrParamFrom,
+                      param_to: formDrParamTo,
+                      format: formDrFormat,
+                      lookback_days: Number(formDrLookbackDays),
+                    }
+                  : null,
+                pagination_config: formPagEnabled
+                  ? {
+                      type: "cursor",
+                      cursor_param: formPagCursorParam,
+                      cursor_path: formPagCursorPath,
+                      ...(formPagDataPath ? { data_path: formPagDataPath } : {}),
+                    }
+                  : null,
+              }),
         }),
       });
       if (!res.ok) {
@@ -327,7 +375,27 @@ export function LoadJobsPanel({ workerBase, getAuthHeaders }: LoadJobsPanelProps
                   </p>
                 </fieldset>
                 <fieldset class="fieldset">
-                  <legend class="fieldset-legend">HTTP Credential</legend>
+                  <legend class="fieldset-legend">Source type</legend>
+                  <select
+                    class="select select-bordered select-sm w-full"
+                    value={formSourceType}
+                    onChange={(e) => {
+                      setFormSourceType(
+                        (e.target as HTMLSelectElement).value as "http" | "google-sheets",
+                      );
+                      setFormCredId("");
+                    }}
+                  >
+                    <option value="http">HTTP</option>
+                    <option value="google-sheets">Google Sheets</option>
+                  </select>
+                </fieldset>
+                <fieldset class="fieldset">
+                  <legend class="fieldset-legend">
+                    {formSourceType === "google-sheets"
+                      ? "Google Sheets Credential"
+                      : "HTTP Credential"}
+                  </legend>
                   <select
                     required
                     class="select select-bordered select-sm w-full"
@@ -335,11 +403,13 @@ export function LoadJobsPanel({ workerBase, getAuthHeaders }: LoadJobsPanelProps
                     onChange={(e) => setFormCredId((e.target as HTMLSelectElement).value)}
                   >
                     <option value="">— select —</option>
-                    {credentials.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.name}
-                      </option>
-                    ))}
+                    {credentials
+                      .filter((c) => c.type === formSourceType)
+                      .map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.name}
+                        </option>
+                      ))}
                   </select>
                 </fieldset>
                 <fieldset class="fieldset">
@@ -358,26 +428,74 @@ export function LoadJobsPanel({ workerBase, getAuthHeaders }: LoadJobsPanelProps
                     ))}
                   </select>
                 </fieldset>
-                <fieldset class="fieldset">
-                  <legend class="fieldset-legend">HTTP Path</legend>
-                  <input
-                    type="text"
-                    class="input input-bordered input-sm w-full font-mono"
-                    value={formPath}
-                    onInput={(e) => setFormPath((e.target as HTMLInputElement).value)}
-                  />
-                </fieldset>
-                <fieldset class="fieldset">
-                  <legend class="fieldset-legend">Method</legend>
-                  <select
-                    class="select select-bordered select-sm w-full"
-                    value={formMethod}
-                    onChange={(e) => setFormMethod((e.target as HTMLSelectElement).value)}
-                  >
-                    <option>GET</option>
-                    <option>POST</option>
-                  </select>
-                </fieldset>
+                {formSourceType === "google-sheets" ? (
+                  <>
+                    <fieldset class="fieldset sm:col-span-2">
+                      <legend class="fieldset-legend">Spreadsheet ID</legend>
+                      <input
+                        type="text"
+                        required
+                        class="input input-bordered input-sm w-full font-mono"
+                        value={formSpreadsheetId}
+                        onInput={(e) => setFormSpreadsheetId((e.target as HTMLInputElement).value)}
+                        placeholder="1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms"
+                      />
+                      <p class="text-xs text-base-content/50 mt-1">
+                        The ID from the spreadsheet URL: .../spreadsheets/d/&#123;ID&#125;/edit
+                      </p>
+                    </fieldset>
+                    <fieldset class="fieldset">
+                      <legend class="fieldset-legend">
+                        Sheet name <span class="text-base-content/40 font-normal">(optional)</span>
+                      </legend>
+                      <input
+                        type="text"
+                        class="input input-bordered input-sm w-full"
+                        value={formSheetName}
+                        onInput={(e) => setFormSheetName((e.target as HTMLInputElement).value)}
+                        placeholder="Sheet1"
+                      />
+                    </fieldset>
+                    <fieldset class="fieldset">
+                      <legend class="fieldset-legend">
+                        Range <span class="text-base-content/40 font-normal">(optional)</span>
+                      </legend>
+                      <input
+                        type="text"
+                        class="input input-bordered input-sm w-full font-mono"
+                        value={formRange}
+                        onInput={(e) => setFormRange((e.target as HTMLInputElement).value)}
+                        placeholder="A:Z"
+                      />
+                      <p class="text-xs text-base-content/50 mt-1">
+                        A1 notation range, e.g. A1:Z1000. Defaults to all columns.
+                      </p>
+                    </fieldset>
+                  </>
+                ) : (
+                  <>
+                    <fieldset class="fieldset">
+                      <legend class="fieldset-legend">HTTP Path</legend>
+                      <input
+                        type="text"
+                        class="input input-bordered input-sm w-full font-mono"
+                        value={formPath}
+                        onInput={(e) => setFormPath((e.target as HTMLInputElement).value)}
+                      />
+                    </fieldset>
+                    <fieldset class="fieldset">
+                      <legend class="fieldset-legend">Method</legend>
+                      <select
+                        class="select select-bordered select-sm w-full"
+                        value={formMethod}
+                        onChange={(e) => setFormMethod((e.target as HTMLSelectElement).value)}
+                      >
+                        <option>GET</option>
+                        <option>POST</option>
+                      </select>
+                    </fieldset>
+                  </>
+                )}
                 <fieldset class="fieldset">
                   <legend class="fieldset-legend">Format</legend>
                   <select
@@ -407,138 +525,158 @@ export function LoadJobsPanel({ workerBase, getAuthHeaders }: LoadJobsPanelProps
                 </fieldset>
               </div>
 
-              {/* Date range config */}
-              <div class="border border-base-300 rounded-box p-3 space-y-3">
-                <label class="flex items-center gap-2 cursor-pointer select-none">
-                  <input
-                    type="checkbox"
-                    class="checkbox checkbox-sm"
-                    checked={formDrEnabled}
-                    onChange={(e) => setFormDrEnabled((e.target as HTMLInputElement).checked)}
-                  />
-                  <span class="text-sm font-medium">Date range windowing</span>
-                </label>
-                {formDrEnabled && (
-                  <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 pl-6">
-                    <fieldset class="fieldset">
-                      <legend class="fieldset-legend">From param</legend>
+              {formSourceType === "http" && (
+                <>
+                  {/* Date range config */}
+                  <div class="border border-base-300 rounded-box p-3 space-y-3">
+                    <label class="flex items-center gap-2 cursor-pointer select-none">
                       <input
-                        type="text"
-                        required
-                        class="input input-bordered input-sm w-full font-mono"
-                        value={formDrParamFrom}
-                        onInput={(e) => setFormDrParamFrom((e.target as HTMLInputElement).value)}
-                        placeholder="start_date"
+                        type="checkbox"
+                        class="checkbox checkbox-sm"
+                        checked={formDrEnabled}
+                        onChange={(e) => setFormDrEnabled((e.target as HTMLInputElement).checked)}
                       />
-                    </fieldset>
-                    <fieldset class="fieldset">
-                      <legend class="fieldset-legend">To param</legend>
-                      <input
-                        type="text"
-                        required
-                        class="input input-bordered input-sm w-full font-mono"
-                        value={formDrParamTo}
-                        onInput={(e) => setFormDrParamTo((e.target as HTMLInputElement).value)}
-                        placeholder="end_date"
-                      />
-                    </fieldset>
-                    <fieldset class="fieldset">
-                      <legend class="fieldset-legend">Date format</legend>
-                      <select
-                        class="select select-bordered select-sm w-full"
-                        value={formDrFormat}
-                        onChange={(e) => setFormDrFormat((e.target as HTMLSelectElement).value)}
-                      >
-                        <option value="iso">iso (full ISO 8601)</option>
-                        <option value="iso_date">iso_date (YYYY-MM-DD)</option>
-                        <option value="unix">unix (seconds)</option>
-                        <option value="unix_ms">unix_ms (milliseconds)</option>
-                      </select>
-                    </fieldset>
-                    <fieldset class="fieldset">
-                      <legend class="fieldset-legend">Lookback days</legend>
-                      <input
-                        type="number"
-                        required
-                        min="1"
-                        class="input input-bordered input-sm w-full"
-                        value={formDrLookbackDays}
-                        onInput={(e) => setFormDrLookbackDays((e.target as HTMLInputElement).value)}
-                      />
-                    </fieldset>
+                      <span class="text-sm font-medium">Date range windowing</span>
+                    </label>
+                    {formDrEnabled && (
+                      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 pl-6">
+                        <fieldset class="fieldset">
+                          <legend class="fieldset-legend">From param</legend>
+                          <input
+                            type="text"
+                            required
+                            class="input input-bordered input-sm w-full font-mono"
+                            value={formDrParamFrom}
+                            onInput={(e) =>
+                              setFormDrParamFrom((e.target as HTMLInputElement).value)
+                            }
+                            placeholder="start_date"
+                          />
+                        </fieldset>
+                        <fieldset class="fieldset">
+                          <legend class="fieldset-legend">To param</legend>
+                          <input
+                            type="text"
+                            required
+                            class="input input-bordered input-sm w-full font-mono"
+                            value={formDrParamTo}
+                            onInput={(e) => setFormDrParamTo((e.target as HTMLInputElement).value)}
+                            placeholder="end_date"
+                          />
+                        </fieldset>
+                        <fieldset class="fieldset">
+                          <legend class="fieldset-legend">Date format</legend>
+                          <select
+                            class="select select-bordered select-sm w-full"
+                            value={formDrFormat}
+                            onChange={(e) => setFormDrFormat((e.target as HTMLSelectElement).value)}
+                          >
+                            <option value="iso">iso (full ISO 8601)</option>
+                            <option value="iso_date">iso_date (YYYY-MM-DD)</option>
+                            <option value="unix">unix (seconds)</option>
+                            <option value="unix_ms">unix_ms (milliseconds)</option>
+                          </select>
+                        </fieldset>
+                        <fieldset class="fieldset">
+                          <legend class="fieldset-legend">Lookback days</legend>
+                          <input
+                            type="number"
+                            required
+                            min="1"
+                            class="input input-bordered input-sm w-full"
+                            value={formDrLookbackDays}
+                            onInput={(e) =>
+                              setFormDrLookbackDays((e.target as HTMLInputElement).value)
+                            }
+                          />
+                        </fieldset>
+                      </div>
+                    )}
                   </div>
-                )}
-              </div>
 
-              {/* Cursor pagination config */}
-              <div class="border border-base-300 rounded-box p-3 space-y-3">
-                <label class="flex items-center gap-2 cursor-pointer select-none">
-                  <input
-                    type="checkbox"
-                    class="checkbox checkbox-sm"
-                    checked={formPagEnabled}
-                    onChange={(e) => {
-                      const enabled = (e.target as HTMLInputElement).checked;
-                      setFormPagEnabled(enabled);
-                      if (enabled && formFormat !== "json" && formFormat !== "ndjson") {
-                        setFormFormat("ndjson");
-                      }
-                    }}
-                  />
-                  <span class="text-sm font-medium">Cursor pagination</span>
-                </label>
-                {formPagEnabled && (
-                  <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 pl-6">
-                    <fieldset class="fieldset">
-                      <legend class="fieldset-legend">Cursor param</legend>
+                  {/* Cursor pagination config */}
+                  <div class="border border-base-300 rounded-box p-3 space-y-3">
+                    <label class="flex items-center gap-2 cursor-pointer select-none">
                       <input
-                        type="text"
-                        required
-                        class="input input-bordered input-sm w-full font-mono"
-                        value={formPagCursorParam}
-                        onInput={(e) => setFormPagCursorParam((e.target as HTMLInputElement).value)}
-                        placeholder="cursor"
+                        type="checkbox"
+                        class="checkbox checkbox-sm"
+                        checked={formPagEnabled}
+                        onChange={(e) => {
+                          const enabled = (e.target as HTMLInputElement).checked;
+                          setFormPagEnabled(enabled);
+                          if (enabled && formFormat !== "json" && formFormat !== "ndjson") {
+                            setFormFormat("ndjson");
+                          }
+                        }}
                       />
-                    </fieldset>
-                    <fieldset class="fieldset">
-                      <legend class="fieldset-legend">Cursor path</legend>
-                      <input
-                        type="text"
-                        required
-                        class="input input-bordered input-sm w-full font-mono"
-                        value={formPagCursorPath}
-                        onInput={(e) => setFormPagCursorPath((e.target as HTMLInputElement).value)}
-                        placeholder="cursor.next"
-                      />
-                      <p class="text-xs text-base-content/50 mt-1">
-                        Dot-notation path in the response for the next cursor value
-                      </p>
-                    </fieldset>
-                    <fieldset class="fieldset sm:col-span-2">
-                      <legend class="fieldset-legend">
-                        Data path <span class="text-base-content/40 font-normal">(optional)</span>
-                      </legend>
-                      <input
-                        type="text"
-                        class="input input-bordered input-sm w-full font-mono"
-                        value={formPagDataPath}
-                        onInput={(e) => setFormPagDataPath((e.target as HTMLInputElement).value)}
-                        placeholder="items"
-                      />
-                      <p class="text-xs text-base-content/50 mt-1">
-                        Dot-notation path to the data array. If omitted, the entire response body is
-                        used.
-                      </p>
-                    </fieldset>
+                      <span class="text-sm font-medium">Cursor pagination</span>
+                    </label>
+                    {formPagEnabled && (
+                      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 pl-6">
+                        <fieldset class="fieldset">
+                          <legend class="fieldset-legend">Cursor param</legend>
+                          <input
+                            type="text"
+                            required
+                            class="input input-bordered input-sm w-full font-mono"
+                            value={formPagCursorParam}
+                            onInput={(e) =>
+                              setFormPagCursorParam((e.target as HTMLInputElement).value)
+                            }
+                            placeholder="cursor"
+                          />
+                        </fieldset>
+                        <fieldset class="fieldset">
+                          <legend class="fieldset-legend">Cursor path</legend>
+                          <input
+                            type="text"
+                            required
+                            class="input input-bordered input-sm w-full font-mono"
+                            value={formPagCursorPath}
+                            onInput={(e) =>
+                              setFormPagCursorPath((e.target as HTMLInputElement).value)
+                            }
+                            placeholder="cursor.next"
+                          />
+                          <p class="text-xs text-base-content/50 mt-1">
+                            Dot-notation path in the response for the next cursor value
+                          </p>
+                        </fieldset>
+                        <fieldset class="fieldset sm:col-span-2">
+                          <legend class="fieldset-legend">
+                            Data path{" "}
+                            <span class="text-base-content/40 font-normal">(optional)</span>
+                          </legend>
+                          <input
+                            type="text"
+                            class="input input-bordered input-sm w-full font-mono"
+                            value={formPagDataPath}
+                            onInput={(e) =>
+                              setFormPagDataPath((e.target as HTMLInputElement).value)
+                            }
+                            placeholder="items"
+                          />
+                          <p class="text-xs text-base-content/50 mt-1">
+                            Dot-notation path to the data array. If omitted, the entire response
+                            body is used.
+                          </p>
+                        </fieldset>
+                      </div>
+                    )}
                   </div>
-                )}
-              </div>
+                </>
+              )}
 
               <button
                 type="submit"
                 class="btn btn-sm btn-primary"
                 disabled={
-                  submitting || !formName.trim() || !formCredId || !formSbId || !formTable.trim()
+                  submitting ||
+                  !formName.trim() ||
+                  !formCredId ||
+                  !formSbId ||
+                  !formTable.trim() ||
+                  (formSourceType === "google-sheets" && !formSpreadsheetId.trim())
                 }
               >
                 {submitting && <span class="loading loading-spinner loading-xs" />}
@@ -562,6 +700,7 @@ export function LoadJobsPanel({ workerBase, getAuthHeaders }: LoadJobsPanelProps
                   <tr>
                     <th>Name</th>
                     <th>Table</th>
+                    <th>Source</th>
                     <th>Cron</th>
                     <th>Next run</th>
                     <th>Last run</th>
@@ -574,6 +713,11 @@ export function LoadJobsPanel({ workerBase, getAuthHeaders }: LoadJobsPanelProps
                     <tr key={job.id}>
                       <td class="font-medium">{job.name}</td>
                       <td class="font-mono text-xs">{job.table_name}</td>
+                      <td>
+                        <span class="badge badge-ghost badge-xs">
+                          {job.source_type === "google-sheets" ? "Sheets" : "HTTP"}
+                        </span>
+                      </td>
                       <td class="font-mono text-xs">{job.cron_schedule}</td>
                       <td class="text-xs text-base-content/70">{formatTs(job.next_run_at)}</td>
                       <td class="text-xs text-base-content/70">{formatTs(job.last_run_at)}</td>

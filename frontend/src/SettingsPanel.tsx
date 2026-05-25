@@ -58,6 +58,68 @@ const R2_S3COMPAT_CONFIG_TEMPLATE = JSON.stringify(
   2,
 );
 
+// ── GoogleSheetsTestDialog ────────────────────────────────────────────────
+
+function GoogleSheetsTestDialog({
+  credentialId,
+  credentialName,
+  workerBase,
+  getAuthHeaders,
+  onClose,
+}: {
+  credentialId: string;
+  credentialName: string;
+  workerBase: string;
+  getAuthHeaders: () => Promise<Record<string, string>>;
+  onClose: () => void;
+}) {
+  const [result, setResult] = useState<{ ok: boolean; error?: string } | null>(null);
+
+  useEffect(() => {
+    (async () => {
+      const headers = await getAuthHeaders();
+      const res = await fetch(`${workerBase}/api/credentials/${credentialId}/test`, {
+        method: "POST",
+        headers,
+      });
+      setResult((await res.json()) as { ok: boolean; error?: string });
+    })().catch((err) => setResult({ ok: false, error: String(err) }));
+  }, [credentialId, workerBase, getAuthHeaders]);
+
+  return (
+    <div
+      class="modal modal-open"
+      onKeyDown={(e) => {
+        if (e.key === "Escape") onClose();
+      }}
+    >
+      <div class="modal-box space-y-4">
+        <h3 class="font-bold text-lg">Test: {credentialName}</h3>
+        {!result ? (
+          <div class="flex gap-2 items-center">
+            <span class="loading loading-spinner loading-sm" />
+            <span class="text-sm">Testing connection…</span>
+          </div>
+        ) : result.ok ? (
+          <div role="alert" class="alert alert-success py-2 text-sm">
+            <span>Token refresh successful — credential is working.</span>
+          </div>
+        ) : (
+          <div role="alert" class="alert alert-error py-2 text-sm">
+            <span>{result.error ?? "Connection test failed."}</span>
+          </div>
+        )}
+        <div class="modal-action">
+          <button type="button" class="btn btn-sm" onClick={onClose}>
+            Close
+          </button>
+        </div>
+      </div>
+      <button type="button" class="modal-backdrop" onClick={onClose} aria-label="Close dialog" />
+    </div>
+  );
+}
+
 // ── TestDialog ────────────────────────────────────────────────────────────
 
 function TestDialog({
@@ -471,7 +533,7 @@ function SettingsSection<T extends { id: string; name: string; type: string }>({
   onAdd: (name: string, type: string, config: string) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
   onEdit?: (row: T) => void;
-  onTest?: (id: string, name: string) => void;
+  onTest?: (id: string, name: string, type: string) => void;
   extraActions?: preact.ComponentChildren;
 }) {
   return (
@@ -501,11 +563,11 @@ function SettingsSection<T extends { id: string; name: string; type: string }>({
                     </td>
                     <td class="font-mono text-xs text-base-content/50">{row.id}</td>
                     <td class="flex gap-1">
-                      {onTest && row.type === "http" && (
+                      {onTest && (row.type === "http" || row.type === "google-sheets") && (
                         <button
                           type="button"
                           class="btn btn-ghost btn-xs"
-                          onClick={() => onTest(row.id, row.name)}
+                          onClick={() => onTest(row.id, row.name, row.type)}
                         >
                           Test
                         </button>
@@ -550,7 +612,11 @@ export function SettingsPanel({ workerBase, getAuthHeaders }: SettingsPanelProps
   const [credentials, setCredentials] = useState<CredentialRow[]>([]);
   const [backends, setBackends] = useState<StorageBackendRow[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [testTarget, setTestTarget] = useState<{ id: string; name: string } | null>(null);
+  const [testTarget, setTestTarget] = useState<{
+    id: string;
+    name: string;
+    type: string;
+  } | null>(null);
   const [editTarget, setEditTarget] = useState<StorageBackendRow | null>(null);
   const [gsNotice, setGsNotice] = useState<{ type: "success" | "error"; msg: string } | null>(null);
 
@@ -657,8 +723,17 @@ export function SettingsPanel({ workerBase, getAuthHeaders }: SettingsPanelProps
 
   return (
     <div class="max-w-4xl mx-auto p-6 space-y-4">
-      {testTarget && (
+      {testTarget && testTarget.type === "http" && (
         <TestDialog
+          credentialId={testTarget.id}
+          credentialName={testTarget.name}
+          workerBase={workerBase}
+          getAuthHeaders={getAuthHeaders}
+          onClose={() => setTestTarget(null)}
+        />
+      )}
+      {testTarget && testTarget.type === "google-sheets" && (
+        <GoogleSheetsTestDialog
           credentialId={testTarget.id}
           credentialName={testTarget.name}
           workerBase={workerBase}
@@ -698,7 +773,7 @@ export function SettingsPanel({ workerBase, getAuthHeaders }: SettingsPanelProps
         typeOptions={CREDENTIAL_TYPES}
         onAdd={addCredential}
         onDelete={deleteCredential}
-        onTest={(id, name) => setTestTarget({ id, name })}
+        onTest={(id, name, type) => setTestTarget({ id, name, type })}
         extraActions={
           <button type="button" class="btn btn-sm btn-outline" onClick={connectGoogleSheets}>
             Connect Google Sheets

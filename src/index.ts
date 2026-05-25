@@ -34,7 +34,7 @@ import {
 } from "./db/settings.ts";
 import { decryptHttpConfig, resolveHeaderTemplates } from "./http-config.ts";
 import { validateDateRangeConfig, validatePaginationConfig } from "./loaders/config-types.ts";
-import { runGoogleSheetsLoadJob } from "./loaders/google-sheets.ts";
+import { refreshGoogleAccessToken, runGoogleSheetsLoadJob } from "./loaders/google-sheets.ts";
 import { runHttpLoadJob } from "./loaders/http.ts";
 import { mcpHandler } from "./mcp/server.ts";
 import { parseHttpDsUri, signDataSourceToken, verifyDataSourceToken } from "./storage/resolve.ts";
@@ -341,6 +341,32 @@ app.delete("/api/credentials/:id", requireAuth, async (c) => {
   const deleted = await deleteCredential(c.env.DB, c.req.param("id"), c.get("userId"));
   if (!deleted) return new Response("Not Found", { status: 404 });
   return new Response(null, { status: 204 });
+});
+
+app.post("/api/credentials/:id/test", requireAuth, async (c) => {
+  const row = await getCredentialConfig(c.env.DB, c.req.param("id"), c.get("userId"));
+  if (!row) return c.json({ error: "not found" }, 404);
+  if (row.type !== "google-sheets") {
+    return c.json({ error: "test not supported for this credential type" }, 400);
+  }
+  let cred: { refreshToken: string };
+  try {
+    cred = JSON.parse(await decryptConfig(row.encrypted_config, c.env.JWT_SECRET)) as {
+      refreshToken: string;
+    };
+  } catch {
+    return c.json({ ok: false, error: "Failed to decrypt credential" });
+  }
+  try {
+    await refreshGoogleAccessToken(
+      c.env.GOOGLE_CLIENT_ID,
+      c.env.GOOGLE_CLIENT_SECRET,
+      cred.refreshToken,
+    );
+    return c.json({ ok: true });
+  } catch (err) {
+    return c.json({ ok: false, error: String(err) });
+  }
 });
 
 // ── Storage backends endpoints ────────────────────────────────────────────
