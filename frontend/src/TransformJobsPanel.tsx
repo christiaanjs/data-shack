@@ -207,7 +207,10 @@ export function TransformJobsPanel({
         const data = (await res.json()) as { error?: string };
         throw new Error(data.error ?? `Error ${res.status}`);
       }
-      await fetchAll();
+      // Optimistically show pending — the WS event will update to running/done/failed.
+      setJobs((prev) =>
+        prev.map((j) => (j.id === jobId ? { ...j, status: "pending", updated_at: Date.now() } : j)),
+      );
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : "Trigger failed");
     }

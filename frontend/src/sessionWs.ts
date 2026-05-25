@@ -39,6 +39,9 @@ export function connectSession(config: {
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let jobEventListener: ((ev: JobEvent) => void) | null = null;
 
+  const bc =
+    typeof BroadcastChannel !== "undefined" ? new BroadcastChannel("data-shack-jobs") : null;
+
   // Prevent Chrome/Edge from throttling JS in background tabs.
   if (typeof navigator !== "undefined" && "locks" in navigator) {
     (
@@ -94,9 +97,10 @@ export function connectSession(config: {
       if (msg.type === "query") {
         await handleQuery(socket, msg, workerBase, getAuthHeaders, getDb);
       } else if (msg.type === "transform_job") {
-        await handleTransformJob(socket, msg, workerBase, getAuthHeaders, getDb, (ev) =>
-          jobEventListener?.(ev),
-        );
+        await handleTransformJob(socket, msg, workerBase, getAuthHeaders, getDb, (ev) => {
+          jobEventListener?.(ev);
+          bc?.postMessage(ev);
+        });
       }
     };
 
@@ -140,6 +144,7 @@ export function connectSession(config: {
       closed = true;
       if (reconnectTimer !== null) clearTimeout(reconnectTimer);
       ws?.close();
+      bc?.close();
     },
     isConnected() {
       return ws?.readyState === WebSocket.OPEN;
