@@ -1,12 +1,20 @@
-import type { AsyncDuckDB } from "@duckdb/duckdb-wasm";
-import { useCallback, useEffect, useRef, useState } from "preact/hooks";
-import { type CatalogTable, registerCatalogViews as loadCatalogViews } from "./catalogViews.ts";
+import { useCallback, useEffect, useState } from "preact/hooks";
+import type { CatalogTableWithSnapshot } from "./catalogViews.ts";
 import { initDuckDB, runQuery } from "./duckdb.ts";
 import { resolveStorageUris } from "./resolveQuery.ts";
 
 interface QueryPanelProps {
   workerBase: string;
   getAuthHeaders: () => Promise<Record<string, string>>;
+  // Catalog state — managed by App, kept alive across tab switches.
+  catalogTables: CatalogTableWithSnapshot[];
+  catalogLoading: boolean;
+  catalogError: string | null;
+  catalogFailed: string[];
+  onRefreshCatalog: () => void;
+  // DuckDB state — managed by App.
+  dbReady: boolean;
+  dbError: string | null;
 }
 
 interface QueryResult {
@@ -22,11 +30,17 @@ interface CredentialRow {
 
 const PLACEHOLDER_SQL = "SELECT * FROM read_json('r2://data-shack-storage/sample.ndjson') LIMIT 10";
 
-export function QueryPanel({ workerBase, getAuthHeaders }: QueryPanelProps) {
-  const [dbReady, setDbReady] = useState(false);
-  const [dbError, setDbError] = useState<string | null>(null);
-  const dbRef = useRef<AsyncDuckDB | null>(null);
-
+export function QueryPanel({
+  workerBase,
+  getAuthHeaders,
+  catalogTables,
+  catalogLoading,
+  catalogError,
+  catalogFailed,
+  onRefreshCatalog,
+  dbReady,
+  dbError,
+}: QueryPanelProps) {
   const [sql, setSql] = useState("");
   const [queryResult, setQueryResult] = useState<QueryResult | null>(null);
   const [queryError, setQueryError] = useState<string | null>(null);
@@ -38,11 +52,6 @@ export function QueryPanel({ workerBase, getAuthHeaders }: QueryPanelProps) {
   const [dsFetching, setDsFetching] = useState(false);
   const [dsResponse, setDsResponse] = useState<{ status: number; body: string } | null>(null);
   const [dsError, setDsError] = useState<string | null>(null);
-
-  const [catalogTables, setCatalogTables] = useState<CatalogTable[]>([]);
-  const [catalogLoading, setCatalogLoading] = useState(false);
-  const [catalogError, setCatalogError] = useState<string | null>(null);
-  const [failedViews, setFailedViews] = useState<string[]>([]);
 
   const fetchHttpCredentials = useCallback(async () => {
     try {
@@ -57,38 +66,6 @@ export function QueryPanel({ workerBase, getAuthHeaders }: QueryPanelProps) {
       // non-fatal
     }
   }, [workerBase, getAuthHeaders, selectedCredId]);
-
-  const registerCatalogViews = useCallback(async () => {
-    const db = dbRef.current;
-    if (!db) return;
-    setCatalogLoading(true);
-    setCatalogError(null);
-    setFailedViews([]);
-    try {
-      const { tables, failed } = await loadCatalogViews(db, workerBase, getAuthHeaders);
-      setCatalogTables(tables);
-      if (failed.length > 0) setFailedViews(failed);
-    } catch (err) {
-      setCatalogError(err instanceof Error ? err.message : "Catalog load failed");
-    } finally {
-      setCatalogLoading(false);
-    }
-  }, [workerBase, getAuthHeaders]);
-
-  useEffect(() => {
-    initDuckDB()
-      .then((db) => {
-        dbRef.current = db;
-        setDbReady(true);
-      })
-      .catch((err: unknown) => {
-        setDbError(err instanceof Error ? err.message : "DuckDB failed to initialize");
-      });
-  }, []);
-
-  useEffect(() => {
-    if (dbReady) registerCatalogViews().catch(() => {});
-  }, [dbReady, registerCatalogViews]);
 
   useEffect(() => {
     fetchHttpCredentials().catch(() => {});
@@ -116,14 +93,14 @@ export function QueryPanel({ workerBase, getAuthHeaders }: QueryPanelProps) {
   }
 
   async function handleRunQuery() {
-    const db = dbRef.current;
-    if (!db) return;
+    if (!dbReady) return;
     const rawSql = sql || PLACEHOLDER_SQL;
     setQuerying(true);
     setQueryError(null);
     setQueryResult(null);
 
     try {
+      const db = await initDuckDB();
       const { sql: resolvedSql, preamble } = await resolveStorageUris(
         rawSql,
         workerBase,
@@ -160,7 +137,7 @@ export function QueryPanel({ workerBase, getAuthHeaders }: QueryPanelProps) {
             <button
               type="button"
               class="btn btn-xs btn-ghost"
-              onClick={() => registerCatalogViews().catch(() => {})}
+              onClick={() => onRefreshCatalog()}
               disabled={catalogLoading || !dbReady}
               title="Reload catalog and re-register views"
             >
@@ -187,10 +164,10 @@ export function QueryPanel({ workerBase, getAuthHeaders }: QueryPanelProps) {
           {catalogTables.length > 0 && (
             <div class="flex flex-wrap gap-2">
               {catalogTables.map((t) => {
-                const failed = failedViews.includes(t.name);
+                const failed = catalogFailed.includes(t.name);
                 return (
                   <button
-                    key={t.id}
+                    key={t.id || t.name}
                     type="button"
                     class={`badge badge-outline font-mono cursor-pointer ${failed ? "badge-warning" : "hover:badge-primary"}`}
                     onClick={() => setSql(`SELECT * FROM "${t.name}" LIMIT 100`)}
@@ -207,14 +184,14 @@ export function QueryPanel({ workerBase, getAuthHeaders }: QueryPanelProps) {
               })}
             </div>
           )}
-          {catalogTables.length > 0 && failedViews.length === 0 && (
+          {catalogTables.length > 0 && catalogFailed.length === 0 && (
             <p class="text-xs text-base-content/40">
               Views registered — query tables by name directly in SQL.
             </p>
           )}
-          {failedViews.length > 0 && (
+          {catalogFailed.length > 0 && (
             <p class="text-xs text-warning/70">
-              {failedViews.length === catalogTables.length ? "No" : "Some"} views could not be
+              {catalogFailed.length === catalogTables.length ? "No" : "Some"} views could not be
               registered — the snapshot file may not exist in storage yet.
             </p>
           )}
