@@ -17,7 +17,8 @@ Each stage produces something functional and testable independently. Stages 1–
 | Storage backend edit | `GET`/`PATCH /api/storage-backends/:id`; `EditBackendDialog` in settings UI | ✅ Done |
 | Stage 6 | Session DO + MCP server (`get_warehouse_schema`, `run_query`, `read_data`) | ✅ Done |
 | Stage 7 | Transform jobs + triggers; session DO dispatch; browser execution in DuckDB-WASM | ✅ Done |
-| Stage 5, 8–10 | See below | Not started |
+| Stage 9 | Multi-table trigger coordination (`policy: 'any'/'all'`) + Google Sheets data source | ✅ Done |
+| Stage 5, 8, 10 | See below | Not started |
 
 **Note on Stage 1 + Stage 2 storage resolution (updated — S3 proxy + URI unification):** The original per-key JWT token flow (`POST /api/storage/resolve`, `/api/storage/obj/:token`, `/api/storage/r2s3compat/obj/:token`) has been replaced by an S3-compatible proxy. `POST /api/storage/proxy-credentials` vends short-lived `{ accessKeyId, secret, endpoint, region, bucket }` credentials stored in `PROXY_CREDS_KV` with TTL. The frontend calls `acquireProxyCred()` to get a credential and `buildS3Secret()` to build a DuckDB `CREATE OR REPLACE SECRET` statement; all storage operations (GET, HEAD, PUT, ListObjectsV2) then flow through `GET|HEAD|PUT /api/storage/s3proxy/:bucket/*key` on the Worker (implemented in `src/storage/router.ts`), which forwards to the real backend (R2 binding for `r2-bound`, re-signed upstream S3 for `r2-s3compat`). This enables DuckDB `COPY TO … PARTITION_BY` (multiple PUT paths not known in advance) and `read_parquet('…/**/*.parquet', hive_partitioning=true)` (ListObjectsV2 to discover partition files). No CORS policy on the upstream bucket is needed. `POST /api/storage/resolve` is retained for `http-ds://` URI resolution only.
 
@@ -180,15 +181,48 @@ Implemented as a standalone Cloudflare Worker with D1, ahead of Stage 1, to esta
 
 ---
 
-## Stage 9 — Second data source and cross-source joins
+## Stage 9 — Second data source and cross-source joins ✅ Done
 
 **Goal:** The warehouse earns the "integration" in data integration.
 
-- Google Sheets load job: OAuth flow handled in the browser (redirect + token handoff to Worker, stored in D1); Sheets ETL Worker on a cron, same pattern as Akahu
-- Derived table `monthly_spending`: transform job with `watches: ['transactions', 'budget']`, `policy: 'all'` — fires only after both sources have fresh commits
-- Multi-input transform runner: resolves all watched tables to current snapshot keys, registers each as a named DuckDB view, runs join SQL against plain table names
+### ✅ Implemented
 
-**Test:** Edit a budget figure in Google Sheets. Wait for the next cron. Verify the derived table updates. Verify the `monthly_spending` dashboard reflects the change. Verify the transform does not fire until both sources have committed.
+**Multi-table trigger coordination:**
+- `triggers.watches` converted from single TEXT to JSON array — one trigger can watch multiple tables
+- `triggers.policy` column: `'any'` (default — fires on any watched table commit) or `'all'` (fires only when every watched table has a snapshot newer than the job's last completion)
+- `transform_jobs.last_completed_at` column: records when each job last finished successfully; used by `'all'` policy to determine freshness
+- Commit handler updated: `'any'` policy uses `json_each()` membership check; `'all'` policy counts watched tables without a newer snapshot and fires only when count = 0
+- `completeJob` sets `last_completed_at` at job completion; `listJobs` and `listPendingJobs` include it in responses
+- `sessionWs.handleTransformJob` refreshes all catalog views before running each job, so the DuckDB views reflect the freshly committed snapshots that triggered the job
+- Frontend `TransformJobsPanel`: trigger form shown on both create and edit; Add Trigger button correctly disables when the parsed table list is empty; creates trigger automatically after job creation when fields are filled
+
+**Google Sheets credential type:**
+- `google-sheets` credential type stores `{ refreshToken }` encrypted in D1
+- OAuth popup flow: `GET /connect/google-sheets?name=` redirects to Google; callback at `/oauth/callback` stores the refresh token and returns `popupResultHtml` — a self-closing HTML page that calls `window.opener.postMessage` with `{ type: 'gscred-success', credentialName }` then closes
+- `postMessage` target origin uses `JSON.stringify(frontendOrigin)` to avoid XSS
+- Settings UI: "Connect Google Sheets" opens a `window.open` popup; scoped `message` listener updates the credentials list on success; polls for popup closure to remove the listener and prevent leaks
+- `POST /api/credentials/:id/test` verifies token refresh; returns non-2xx (503/500/502) on failure; guards for missing `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` env vars
+- D1 migration 0009: `oauth_states.credential_name` column for passing the credential name through the OAuth state
+
+**Google Sheets load jobs:**
+- D1 migration 0008: `source_type` (default `'http'`) and `source_config` (JSON TEXT) columns on `load_jobs`
+- `runGoogleSheetsLoadJob` (`src/loaders/google-sheets.ts`): reads `source_config` for `spreadsheetId`/`sheetName`/`range`, refreshes Google access token, fetches via Sheets API v4 values endpoint, converts to NDJSON, writes to R2 or S3-compat backend, commits to catalog DO
+- 50 MB NDJSON buffer limit to prevent OOM on large sheets
+- Queue consumer in `src/index.ts` branches on `source_type`
+- Load Jobs UI: source type selector (HTTP/Google Sheets); credential dropdown filters to matching type; Spreadsheet ID, Sheet Name, Range fields for Sheets; "Source" badge in jobs table; PATCH handler preserves `source_type`/`source_config` when fields are omitted (reads existing job first as fallback)
+
+**Google Sheets S3 proxy backend:**
+- `google-sheets` storage backend type with config `{ spreadsheetId, sheetName, credentialId }`
+- GET: fetches via Sheets API v4 values endpoint, returns rows as JSON array (`[{col: val, ...}]`) so DuckDB can use `read_json('s3://my-backend/SheetName.json')`; key base name (extension stripped) sets which sheet tab to read
+- PUT: accepts JSON array or NDJSON from `COPY TO FORMAT JSON`; converts to `string[][]`; writes via Sheets values API at `valueInputOption=USER_ENTERED`; returns `ETag: "gsheets"` so DuckDB's S3 client doesn't throw
+- CRLF stripped from CSV fallback path
+- Settings UI: guided form for `google-sheets` backends when credentials exist (credential picker, Spreadsheet ID, Sheet Name); raw JSON fallback otherwise
+
+**Tests:**
+- 5 new unit tests in `test/loader.test.ts` for `runGoogleSheetsLoadJob` (R2 write, missing env vars, token failure, Sheets API error, missing source_config)
+- Existing catalog and session tests extended for `policy`, `watches` array, `last_completed_at`
+
+**Test:** Edit a budget figure in Google Sheets. Wait for the next cron. Verify the derived table updates. Verify the `monthly_spending` transform does not fire until both `transactions` and `budget` have committed.
 
 ---
 
