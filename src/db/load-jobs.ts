@@ -20,6 +20,8 @@ export interface LoadJob {
   updated_at: number;
   date_range_config: string | null;
   pagination_config: string | null;
+  source_type: string;
+  source_config: string | null;
 }
 
 export async function listLoadJobs(db: D1Database, userId: string): Promise<LoadJob[]> {
@@ -72,6 +74,8 @@ export async function insertLoadJob(
     cron_schedule?: string;
     date_range_config?: string | null;
     pagination_config?: string | null;
+    source_type?: string;
+    source_config?: string | null;
   },
 ): Promise<LoadJob> {
   const id = `lj_${crypto.randomUUID().replace(/-/g, "")}`;
@@ -83,6 +87,8 @@ export async function insertLoadJob(
   const tablePath = data.table_path ?? "";
   const dateRangeConfig = data.date_range_config ?? null;
   const paginationConfig = data.pagination_config ?? null;
+  const sourceType = data.source_type ?? "http";
+  const sourceConfig = data.source_config ?? null;
   let cron: Cron;
   try {
     cron = new Cron(cronSchedule);
@@ -97,8 +103,8 @@ export async function insertLoadJob(
         (id, user_id, name, credential_id, storage_backend_id, table_name, table_path,
          http_path, http_method, format, cron_schedule, next_run_at,
          last_run_at, last_error, enabled, created_at, updated_at,
-         date_range_config, pagination_config)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 1, ?, ?, ?, ?)`,
+         date_range_config, pagination_config, source_type, source_config)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 1, ?, ?, ?, ?, ?, ?)`,
     )
     .bind(
       id,
@@ -117,6 +123,8 @@ export async function insertLoadJob(
       now,
       dateRangeConfig,
       paginationConfig,
+      sourceType,
+      sourceConfig,
     )
     .run();
 
@@ -140,6 +148,8 @@ export async function insertLoadJob(
     updated_at: now,
     date_range_config: dateRangeConfig,
     pagination_config: paginationConfig,
+    source_type: sourceType,
+    source_config: sourceConfig,
   };
 }
 
@@ -159,6 +169,8 @@ export async function updateLoadJob(
     cron_schedule: string;
     date_range_config: string | null;
     pagination_config: string | null;
+    source_type?: string;
+    source_config?: string | null;
   },
 ): Promise<LoadJob | null> {
   const now = Date.now();
@@ -175,7 +187,8 @@ export async function updateLoadJob(
           SET name = ?, credential_id = ?, storage_backend_id = ?, table_name = ?,
               table_path = ?, http_path = ?, http_method = ?, format = ?,
               cron_schedule = ?, next_run_at = ?, updated_at = ?,
-              date_range_config = ?, pagination_config = ?
+              date_range_config = ?, pagination_config = ?,
+              source_type = ?, source_config = ?
         WHERE id = ? AND user_id = ?`,
     )
     .bind(
@@ -192,6 +205,8 @@ export async function updateLoadJob(
       now,
       data.date_range_config,
       data.pagination_config,
+      data.source_type ?? "http",
+      data.source_config ?? null,
       id,
       userId,
     )

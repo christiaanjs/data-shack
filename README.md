@@ -27,6 +27,11 @@ A personal data integration platform built on Cloudflare that brings your data t
 | Session Durable Object: WebSocket hibernation, MCP query relay, transform job dispatch on connect | ✅ Done |
 | MCP server: Streamable HTTP (2025-03-26), `get_warehouse_schema` / `list_data_sources` / `run_query` / `read_data` tools | ✅ Done |
 | Transform jobs + triggers: catalog DO queue, session DO dispatch, browser DuckDB execution | ✅ Done |
+| Multi-table trigger coordination: `policy: 'any'/'all'`, `watches` as JSON array, `last_completed_at` freshness tracking | ✅ Done |
+| Google Sheets credential type: OAuth 2.0 popup flow, encrypted refresh token in D1 | ✅ Done |
+| Google Sheets load jobs: cron-triggered Sheets API v4 → NDJSON → R2 → catalog | ✅ Done |
+| Google Sheets S3 proxy backend: GET returns JSON (for `read_json`), PUT writes via Sheets values API; key = sheet tab name | ✅ Done |
+| Credential test endpoint for `google-sheets` type: verifies token refresh works | ✅ Done |
 | Dashboarding platform | Not started |
 
 See [`build-plan.md`](./build-plan.md) for the full sequenced plan.

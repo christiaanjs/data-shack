@@ -34,6 +34,7 @@ import {
 } from "./db/settings.ts";
 import { decryptHttpConfig, resolveHeaderTemplates } from "./http-config.ts";
 import { validateDateRangeConfig, validatePaginationConfig } from "./loaders/config-types.ts";
+import { refreshGoogleAccessToken, runGoogleSheetsLoadJob } from "./loaders/google-sheets.ts";
 import { runHttpLoadJob } from "./loaders/http.ts";
 import { mcpHandler } from "./mcp/server.ts";
 import { parseHttpDsUri, signDataSourceToken, verifyDataSourceToken } from "./storage/resolve.ts";
@@ -342,6 +343,35 @@ app.delete("/api/credentials/:id", requireAuth, async (c) => {
   return new Response(null, { status: 204 });
 });
 
+app.post("/api/credentials/:id/test", requireAuth, async (c) => {
+  const row = await getCredentialConfig(c.env.DB, c.req.param("id"), c.get("userId"));
+  if (!row) return c.json({ error: "not found" }, 404);
+  if (row.type !== "google-sheets") {
+    return c.json({ error: "test not supported for this credential type" }, 400);
+  }
+  if (!c.env.GOOGLE_CLIENT_ID || !c.env.GOOGLE_CLIENT_SECRET) {
+    return c.json({ error: "Google OAuth not configured on this server" }, 503);
+  }
+  let cred: { refreshToken: string };
+  try {
+    cred = JSON.parse(await decryptConfig(row.encrypted_config, c.env.JWT_SECRET)) as {
+      refreshToken: string;
+    };
+  } catch {
+    return c.json({ ok: false, error: "Failed to decrypt credential" }, 500);
+  }
+  try {
+    await refreshGoogleAccessToken(
+      c.env.GOOGLE_CLIENT_ID,
+      c.env.GOOGLE_CLIENT_SECRET,
+      cred.refreshToken,
+    );
+    return c.json({ ok: true });
+  } catch (err) {
+    return c.json({ ok: false, error: String(err) }, 502);
+  }
+});
+
 // ── Storage backends endpoints ────────────────────────────────────────────
 
 app.get("/api/storage-backends", requireAuth, async (c) => {
@@ -580,6 +610,11 @@ app.post("/api/load-jobs", requireAuth, async (c) => {
       cron_schedule: typeof body.cron_schedule === "string" ? body.cron_schedule : undefined,
       date_range_config: dateRangeConfig,
       pagination_config: paginationConfig,
+      source_type: typeof body.source_type === "string" ? body.source_type : undefined,
+      source_config:
+        body.source_config !== undefined && body.source_config !== null
+          ? JSON.stringify(body.source_config)
+          : undefined,
     });
   } catch (err) {
     if (err instanceof Error && err.message.startsWith("Invalid cron_schedule")) {
@@ -633,6 +668,10 @@ app.patch("/api/load-jobs/:id", requireAuth, async (c) => {
     patchPaginationConfig = JSON.stringify(parsed);
   }
 
+  // Fetch the existing job to preserve source_type/source_config when not provided.
+  const existingJob = await getLoadJob(c.env.DB, c.get("userId"), c.req.param("id"));
+  if (!existingJob) return new Response("Not Found", { status: 404 });
+
   let updated: Awaited<ReturnType<typeof updateLoadJob>>;
   try {
     updated = await updateLoadJob(c.env.DB, c.get("userId"), c.req.param("id"), {
@@ -647,6 +686,12 @@ app.patch("/api/load-jobs/:id", requireAuth, async (c) => {
       cron_schedule: typeof body.cron_schedule === "string" ? body.cron_schedule : "0 * * * *",
       date_range_config: patchDateRangeConfig,
       pagination_config: patchPaginationConfig,
+      source_type:
+        typeof body.source_type === "string" ? body.source_type : existingJob.source_type,
+      source_config:
+        body.source_config !== undefined && body.source_config !== null
+          ? JSON.stringify(body.source_config)
+          : existingJob.source_config,
     });
   } catch (err) {
     if (err instanceof Error && err.message.startsWith("Invalid cron_schedule")) {
@@ -855,7 +900,11 @@ export default {
         }
         let triggeredJobIds: string[] = [];
         try {
-          ({ triggeredJobIds } = await runHttpLoadJob(job, env));
+          if (job.source_type === "google-sheets") {
+            ({ triggeredJobIds } = await runGoogleSheetsLoadJob(job, env));
+          } else {
+            ({ triggeredJobIds } = await runHttpLoadJob(job, env));
+          }
         } catch (err) {
           const lastError = String(err);
           console.error(`Load job ${job.id} (${job.name}) failed:`, err);

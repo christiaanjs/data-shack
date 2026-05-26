@@ -13,6 +13,7 @@ export interface OAuthStateRow {
   redirect_uri: string;
   original_state: string | null;
   expires_at: number; // Unix milliseconds
+  credential_name?: string | null;
 }
 
 export interface OAuthCodeRow {
@@ -71,7 +72,7 @@ export async function insertOAuthClient(
 export async function insertOAuthState(db: D1Database, row: OAuthStateRow): Promise<void> {
   await db
     .prepare(
-      "INSERT INTO oauth_states (state, client_id, provider, code_challenge, code_challenge_method, redirect_uri, original_state, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO oauth_states (state, client_id, provider, code_challenge, code_challenge_method, redirect_uri, original_state, expires_at, credential_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(
       row.state,
@@ -82,6 +83,7 @@ export async function insertOAuthState(db: D1Database, row: OAuthStateRow): Prom
       row.redirect_uri,
       row.original_state,
       row.expires_at,
+      row.credential_name ?? null,
     )
     .run();
 }

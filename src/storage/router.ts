@@ -2,7 +2,13 @@ import { createMiddleware } from "hono/factory";
 import { Hono } from "hono/tiny";
 import { authenticate } from "../auth/middleware.ts";
 import { decryptConfig } from "../crypto.ts";
-import { getStorageBackendByNameOrId, getStorageBackendConfig } from "../db/settings.ts";
+import {
+  getCredentialConfig,
+  getStorageBackendByNameOrId,
+  getStorageBackendConfig,
+} from "../db/settings.ts";
+import { refreshGoogleAccessToken } from "../loaders/google-sheets.ts";
+import type { GoogleSheetsCredential } from "../loaders/google-sheets.ts";
 import type { Env } from "../types.ts";
 import { parseS3AuthCredential, r2BoundKey, signS3Request } from "./resolve.ts";
 
@@ -317,10 +323,155 @@ storageRouter.on(["GET", "HEAD", "PUT", "OPTIONS"], "/s3proxy/*", async (c) => {
     return new Response(obj.body, { headers });
   }
 
-  // ── r2-s3compat ───────────────────────────────────────────────────────
+  // ── google-sheets / r2-s3compat ──────────────────────────────────────
 
-  const row = await getStorageBackendConfig(c.env.DB, backendId, userId);
-  if (!row || row.type !== "r2-s3compat") return new Response("Not Found", { status: 404 });
+  const backendRow = await getStorageBackendConfig(c.env.DB, backendId, userId);
+  if (!backendRow) return new Response("Not Found", { status: 404 });
+
+  if (backendRow.type === "google-sheets") {
+    let sheetsCfg: { spreadsheetId: string; sheetName: string; gid?: number; credentialId: string };
+    try {
+      sheetsCfg = JSON.parse(
+        await decryptConfig(backendRow.encrypted_config, c.env.JWT_SECRET),
+      ) as typeof sheetsCfg;
+    } catch {
+      return corsError(502, "Bad Gateway");
+    }
+
+    const credRow = await getCredentialConfig(c.env.DB, sheetsCfg.credentialId, userId);
+    if (!credRow || credRow.type !== "google-sheets") {
+      return corsError(502, "google-sheets credential not found");
+    }
+
+    let cred: GoogleSheetsCredential;
+    try {
+      cred = JSON.parse(
+        await decryptConfig(credRow.encrypted_config, c.env.JWT_SECRET),
+      ) as GoogleSheetsCredential;
+    } catch {
+      return corsError(502, "Bad Gateway");
+    }
+
+    if (!c.env.GOOGLE_CLIENT_ID || !c.env.GOOGLE_CLIENT_SECRET) {
+      return corsError(502, "Google OAuth not configured");
+    }
+
+    let accessToken: string;
+    try {
+      accessToken = await refreshGoogleAccessToken(
+        c.env.GOOGLE_CLIENT_ID,
+        c.env.GOOGLE_CLIENT_SECRET,
+        cred.refreshToken,
+      );
+    } catch {
+      return corsError(502, "Failed to refresh Google access token");
+    }
+
+    // S3 key → sheet name: strip extension, fall back to configured sheetName.
+    const keyBase = key.includes(".") ? key.slice(0, key.lastIndexOf(".")) : key;
+    const sheetName = keyBase || sheetsCfg.sheetName || "Sheet1";
+
+    if (method === "PUT") {
+      // Accept JSON array or NDJSON (DuckDB COPY TO FORMAT JSON/NDJSON), fall back to CSV.
+      const bodyText = await c.req.text();
+      const trimmed = bodyText.trimStart();
+      let rows: string[][];
+
+      if (trimmed.startsWith("[") || trimmed.startsWith("{")) {
+        // JSON array or NDJSON from DuckDB COPY TO (FORMAT JSON) or (FORMAT NDJSON)
+        const objects: Record<string, unknown>[] = [];
+        if (trimmed.startsWith("[")) {
+          const arr = JSON.parse(bodyText) as Record<string, unknown>[];
+          objects.push(...arr);
+        } else {
+          for (const line of bodyText.split("\n")) {
+            const l = line.trim();
+            if (l) objects.push(JSON.parse(l) as Record<string, unknown>);
+          }
+        }
+        if (objects.length === 0) {
+          rows = [];
+        } else {
+          const hdrs = Object.keys(objects[0]!);
+          rows = [hdrs, ...objects.map((obj) => hdrs.map((h) => String(obj[h] ?? "")))];
+        }
+      } else {
+        // CSV fallback (handle CRLF line endings)
+        rows = bodyText
+          .split("\n")
+          .map((line) => line.replace(/\r$/, ""))
+          .filter((line) => line.trim() !== "")
+          .map((line) => {
+            const cells: string[] = [];
+            let cur = "";
+            let inQuote = false;
+            for (let i = 0; i < line.length; i++) {
+              const ch = line[i]!;
+              if (ch === '"') {
+                if (inQuote && line[i + 1] === '"') {
+                  cur += '"';
+                  i++;
+                } else {
+                  inQuote = !inQuote;
+                }
+              } else if (ch === "," && !inQuote) {
+                cells.push(cur);
+                cur = "";
+              } else {
+                cur += ch;
+              }
+            }
+            cells.push(cur);
+            return cells;
+          });
+      }
+
+      const sheetsUrl = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(sheetsCfg.spreadsheetId)}/values/${encodeURIComponent(sheetName)}?valueInputOption=USER_ENTERED`;
+      const sheetsRes = await fetch(sheetsUrl, {
+        method: "PUT",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ values: rows }),
+      });
+      if (!sheetsRes.ok) {
+        const msg = await sheetsRes.text();
+        return corsError(502, `Sheets API error: ${msg}`);
+      }
+      const putHeaders = new Headers();
+      putHeaders.set("ETag", '"gsheets"');
+      addCorsHeaders(putHeaders);
+      return new Response(null, { status: 200, headers: putHeaders });
+    }
+
+    // GET / HEAD: use Sheets API values endpoint and return a JSON array of objects.
+    const valuesUrl = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(sheetsCfg.spreadsheetId)}/values/${encodeURIComponent(sheetName)}`;
+    const valuesRes = await fetch(valuesUrl, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    if (!valuesRes.ok) {
+      return corsError(502, `Sheets API error: ${valuesRes.status}`);
+    }
+    const valuesData = (await valuesRes.json()) as { values?: string[][] };
+    const allRows = valuesData.values ?? [];
+    const sheetsHeaders = allRows[0] ?? [];
+    const jsonRows = allRows.slice(1).map((row) => {
+      const obj: Record<string, string> = {};
+      for (let i = 0; i < sheetsHeaders.length; i++) {
+        obj[sheetsHeaders[i]!] = row[i] ?? "";
+      }
+      return obj;
+    });
+    const jsonBody = JSON.stringify(jsonRows);
+    const getHeaders = new Headers({ "Content-Type": "application/json" });
+    getHeaders.set("Content-Length", String(new TextEncoder().encode(jsonBody).length));
+    addCorsHeaders(getHeaders);
+    return new Response(method === "HEAD" ? null : jsonBody, { headers: getHeaders });
+  }
+
+  const row = backendRow;
+  if (row.type !== "r2-s3compat") return new Response("Not Found", { status: 404 });
   const config = await decryptR2S3CompatConfig(row.encrypted_config, c.env.JWT_SECRET);
   if (!config) return new Response("Bad Gateway", { status: 502 });
 

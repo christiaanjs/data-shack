@@ -19,8 +19,8 @@ interface StorageBackendRow {
   created_at: number;
 }
 
-const CREDENTIAL_TYPES = ["http", "google_oauth", "generic_token"];
-const BACKEND_TYPES = ["r2-bound", "s3", "r2-s3compat", "gcs", "azure", "https"];
+const CREDENTIAL_TYPES = ["http", "google-sheets", "google_oauth", "generic_token"];
+const BACKEND_TYPES = ["r2-bound", "s3", "r2-s3compat", "google-sheets", "gcs", "azure", "https"];
 
 const HTTP_CONFIG_TEMPLATE = JSON.stringify(
   {
@@ -57,6 +57,68 @@ const R2_S3COMPAT_CONFIG_TEMPLATE = JSON.stringify(
   null,
   2,
 );
+
+// ── GoogleSheetsTestDialog ────────────────────────────────────────────────
+
+function GoogleSheetsTestDialog({
+  credentialId,
+  credentialName,
+  workerBase,
+  getAuthHeaders,
+  onClose,
+}: {
+  credentialId: string;
+  credentialName: string;
+  workerBase: string;
+  getAuthHeaders: () => Promise<Record<string, string>>;
+  onClose: () => void;
+}) {
+  const [result, setResult] = useState<{ ok: boolean; error?: string } | null>(null);
+
+  useEffect(() => {
+    (async () => {
+      const headers = await getAuthHeaders();
+      const res = await fetch(`${workerBase}/api/credentials/${credentialId}/test`, {
+        method: "POST",
+        headers,
+      });
+      setResult((await res.json()) as { ok: boolean; error?: string });
+    })().catch((err) => setResult({ ok: false, error: String(err) }));
+  }, [credentialId, workerBase, getAuthHeaders]);
+
+  return (
+    <div
+      class="modal modal-open"
+      onKeyDown={(e) => {
+        if (e.key === "Escape") onClose();
+      }}
+    >
+      <div class="modal-box space-y-4">
+        <h3 class="font-bold text-lg">Test: {credentialName}</h3>
+        {!result ? (
+          <div class="flex gap-2 items-center">
+            <span class="loading loading-spinner loading-sm" />
+            <span class="text-sm">Testing connection…</span>
+          </div>
+        ) : result.ok ? (
+          <div role="alert" class="alert alert-success py-2 text-sm">
+            <span>Token refresh successful — credential is working.</span>
+          </div>
+        ) : (
+          <div role="alert" class="alert alert-error py-2 text-sm">
+            <span>{result.error ?? "Connection test failed."}</span>
+          </div>
+        )}
+        <div class="modal-action">
+          <button type="button" class="btn btn-sm" onClick={onClose}>
+            Close
+          </button>
+        </div>
+      </div>
+      <button type="button" class="modal-backdrop" onClick={onClose} aria-label="Close dialog" />
+    </div>
+  );
+}
 
 // ── TestDialog ────────────────────────────────────────────────────────────
 
@@ -167,10 +229,12 @@ function AddForm({
   title,
   typeOptions,
   onAdd,
+  credentials,
 }: {
   title: string;
   typeOptions: string[];
   onAdd: (name: string, type: string, config: string) => Promise<void>;
+  credentials?: CredentialRow[];
 }) {
   const [name, setName] = useState("");
   const [type, setType] = useState(typeOptions[0] ?? "");
@@ -185,6 +249,14 @@ function AddForm({
   const [config, setConfig] = useState(initialConfig);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Google Sheets guided form state
+  const [gsCredId, setGsCredId] = useState("");
+  const [gsSpreadsheetId, setGsSpreadsheetId] = useState("");
+  const [gsSheetName, setGsSheetName] = useState("");
+
+  const gsCredentials = credentials?.filter((c) => c.type === "google-sheets") ?? [];
+  const isGsGuided = type === "google-sheets" && gsCredentials.length > 0;
 
   function handleTypeChange(newType: string) {
     setType(newType);
@@ -201,6 +273,11 @@ function AddForm({
     ) {
       setConfig("{}");
     }
+    if (newType === "google-sheets") {
+      setGsCredId("");
+      setGsSpreadsheetId("");
+      setGsSheetName("");
+    }
   }
 
   async function handleSubmit(e: Event) {
@@ -208,17 +285,30 @@ function AddForm({
     setSubmitting(true);
     setError(null);
     try {
-      await onAdd(name, type, config);
+      const configJson = isGsGuided
+        ? JSON.stringify({
+            credentialId: gsCredId,
+            spreadsheetId: gsSpreadsheetId,
+            sheetName: gsSheetName || "Sheet1",
+          })
+        : config;
+      await onAdd(name, type, configJson);
       setName("");
-      setConfig(
-        type === "http"
-          ? HTTP_CONFIG_TEMPLATE
-          : type === "r2-bound"
-            ? R2_BOUND_CONFIG_TEMPLATE
-            : type === "r2-s3compat"
-              ? R2_S3COMPAT_CONFIG_TEMPLATE
-              : "{}",
-      );
+      if (isGsGuided) {
+        setGsCredId("");
+        setGsSpreadsheetId("");
+        setGsSheetName("");
+      } else {
+        setConfig(
+          type === "http"
+            ? HTTP_CONFIG_TEMPLATE
+            : type === "r2-bound"
+              ? R2_BOUND_CONFIG_TEMPLATE
+              : type === "r2-s3compat"
+                ? R2_S3COMPAT_CONFIG_TEMPLATE
+                : "{}",
+        );
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed");
     } finally {
@@ -267,43 +357,107 @@ function AddForm({
           </select>
         </fieldset>
       </div>
-      <fieldset class="fieldset">
-        <legend class="fieldset-legend">Config (JSON)</legend>
-        <textarea
-          class="textarea textarea-bordered textarea-sm font-mono w-full"
-          rows={type === "http" || type === "r2-s3compat" ? 8 : 3}
-          value={config}
-          onInput={(e) => setConfig((e.target as HTMLTextAreaElement).value)}
-        />
-        {type === "http" && (
-          <p class="text-xs text-base-content/50 mt-1">
-            <strong>baseUrl</strong> — API root (e.g. <code>https://api.akahu.io/v1</code>).{" "}
-            <strong>headers</strong> — sent on every request; use <code>{"{{name}}"}</code> to
-            reference a value from <strong>variables</strong> (keeps secrets out of the header
-            string).
-          </p>
-        )}
-        {type === "r2-bound" && (
-          <p class="text-xs text-base-content/50 mt-1">
-            The primary Cloudflare R2 bucket bound to this worker. <strong>bucket</strong> — set to{" "}
-            <code>data-shack-storage</code> (used for URI construction in the catalog). Load jobs
-            writing to this backend use the Worker's R2 binding directly.
-          </p>
-        )}
-        {type === "r2-s3compat" && (
-          <p class="text-xs text-base-content/50 mt-1">
-            <strong>endpoint</strong> — your R2 S3-compatible URL:{" "}
-            <code>https://{"<accountId>"}.r2.cloudflarestorage.com</code> (Account ID is on the R2
-            overview page). <strong>accessKeyId</strong> and <strong>secretAccessKey</strong> —
-            create an API token under <em>R2 → Manage R2 API tokens</em>. Once saved, query files as{" "}
-            <code>
-              r2-s3compat://{"<backendId>"}/{"<path>"}
-            </code>{" "}
-            in SQL.
-          </p>
-        )}
-      </fieldset>
-      <button type="submit" class="btn btn-sm btn-primary" disabled={submitting || !name.trim()}>
+
+      {isGsGuided ? (
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <fieldset class="fieldset">
+            <legend class="fieldset-legend">Google Sheets Credential</legend>
+            <select
+              required
+              class="select select-bordered select-sm w-full"
+              value={gsCredId}
+              onChange={(e) => setGsCredId((e.target as HTMLSelectElement).value)}
+            >
+              <option value="">— select —</option>
+              {gsCredentials.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name}
+                </option>
+              ))}
+            </select>
+          </fieldset>
+          <fieldset class="fieldset">
+            <legend class="fieldset-legend">Spreadsheet ID</legend>
+            <input
+              type="text"
+              required
+              class="input input-bordered input-sm w-full font-mono"
+              value={gsSpreadsheetId}
+              onInput={(e) => setGsSpreadsheetId((e.target as HTMLInputElement).value)}
+              placeholder="1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms"
+            />
+            <p class="text-xs text-base-content/50 mt-1">
+              From the URL: .../spreadsheets/d/&#123;ID&#125;/edit
+            </p>
+          </fieldset>
+          <fieldset class="fieldset">
+            <legend class="fieldset-legend">
+              Sheet name <span class="text-base-content/40 font-normal">(optional)</span>
+            </legend>
+            <input
+              type="text"
+              class="input input-bordered input-sm w-full"
+              value={gsSheetName}
+              onInput={(e) => setGsSheetName((e.target as HTMLInputElement).value)}
+              placeholder="Sheet1"
+            />
+            <p class="text-xs text-base-content/50 mt-1">
+              Tab name used for both reads and writes. Defaults to Sheet1.
+            </p>
+          </fieldset>
+        </div>
+      ) : (
+        <fieldset class="fieldset">
+          <legend class="fieldset-legend">Config (JSON)</legend>
+          <textarea
+            class="textarea textarea-bordered textarea-sm font-mono w-full"
+            rows={type === "http" || type === "r2-s3compat" ? 8 : 3}
+            value={config}
+            onInput={(e) => setConfig((e.target as HTMLTextAreaElement).value)}
+          />
+          {type === "http" && (
+            <p class="text-xs text-base-content/50 mt-1">
+              <strong>baseUrl</strong> — API root (e.g. <code>https://api.akahu.io/v1</code>).{" "}
+              <strong>headers</strong> — sent on every request; use <code>{"{{name}}"}</code> to
+              reference a value from <strong>variables</strong> (keeps secrets out of the header
+              string).
+            </p>
+          )}
+          {type === "r2-bound" && (
+            <p class="text-xs text-base-content/50 mt-1">
+              The primary Cloudflare R2 bucket bound to this worker. <strong>bucket</strong> — set
+              to <code>data-shack-storage</code> (used for URI construction in the catalog). Load
+              jobs writing to this backend use the Worker's R2 binding directly.
+            </p>
+          )}
+          {type === "r2-s3compat" && (
+            <p class="text-xs text-base-content/50 mt-1">
+              <strong>endpoint</strong> — your R2 S3-compatible URL:{" "}
+              <code>https://{"<accountId>"}.r2.cloudflarestorage.com</code> (Account ID is on the R2
+              overview page). <strong>accessKeyId</strong> and <strong>secretAccessKey</strong> —
+              create an API token under <em>R2 → Manage R2 API tokens</em>. Once saved, query files
+              as{" "}
+              <code>
+                r2-s3compat://{"<backendId>"}/{"<path>"}
+              </code>{" "}
+              in SQL.
+            </p>
+          )}
+          {type === "google-sheets" && gsCredentials.length === 0 && (
+            <p class="text-xs text-base-content/50 mt-1">
+              Connect a Google Sheets credential first to use the guided setup.
+            </p>
+          )}
+        </fieldset>
+      )}
+
+      <button
+        type="submit"
+        class="btn btn-sm btn-primary"
+        disabled={
+          submitting || !name.trim() || (isGsGuided && (!gsCredId || !gsSpreadsheetId.trim()))
+        }
+      >
         {submitting && <span class="loading loading-spinner loading-xs" />}
         {submitting ? "Adding…" : "Add"}
       </button>
@@ -462,6 +616,8 @@ function SettingsSection<T extends { id: string; name: string; type: string }>({
   onDelete,
   onEdit,
   onTest,
+  extraActions,
+  credentials,
 }: {
   title: string;
   addTitle: string;
@@ -470,12 +626,17 @@ function SettingsSection<T extends { id: string; name: string; type: string }>({
   onAdd: (name: string, type: string, config: string) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
   onEdit?: (row: T) => void;
-  onTest?: (id: string, name: string) => void;
+  onTest?: (id: string, name: string, type: string) => void;
+  extraActions?: preact.ComponentChildren;
+  credentials?: CredentialRow[];
 }) {
   return (
     <div class="card bg-base-200">
       <div class="card-body gap-4">
-        <h2 class="card-title">{title}</h2>
+        <div class="flex items-center justify-between">
+          <h2 class="card-title">{title}</h2>
+          {extraActions && <div class="flex gap-2">{extraActions}</div>}
+        </div>
         {rows.length > 0 ? (
           <div class="overflow-x-auto">
             <table class="table table-sm">
@@ -496,11 +657,11 @@ function SettingsSection<T extends { id: string; name: string; type: string }>({
                     </td>
                     <td class="font-mono text-xs text-base-content/50">{row.id}</td>
                     <td class="flex gap-1">
-                      {onTest && row.type === "http" && (
+                      {onTest && (row.type === "http" || row.type === "google-sheets") && (
                         <button
                           type="button"
                           class="btn btn-ghost btn-xs"
-                          onClick={() => onTest(row.id, row.name)}
+                          onClick={() => onTest(row.id, row.name, row.type)}
                         >
                           Test
                         </button>
@@ -533,7 +694,12 @@ function SettingsSection<T extends { id: string; name: string; type: string }>({
 
         <div class="divider my-0" />
 
-        <AddForm title={addTitle} typeOptions={typeOptions} onAdd={onAdd} />
+        <AddForm
+          title={addTitle}
+          typeOptions={typeOptions}
+          onAdd={onAdd}
+          credentials={credentials}
+        />
       </div>
     </div>
   );
@@ -545,8 +711,13 @@ export function SettingsPanel({ workerBase, getAuthHeaders }: SettingsPanelProps
   const [credentials, setCredentials] = useState<CredentialRow[]>([]);
   const [backends, setBackends] = useState<StorageBackendRow[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [testTarget, setTestTarget] = useState<{ id: string; name: string } | null>(null);
+  const [testTarget, setTestTarget] = useState<{
+    id: string;
+    name: string;
+    type: string;
+  } | null>(null);
   const [editTarget, setEditTarget] = useState<StorageBackendRow | null>(null);
+  const [gsNotice, setGsNotice] = useState<{ type: "success" | "error"; msg: string } | null>(null);
 
   const fetchAll = useCallback(async () => {
     try {
@@ -623,10 +794,57 @@ export function SettingsPanel({ workerBase, getAuthHeaders }: SettingsPanelProps
     await fetchAll();
   }
 
+  function connectGoogleSheets() {
+    const name = window.prompt("Name for this Google Sheets credential:", "Google Sheets");
+    if (!name) return;
+    const workerOrigin = new URL(workerBase).origin;
+    const popup = window.open(
+      `${workerBase}/connect/google-sheets?name=${encodeURIComponent(name)}`,
+      "_blank",
+      "popup,width=600,height=700",
+    );
+
+    function cleanup() {
+      window.removeEventListener("message", handleMessage);
+      if (pollTimer !== null) clearInterval(pollTimer);
+    }
+
+    function handleMessage(e: MessageEvent) {
+      if (e.origin !== workerOrigin) return;
+      cleanup();
+      if (e.data?.type === "gscred-success") {
+        const credName = e.data.credentialName ? ` "${e.data.credentialName}"` : "";
+        setGsNotice({ type: "success", msg: `Google Sheets${credName} connected.` });
+        fetchAll().catch(() => {});
+      } else if (e.data?.type === "gscred-error") {
+        setGsNotice({
+          type: "error",
+          msg: `Google Sheets auth failed: ${e.data.reason ?? "unknown"}`,
+        });
+      }
+    }
+
+    window.addEventListener("message", handleMessage);
+
+    // Poll for popup closure so we can remove the listener if the user closes it manually.
+    const pollTimer: ReturnType<typeof setInterval> | null = setInterval(() => {
+      if (popup?.closed) cleanup();
+    }, 500);
+  }
+
   return (
     <div class="max-w-4xl mx-auto p-6 space-y-4">
-      {testTarget && (
+      {testTarget && testTarget.type === "http" && (
         <TestDialog
+          credentialId={testTarget.id}
+          credentialName={testTarget.name}
+          workerBase={workerBase}
+          getAuthHeaders={getAuthHeaders}
+          onClose={() => setTestTarget(null)}
+        />
+      )}
+      {testTarget && testTarget.type === "google-sheets" && (
+        <GoogleSheetsTestDialog
           credentialId={testTarget.id}
           credentialName={testTarget.name}
           workerBase={workerBase}
@@ -648,6 +866,17 @@ export function SettingsPanel({ workerBase, getAuthHeaders }: SettingsPanelProps
           <span>{loadError}</span>
         </div>
       )}
+      {gsNotice && (
+        <div
+          role="alert"
+          class={`alert ${gsNotice.type === "success" ? "alert-success" : "alert-error"}`}
+        >
+          <span>{gsNotice.msg}</span>
+          <button type="button" class="btn btn-xs btn-ghost" onClick={() => setGsNotice(null)}>
+            ✕
+          </button>
+        </div>
+      )}
       <SettingsSection
         title="Credentials"
         addTitle="Add Credential"
@@ -655,7 +884,12 @@ export function SettingsPanel({ workerBase, getAuthHeaders }: SettingsPanelProps
         typeOptions={CREDENTIAL_TYPES}
         onAdd={addCredential}
         onDelete={deleteCredential}
-        onTest={(id, name) => setTestTarget({ id, name })}
+        onTest={(id, name, type) => setTestTarget({ id, name, type })}
+        extraActions={
+          <button type="button" class="btn btn-sm btn-outline" onClick={connectGoogleSheets}>
+            Connect Google Sheets
+          </button>
+        }
       />
       <SettingsSection
         title="Storage Backends"
@@ -665,6 +899,7 @@ export function SettingsPanel({ workerBase, getAuthHeaders }: SettingsPanelProps
         onAdd={addBackend}
         onDelete={deleteBackend}
         onEdit={(row) => setEditTarget(row)}
+        credentials={credentials}
       />
     </div>
   );
