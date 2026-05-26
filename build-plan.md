@@ -20,6 +20,9 @@ Each stage produces something functional and testable independently. Stages 1–
 | Stage 9 | Multi-table trigger coordination (`policy: 'any'/'all'`) + Google Sheets data source | ✅ Done |
 | Stage 5, 8, 10 | See below | Not started |
 | Stage 11 | IaC sync CLI — version-controlled warehouse config with plan/apply/destroy | Not started |
+| Stage 12 | Job history, audit log & error reporting — run log table, failure notifications, freshness SLAs | Not started |
+| Stage 13 | Data lineage graph — DAG of sources → tables → transforms in UI and MCP | Not started |
+| Stage 14 | Richer frontend — query REPL with history, catalog browser, CodeMirror SQL editor, multi-tab | Not started |
 
 **Note on Stage 1 + Stage 2 storage resolution (updated — S3 proxy + URI unification):** The original per-key JWT token flow (`POST /api/storage/resolve`, `/api/storage/obj/:token`, `/api/storage/r2s3compat/obj/:token`) has been replaced by an S3-compatible proxy. `POST /api/storage/proxy-credentials` vends short-lived `{ accessKeyId, secret, endpoint, region, bucket }` credentials stored in `PROXY_CREDS_KV` with TTL. The frontend calls `acquireProxyCred()` to get a credential and `buildS3Secret()` to build a DuckDB `CREATE OR REPLACE SECRET` statement; all storage operations (GET, HEAD, PUT, ListObjectsV2) then flow through `GET|HEAD|PUT /api/storage/s3proxy/:bucket/*key` on the Worker (implemented in `src/storage/router.ts`), which forwards to the real backend (R2 binding for `r2-bound`, re-signed upstream S3 for `r2-s3compat`). This enables DuckDB `COPY TO … PARTITION_BY` (multiple PUT paths not known in advance) and `read_parquet('…/**/*.parquet', hive_partitioning=true)` (ListObjectsV2 to discover partition files). No CORS policy on the upstream bucket is needed. `POST /api/storage/resolve` is retained for `http-ds://` URI resolution only.
 
@@ -288,6 +291,53 @@ Secrets are referenced in config files as `$DOPPLER:my-secret-name` and resolved
 TypeScript CLI (commander or oclif). Reuses API client types from the warehouse service repo. Published as a standalone npm package or run directly with `npx`.
 
 **Test:** Check in a set of YAML configs. Run `apply` against a fresh warehouse — all resources are created. Edit one YAML. Run `plan` — shows exactly one update. Run `apply` — only that resource is patched. Delete a YAML. Run `apply` — resource is deleted from the warehouse. Simulate out-of-band drift (edit in UI), run `plan --refresh` — drift is detected and shown.
+
+---
+
+## Stage 12 — Job history, audit log & error reporting
+
+**Goal:** Job failures are visible and noisy; run history is preserved.
+
+Currently load jobs store only `last_run_at` and `last_error` — a single row that is overwritten on every run. There is no record of historical runs and no notification when a job silently exhausts its retries.
+
+- New D1 table `job_run_log`: `id, job_id, started_at, completed_at, status, rows_written, bytes_written, error`
+- `queue()` consumer appends a row on every run (success or failure) instead of only overwriting `last_run_at`/`last_error`
+- Worker API: `GET /api/load-jobs/:id/runs` — paginated run history
+- UI: expandable run history panel per job in LoadJobsPanel
+- Notification on exhausted retries: Worker sends an email (via Cloudflare Email Routing or Resend) or hits a configurable webhook URL; notification endpoint stored per-job or globally in Settings
+- Optional data freshness SLA: `max_age_hours` on catalog tables; a cron checks for tables with no snapshot newer than the SLA and fires the same notification path
+
+**Test:** Trigger a deliberately failing load job. Verify a `job_run_log` row is written for each attempt. Exhaust retries — verify notification fires. Check the run history endpoint returns all attempts with correct status and error fields.
+
+---
+
+## Stage 13 — Data lineage graph
+
+**Goal:** The pipeline from source to derived table is visible at a glance.
+
+As load jobs and transform jobs accumulate it becomes hard to understand which source feeds which table and which transforms depend on which inputs. The metadata to derive a full lineage DAG already exists — it just isn't surfaced.
+
+- Derive lineage from existing metadata: load jobs → target table; triggers → (watched tables → job → output table). No new schema required.
+- Catalog DO endpoint `GET /catalog/lineage` returns a DAG as an adjacency list (nodes = tables, edges = jobs/triggers)
+- UI: new Lineage panel — force-directed graph showing the full pipeline from source credential → staging table → compacted table → derived table
+- MCP tool `get_lineage()` — lets Claude reason about dependencies before suggesting schema or trigger changes
+
+**Test:** Set up a pipeline with two load jobs, one compaction transform, and one cross-source join transform. Verify the lineage graph renders all nodes and edges correctly. Ask Claude via MCP which tables depend on a given source — verify it uses `get_lineage()` and answers correctly.
+
+---
+
+## Stage 14 — Richer frontend
+
+**Goal:** The UI becomes a real data workbench, not just a proof-of-concept shell.
+
+The current UI is functional but minimal: a single query editor with no history, a flat catalog list with no detail view, and a plain textarea for transform SQL.
+
+- **Query REPL with history:** Persist recent queries in `localStorage`; up/down arrow navigation; named bookmarks saved to D1 (`saved_queries` table); Cmd+K palette to find and re-run a saved query
+- **Better catalog browser:** Table detail view showing schema (column names + inferred types from a `DESCRIBE` query), snapshot timeline, row count estimate, and storage size; click a table name in the catalog to open its detail view in a side panel
+- **Transform job SQL editor:** Replace the plain textarea with CodeMirror or Monaco (both available as WASM-friendly bundles); syntax highlighting + basic SQL autocomplete seeded from catalog table and column names
+- **Multi-tab REPL:** Open multiple query tabs linked to the same DuckDB-WASM session; each tab has its own SQL buffer and result grid; tabs share the same catalog views and proxy credentials so cross-tab joins work; closing a tab does not tear down the session
+
+**Test:** Open two query tabs. Run a query in tab 1 that creates a temp view. Verify tab 2 can query that view. Use up-arrow to navigate query history. Open the catalog browser and click a table — verify schema and snapshot timeline appear. Open a transform job — verify the SQL editor highlights keywords and offers table name completions.
 
 ---
 
