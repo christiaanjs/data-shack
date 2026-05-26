@@ -19,6 +19,7 @@ Each stage produces something functional and testable independently. Stages 1–
 | Stage 7 | Transform jobs + triggers; session DO dispatch; browser execution in DuckDB-WASM | ✅ Done |
 | Stage 9 | Multi-table trigger coordination (`policy: 'any'/'all'`) + Google Sheets data source | ✅ Done |
 | Stage 5, 8, 10 | See below | Not started |
+| Stage 11 | IaC sync CLI — version-controlled warehouse config with plan/apply/destroy | Not started |
 
 **Note on Stage 1 + Stage 2 storage resolution (updated — S3 proxy + URI unification):** The original per-key JWT token flow (`POST /api/storage/resolve`, `/api/storage/obj/:token`, `/api/storage/r2s3compat/obj/:token`) has been replaced by an S3-compatible proxy. `POST /api/storage/proxy-credentials` vends short-lived `{ accessKeyId, secret, endpoint, region, bucket }` credentials stored in `PROXY_CREDS_KV` with TTL. The frontend calls `acquireProxyCred()` to get a credential and `buildS3Secret()` to build a DuckDB `CREATE OR REPLACE SECRET` statement; all storage operations (GET, HEAD, PUT, ListObjectsV2) then flow through `GET|HEAD|PUT /api/storage/s3proxy/:bucket/*key` on the Worker (implemented in `src/storage/router.ts`), which forwards to the real backend (R2 binding for `r2-bound`, re-signed upstream S3 for `r2-s3compat`). This enables DuckDB `COPY TO … PARTITION_BY` (multiple PUT paths not known in advance) and `read_parquet('…/**/*.parquet', hive_partitioning=true)` (ListObjectsV2 to discover partition files). No CORS policy on the upstream bucket is needed. `POST /api/storage/resolve` is retained for `http-ds://` URI resolution only.
 
@@ -237,6 +238,56 @@ Implemented as a standalone Cloudflare Worker with D1, ahead of Stage 1, to esta
 - `list_data_sources` — available connectors and required config fields
 
 **Test:** Ask Claude to set up a new Akahu account sync from scratch in a single conversation. Verify it creates the load job, compaction trigger, and correct credential reference without any manual config.
+
+---
+
+## Stage 11 — IaC sync CLI
+
+**Goal:** Warehouse configuration lives in git, not just in the UI.
+
+Currently all resources (data sources, load jobs, transform jobs, catalog entries) are managed interactively through the web UI. There is no way to version-control these configs, reproduce a warehouse setup from scratch, or apply changes across environments reproducibly. This stage adds a lightweight IaC-style CLI tool that treats the warehouse API as its backend.
+
+### Repo structure
+
+```
+repo/
+  data-sources/prod-postgres.yaml
+  transforms/normalize-events.yaml
+  catalog/events.yaml
+  .state.json          ← tracks file → { id, hash }
+  .env.example         ← committed, documents required env/Doppler keys
+```
+
+### CLI commands
+
+- `init` — authenticate and pull existing warehouse state into local YAML files + `.state.json`; safe to re-run (idempotent merge)
+- `auth` — browser-based OAuth flow against the warehouse backend; stores token locally
+- `plan` — diff local YAML files against the live API; prints a human-readable change set (create / update / delete / no-op) without modifying anything
+- `apply` — execute the planned changes, update `.state.json` with new IDs and content hashes; unchanged files (same hash) are skipped
+- `destroy <resource>` — delete a single resource by file path or name, remove from `.state.json`
+
+### State file
+
+`.state.json` maps each config file path to `{ id, hash }`:
+
+```json
+{
+  "data-sources/prod-postgres.yaml": { "id": "cred_abc123", "hash": "sha256:…" },
+  "transforms/normalize-events.yaml": { "id": "job_xyz789", "hash": "sha256:…" }
+}
+```
+
+The hash is computed from the serialised config (after secret resolution). Files whose hash matches the stored value are skipped during `apply`. A `--refresh` flag re-fetches each resource from the API and updates hashes to detect out-of-band drift (config changed in the UI since last `apply`).
+
+### Secret handling
+
+Secrets are referenced in config files as `$DOPPLER:my-secret-name` and resolved at sync time by the CLI via the Doppler API — values never touch the repo. Local dev uses a `.env` file; CI uses Doppler's native env injection. The CLI resolves all `$DOPPLER:` references before hashing or diffing, so the stored hash reflects the resolved config.
+
+### Stack
+
+TypeScript CLI (commander or oclif). Reuses API client types from the warehouse service repo. Published as a standalone npm package or run directly with `npx`.
+
+**Test:** Check in a set of YAML configs. Run `apply` against a fresh warehouse — all resources are created. Edit one YAML. Run `plan` — shows exactly one update. Run `apply` — only that resource is patched. Delete a YAML. Run `apply` — resource is deleted from the warehouse. Simulate out-of-band drift (edit in UI), run `plan --refresh` — drift is detected and shown.
 
 ---
 
