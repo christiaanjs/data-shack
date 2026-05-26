@@ -304,7 +304,7 @@ function popupResultHtml(
   const body = type === "success" ? "Connected! Closing…" : `Failed: ${opts.reason ?? "unknown"}`;
   const html = `<!DOCTYPE html><html><head><title>${type === "success" ? "Connected" : "Failed"}</title></head>
 <body><p>${body}</p>
-<script>try{window.opener.postMessage(${msg},"${frontendOrigin}")}catch(e){}window.close()</script>
+<script>try{window.opener.postMessage(${msg},${JSON.stringify(frontendOrigin)})}catch(e){}window.close()</script>
 </body></html>`;
   return new Response(html, { headers: { "Content-Type": "text/html" } });
 }

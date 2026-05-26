@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { beforeAll, describe, expect, it } from "vitest";
 import { encryptConfig } from "../src/crypto.ts";
 import type { LoadJob } from "../src/db/load-jobs.ts";
+import { runGoogleSheetsLoadJob } from "../src/loaders/google-sheets.ts";
 import { runHttpLoadJob } from "../src/loaders/http.ts";
 
 const USER_ID = "usr_loader_test";
@@ -656,5 +657,200 @@ describe("runHttpLoadJob cursor pagination r2-s3compat multipart", () => {
     } finally {
       globalThis.fetch = savedFetch;
     }
+  });
+});
+
+// ── runGoogleSheetsLoadJob ─────────────────────────────────────────────────────
+
+const GS_USER_ID = "usr_gs_loader_test";
+const SHEET_VALUES = {
+  values: [
+    ["id", "name", "amount"],
+    ["1", "Alice", "100"],
+    ["2", "Bob", "200"],
+  ],
+};
+
+async function insertGsCredential(): Promise<string> {
+  const id = `cred_gs_${crypto.randomUUID().replace(/-/g, "")}`;
+  const config = { refreshToken: "test-refresh-token" };
+  await env.DB.prepare(
+    "INSERT INTO credentials (id, user_id, name, type, encrypted_config, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+  )
+    .bind(
+      id,
+      GS_USER_ID,
+      "Test GS Cred",
+      "google-sheets",
+      await encryptConfig(JSON.stringify(config), env.JWT_SECRET),
+      Date.now(),
+      Date.now(),
+    )
+    .run();
+  return id;
+}
+
+async function insertGsR2BoundBackend(): Promise<string> {
+  const id = `sb_gs_${crypto.randomUUID().replace(/-/g, "")}`;
+  const config = { bucket: "data-shack-storage" };
+  await env.DB.prepare(
+    "INSERT INTO storage_backends (id, user_id, name, type, encrypted_config, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+  )
+    .bind(
+      id,
+      GS_USER_ID,
+      `Test GS R2 ${id}`,
+      "r2-bound",
+      await encryptConfig(JSON.stringify(config), env.JWT_SECRET),
+      Date.now(),
+      Date.now(),
+    )
+    .run();
+  return id;
+}
+
+function makeGsJob(credId: string, backendId: string, sourceConfig: object): LoadJob {
+  return {
+    id: `lj_gs_${crypto.randomUUID().replace(/-/g, "")}`,
+    user_id: GS_USER_ID,
+    name: "GS Test Job",
+    credential_id: credId,
+    storage_backend_id: backendId,
+    table_name: "gs_test_table",
+    table_path: "",
+    http_path: "/",
+    http_method: "GET",
+    format: "ndjson",
+    cron_schedule: "0 * * * *",
+    next_run_at: null,
+    last_run_at: null,
+    last_error: null,
+    enabled: 1,
+    created_at: Date.now(),
+    updated_at: Date.now(),
+    date_range_config: null,
+    pagination_config: null,
+    source_type: "google-sheets",
+    source_config: JSON.stringify(sourceConfig),
+  };
+}
+
+describe("runGoogleSheetsLoadJob", () => {
+  let credId: string;
+  let backendId: string;
+
+  beforeAll(async () => {
+    await env.DB.prepare("INSERT OR IGNORE INTO users (id, email, created_at) VALUES (?, ?, ?)")
+      .bind(GS_USER_ID, "gs-loader@example.com", Date.now())
+      .run();
+    credId = await insertGsCredential();
+    backendId = await insertGsR2BoundBackend();
+  });
+
+  // env proxy with Google OAuth vars set (they exist in vitest config but are stubs).
+  function gsEnv() {
+    return new Proxy(env, {
+      get(target, key) {
+        if (key === "GOOGLE_CLIENT_ID") return "test-client-id";
+        if (key === "GOOGLE_CLIENT_SECRET") return "test-client-secret";
+        return target[key as keyof typeof env];
+      },
+    });
+  }
+
+  // Wraps a test with mocked fetch that intercepts Google API calls.
+  function withGsMockedFetch(
+    fn: () => Promise<void>,
+    opts: { sheetsStatus?: number; tokenStatus?: number } = {},
+  ): () => Promise<void> {
+    return async () => {
+      const savedFetch = globalThis.fetch;
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        const url =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.toString()
+              : (input as Request).url;
+        if (url.includes("oauth2.googleapis.com/token")) {
+          if (opts.tokenStatus && opts.tokenStatus !== 200) {
+            return new Response("bad_token", { status: opts.tokenStatus });
+          }
+          return new Response(JSON.stringify({ access_token: "test-access-token" }), {
+            status: 200,
+          });
+        }
+        if (url.includes("sheets.googleapis.com")) {
+          if (opts.sheetsStatus && opts.sheetsStatus !== 200) {
+            return new Response("sheets_error", { status: opts.sheetsStatus });
+          }
+          return new Response(JSON.stringify(SHEET_VALUES), { status: 200 });
+        }
+        return new Response("", { status: 200 });
+      };
+      try {
+        await fn();
+      } finally {
+        globalThis.fetch = savedFetch;
+      }
+    };
+  }
+
+  it(
+    "writes NDJSON to R2 and returns r2:// uri",
+    withGsMockedFetch(async () => {
+      const job = makeGsJob(credId, backendId, {
+        spreadsheetId: "test-spreadsheet-id",
+        sheetName: "Sheet1",
+      });
+      const { uri } = await runGoogleSheetsLoadJob(job, gsEnv());
+      expect(uri).toMatch(/^r2:\/\/data-shack-storage\//);
+      const relPath = uri.replace("r2://data-shack-storage/", "");
+      const obj = await env.R2.get(`users/${GS_USER_ID}/${relPath}`);
+      expect(obj).not.toBeNull();
+      const text = await obj!.text();
+      expect(text).toContain('"id":"1"');
+      expect(text).toContain('"name":"Alice"');
+      expect(text).toContain('"amount":"100"');
+      expect(text).toContain('"id":"2"');
+    }),
+  );
+
+  it("throws when GOOGLE_CLIENT_ID is missing", async () => {
+    const noGoogleEnv = new Proxy(env, {
+      get(target, key) {
+        if (key === "GOOGLE_CLIENT_ID" || key === "GOOGLE_CLIENT_SECRET") return "";
+        return target[key as keyof typeof env];
+      },
+    });
+    const job = makeGsJob(credId, backendId, { spreadsheetId: "x", sheetName: "Sheet1" });
+    await expect(runGoogleSheetsLoadJob(job, noGoogleEnv)).rejects.toThrow("GOOGLE_CLIENT_ID");
+  });
+
+  it(
+    "throws when token refresh fails",
+    withGsMockedFetch(
+      async () => {
+        const job = makeGsJob(credId, backendId, { spreadsheetId: "x", sheetName: "Sheet1" });
+        await expect(runGoogleSheetsLoadJob(job, gsEnv())).rejects.toThrow(/token refresh failed/i);
+      },
+      { tokenStatus: 401 },
+    ),
+  );
+
+  it(
+    "throws when Sheets API returns an error",
+    withGsMockedFetch(
+      async () => {
+        const job = makeGsJob(credId, backendId, { spreadsheetId: "x", sheetName: "Sheet1" });
+        await expect(runGoogleSheetsLoadJob(job, gsEnv())).rejects.toThrow(/Sheets API error/);
+      },
+      { sheetsStatus: 403 },
+    ),
+  );
+
+  it("throws when source_config is missing", async () => {
+    const job = { ...makeGsJob(credId, backendId, {}), source_config: null };
+    await expect(runGoogleSheetsLoadJob(job, env)).rejects.toThrow("missing source_config");
   });
 });

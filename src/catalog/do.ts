@@ -463,7 +463,7 @@ export class CatalogDO implements DurableObject {
   private listJobs(): Response {
     const rows = this.ctx.storage.sql
       .exec(
-        "SELECT id, name, sql, output_table, output_uri, output_backend, format, status, requires_browser, created_at, updated_at, error FROM transform_jobs ORDER BY created_at DESC",
+        "SELECT id, name, sql, output_table, output_uri, output_backend, format, status, requires_browser, created_at, updated_at, last_completed_at, error FROM transform_jobs ORDER BY created_at DESC",
       )
       .toArray();
     return Response.json({ jobs: rows });
@@ -472,7 +472,7 @@ export class CatalogDO implements DurableObject {
   private listPendingJobs(): Response {
     const rows = this.ctx.storage.sql
       .exec(
-        "SELECT id, name, sql, output_table, output_uri, output_backend, format, status, requires_browser, created_at, updated_at, error FROM transform_jobs WHERE status = 'pending' ORDER BY updated_at ASC",
+        "SELECT id, name, sql, output_table, output_uri, output_backend, format, status, requires_browser, created_at, updated_at, last_completed_at, error FROM transform_jobs WHERE status = 'pending' ORDER BY updated_at ASC",
       )
       .toArray();
     return Response.json({ jobs: rows });

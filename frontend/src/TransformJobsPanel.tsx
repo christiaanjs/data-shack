@@ -191,6 +191,25 @@ export function TransformJobsPanel({
         const data = (await res.json()) as { error?: string };
         throw new Error(data.error ?? `Failed: ${res.status}`);
       }
+      // If creating a new job with a trigger, add the trigger now.
+      if (!isEdit && newTriggerWatch.trim()) {
+        const watchesList = newTriggerWatch
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
+        if (watchesList.length > 0) {
+          const newJob = (await res.clone().json()) as { id: string };
+          await fetch(`${workerBase}/api/triggers`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", ...headers },
+            body: JSON.stringify({
+              watches: watchesList,
+              policy: newTriggerPolicy,
+              job_id: newJob.id,
+            }),
+          });
+        }
+      }
       setFormMode(null);
       await fetchAll();
     } catch (err) {
@@ -501,18 +520,20 @@ export function TransformJobsPanel({
                 </button>
               </div>
 
-              {/* Triggers section — shown when editing an existing job */}
-              {editingJob && (
+              {/* Triggers section — shown when editing an existing job, or optionally on create */}
+              {(editingJob || formMode === "create") && (
                 <div class="border border-base-300 rounded-box p-3 space-y-3 mt-2">
-                  <h4 class="font-semibold text-sm">Triggers</h4>
+                  <h4 class="font-semibold text-sm">
+                    {editingJob ? "Triggers" : "Add a trigger after creation (optional)"}
+                  </h4>
                   {triggerError && (
                     <div role="alert" class="alert alert-error py-2 text-sm">
                       <span>{triggerError}</span>
                     </div>
                   )}
-                  {jobTriggers.length === 0 ? (
+                  {editingJob && jobTriggers.length === 0 ? (
                     <p class="text-xs text-base-content/50">No triggers for this job.</p>
-                  ) : (
+                  ) : editingJob ? (
                     <div class="space-y-1">
                       {jobTriggers.map((t) => (
                         <div key={t.id} class="flex items-center justify-between gap-2">
@@ -530,7 +551,7 @@ export function TransformJobsPanel({
                         </div>
                       ))}
                     </div>
-                  )}
+                  ) : null}
                   <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
                     <fieldset class="fieldset">
                       <legend class="fieldset-legend">Watch tables</legend>
@@ -559,15 +580,28 @@ export function TransformJobsPanel({
                       </select>
                     </fieldset>
                   </div>
-                  <button
-                    type="button"
-                    class="btn btn-sm btn-outline"
-                    disabled={addingTrigger || !newTriggerWatch.trim()}
-                    onClick={() => addTrigger(editingJob.id).catch(() => {})}
-                  >
-                    {addingTrigger && <span class="loading loading-spinner loading-xs" />}
-                    Add Trigger
-                  </button>
+                  {editingJob && (
+                    <button
+                      type="button"
+                      class="btn btn-sm btn-outline"
+                      disabled={
+                        addingTrigger ||
+                        newTriggerWatch
+                          .split(",")
+                          .map((s) => s.trim())
+                          .filter(Boolean).length === 0
+                      }
+                      onClick={() => addTrigger(editingJob.id).catch(() => {})}
+                    >
+                      {addingTrigger && <span class="loading loading-spinner loading-xs" />}
+                      Add Trigger
+                    </button>
+                  )}
+                  {formMode === "create" && (
+                    <p class="text-xs text-base-content/40">
+                      Trigger will be created automatically after the job is saved.
+                    </p>
+                  )}
                 </div>
               )}
             </form>

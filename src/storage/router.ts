@@ -396,9 +396,10 @@ storageRouter.on(["GET", "HEAD", "PUT", "OPTIONS"], "/s3proxy/*", async (c) => {
           rows = [hdrs, ...objects.map((obj) => hdrs.map((h) => String(obj[h] ?? "")))];
         }
       } else {
-        // CSV fallback
+        // CSV fallback (handle CRLF line endings)
         rows = bodyText
           .split("\n")
+          .map((line) => line.replace(/\r$/, ""))
           .filter((line) => line.trim() !== "")
           .map((line) => {
             const cells: string[] = [];

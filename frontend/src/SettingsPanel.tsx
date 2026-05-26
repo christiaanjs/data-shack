@@ -798,14 +798,20 @@ export function SettingsPanel({ workerBase, getAuthHeaders }: SettingsPanelProps
     const name = window.prompt("Name for this Google Sheets credential:", "Google Sheets");
     if (!name) return;
     const workerOrigin = new URL(workerBase).origin;
-    window.open(
+    const popup = window.open(
       `${workerBase}/connect/google-sheets?name=${encodeURIComponent(name)}`,
       "_blank",
       "popup,width=600,height=700",
     );
+
+    function cleanup() {
+      window.removeEventListener("message", handleMessage);
+      if (pollTimer !== null) clearInterval(pollTimer);
+    }
+
     function handleMessage(e: MessageEvent) {
       if (e.origin !== workerOrigin) return;
-      window.removeEventListener("message", handleMessage);
+      cleanup();
       if (e.data?.type === "gscred-success") {
         const credName = e.data.credentialName ? ` "${e.data.credentialName}"` : "";
         setGsNotice({ type: "success", msg: `Google Sheets${credName} connected.` });
@@ -817,7 +823,13 @@ export function SettingsPanel({ workerBase, getAuthHeaders }: SettingsPanelProps
         });
       }
     }
+
     window.addEventListener("message", handleMessage);
+
+    // Poll for popup closure so we can remove the listener if the user closes it manually.
+    const pollTimer: ReturnType<typeof setInterval> | null = setInterval(() => {
+      if (popup?.closed) cleanup();
+    }, 500);
   }
 
   return (

@@ -59,6 +59,10 @@ export async function runGoogleSheetsLoadJob(
     await decryptConfig(credRow.encrypted_config, env.JWT_SECRET),
   ) as GoogleSheetsCredential;
 
+  if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET) {
+    throw new Error("GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET must be set for google-sheets jobs");
+  }
+
   const accessToken = await refreshGoogleAccessToken(
     env.GOOGLE_CLIENT_ID,
     env.GOOGLE_CLIENT_SECRET,
@@ -81,18 +85,24 @@ export async function runGoogleSheetsLoadJob(
     throw new Error(`Google Sheet ${spreadsheetId} range ${range} returned no data`);
   }
 
-  // Convert string[][] to NDJSON (first row = headers).
+  // Convert string[][] to NDJSON (first row = headers). Cap at 50 MB to avoid OOM.
+  const MAX_NDJSON_BYTES = 50 * 1024 * 1024;
   const [headers, ...dataRows] = values;
   const enc = new TextEncoder();
   const ndjsonChunks: Uint8Array[] = [];
+  let totalSize = 0;
   for (const row of dataRows) {
     const record: Record<string, string | null> = {};
     for (let i = 0; i < headers!.length; i++) {
       record[headers![i]!] = row[i] ?? null;
     }
-    ndjsonChunks.push(enc.encode(`${JSON.stringify(record)}\n`));
+    const chunk = enc.encode(`${JSON.stringify(record)}\n`);
+    totalSize += chunk.byteLength;
+    if (totalSize > MAX_NDJSON_BYTES) {
+      throw new Error(`Google Sheets load job exceeded ${MAX_NDJSON_BYTES / 1024 / 1024} MB limit`);
+    }
+    ndjsonChunks.push(chunk);
   }
-  const totalSize = ndjsonChunks.reduce((s, c) => s + c.byteLength, 0);
   const ndjsonBody = new Uint8Array(totalSize);
   let offset = 0;
   for (const chunk of ndjsonChunks) {
