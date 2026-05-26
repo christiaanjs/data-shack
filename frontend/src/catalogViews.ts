@@ -97,7 +97,20 @@ export async function registerCatalogViews(
   const failed: string[] = [];
 
   for (const { name, latestSnapshot: snapshot } of withSnaps) {
-    await registerView(db, name, snapshot, workerBase, getAuthHeaders, secretsByBackend, failed);
+    // For http-ds:// URIs, pass the pre-resolved token URL to avoid per-table round-trips.
+    const preResolvedUrl = snapshot.uri.startsWith("http-ds://")
+      ? httpDsTokenMap.get(snapshot.uri)
+      : undefined;
+    await registerView(
+      db,
+      name,
+      snapshot,
+      workerBase,
+      getAuthHeaders,
+      secretsByBackend,
+      failed,
+      preResolvedUrl,
+    );
   }
 
   return { tables, failed };
@@ -126,23 +139,29 @@ async function registerView(
   getAuthHeaders: () => Promise<Record<string, string>>,
   secretsByBackend: Map<string, string>,
   failed: string[],
+  /** Pre-resolved token URL for http-ds:// URIs; avoids an extra /resolve round-trip. */
+  preResolvedUrl?: string,
 ): Promise<void> {
   const safeId = tableName.replace(/"/g, '""');
 
   if (snapshot.uri.startsWith("http-ds://")) {
     try {
-      const authHeaders = await getAuthHeaders();
-      const res = await fetch(`${workerBase}/api/storage/resolve`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...authHeaders },
-        body: JSON.stringify({ uris: [{ uri: snapshot.uri, method: "GET" }] }),
-      });
-      if (!res.ok) {
-        failed.push(tableName);
-        return;
+      let tokenUrl = preResolvedUrl;
+      if (!tokenUrl) {
+        // Fallback: resolve on demand (used by refreshSingleView).
+        const authHeaders = await getAuthHeaders();
+        const res = await fetch(`${workerBase}/api/storage/resolve`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...authHeaders },
+          body: JSON.stringify({ uris: [{ uri: snapshot.uri, method: "GET" }] }),
+        });
+        if (!res.ok) {
+          failed.push(tableName);
+          return;
+        }
+        const data = (await res.json()) as { urls: Record<string, string> };
+        tokenUrl = data.urls[snapshot.uri];
       }
-      const data = (await res.json()) as { urls: Record<string, string> };
-      const tokenUrl = data.urls[snapshot.uri];
       if (!tokenUrl) {
         failed.push(tableName);
         return;

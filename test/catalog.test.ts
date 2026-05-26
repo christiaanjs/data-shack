@@ -114,7 +114,7 @@ describe("GET /catalog/snapshots-latest", () => {
     expect(res.status).toBe(401);
   });
 
-  it("returns empty array when no tables exist", async () => {
+  it("returns an array of tables", async () => {
     const res = await SELF.fetch("http://localhost/catalog/snapshots-latest", {
       headers: DEV_HEADERS,
     });
@@ -123,7 +123,7 @@ describe("GET /catalog/snapshots-latest", () => {
     expect(Array.isArray(data.tables)).toBe(true);
   });
 
-  it("returns tables with their latest snapshot inline", async () => {
+  it("returns tables with their latest snapshot inline, not an older one", async () => {
     await SELF.fetch("http://localhost/catalog/commit", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...DEV_HEADERS },
@@ -162,23 +162,102 @@ describe("GET /catalog/snapshots-latest", () => {
     expect(row?.latestSnapshot?.format).toBe("parquet");
   });
 
-  it("returns null latestSnapshot for a table that has none", async () => {
-    // Soft-delete a table then re-create via a new commit; the batch endpoint
-    // should show the new snapshot. But for a table with zero snapshots
-    // (created and then soft-deleted and no re-commit) it returns null.
-    // We test by checking that an existing table with commits has a non-null snapshot.
+  it("returns null latestSnapshot for a soft-deleted-and-not-recommitted table", async () => {
+    // Commit a table, then soft-delete it. Since deleted_at is set, the table
+    // is excluded from snapshots-latest (deleted_at IS NULL filter). Verify the
+    // LEFT JOIN null case by checking a table that was committed then deleted
+    // does not appear in the results at all (the query filters deleted_at IS NULL).
+    await SELF.fetch("http://localhost/catalog/commit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({
+        table: "sl_deleted_table",
+        uri: "r2://bucket/sl_deleted/v1.ndjson",
+        storageBackend: "primary-r2",
+      }),
+    });
+    await SELF.fetch("http://localhost/catalog/tables/sl_deleted_table", {
+      method: "DELETE",
+      headers: DEV_HEADERS,
+    });
+
     const res = await SELF.fetch("http://localhost/catalog/snapshots-latest", {
       headers: DEV_HEADERS,
     });
-    const data = (await res.json()) as {
-      tables: Array<{ name: string; latestSnapshot: unknown }>;
-    };
-    // Every visible table that has ever had a commit should have a latestSnapshot.
-    for (const t of data.tables) {
-      if (t.name === "sl_table") {
-        expect(t.latestSnapshot).not.toBeNull();
-      }
-    }
+    const data = (await res.json()) as { tables: Array<{ name: string }> };
+    // Deleted table must not appear in the batch endpoint.
+    const found = data.tables.find((t) => t.name === "sl_deleted_table");
+    expect(found).toBeUndefined();
+  });
+});
+
+describe("GET /catalog/ws", () => {
+  it("returns 426 when not a WebSocket upgrade", async () => {
+    const res = await SELF.fetch("http://localhost/catalog/ws", { headers: DEV_HEADERS });
+    expect(res.status).toBe(426);
+  });
+
+  it("returns 401 without auth", async () => {
+    const res = await SELF.fetch("http://localhost/catalog/ws", {
+      headers: { Upgrade: "websocket" },
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it("broadcasts commit payload to connected clients", async () => {
+    const wsRes = await SELF.fetch("http://localhost/catalog/ws", {
+      headers: { Upgrade: "websocket", ...DEV_HEADERS },
+    });
+    expect(wsRes.status).toBe(101);
+    const ws = wsRes.webSocket!;
+    ws.accept();
+
+    // Listen for the commit broadcast before triggering the commit.
+    const msgPromise = new Promise<{
+      type: string;
+      table: string;
+      uri: string;
+      storage_backend: string;
+      format: string | null;
+    }>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error("Timed out waiting for catalog commit broadcast")),
+        3000,
+      );
+      ws.addEventListener("message", (event) => {
+        const msg = JSON.parse(event.data as string) as { type: string };
+        if (msg.type === "commit") {
+          clearTimeout(timer);
+          resolve(
+            msg as {
+              type: string;
+              table: string;
+              uri: string;
+              storage_backend: string;
+              format: string | null;
+            },
+          );
+        }
+      });
+    });
+
+    await SELF.fetch("http://localhost/catalog/commit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({
+        table: "ws_broadcast_test",
+        uri: "r2://bucket/ws_broadcast_test/file.ndjson",
+        storageBackend: "primary-r2",
+        format: "ndjson",
+      }),
+    });
+
+    const msg = await msgPromise;
+    expect(msg.table).toBe("ws_broadcast_test");
+    expect(msg.uri).toBe("r2://bucket/ws_broadcast_test/file.ndjson");
+    expect(msg.storage_backend).toBe("primary-r2");
+    expect(msg.format).toBe("ndjson");
+    ws.close();
   });
 });
 

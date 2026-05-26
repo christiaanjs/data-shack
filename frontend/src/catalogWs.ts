@@ -13,7 +13,10 @@ export interface CatalogCommitEvent {
 export interface CatalogConnection {
   close(): void;
   isConnected(): boolean;
-  /** Resolves when the most recent view refresh triggered by a commit is complete. */
+  /**
+   * Resolves when ALL view refreshes triggered by catalog commits are complete.
+   * Chain-accumulates across concurrent commits so no in-flight refresh is lost.
+   */
   getRefreshPromise(): Promise<void>;
 }
 
@@ -21,7 +24,11 @@ export function connectCatalogWs(config: {
   workerBase: string;
   getAuthHeaders: () => Promise<Record<string, string>>;
   getDb: () => Promise<AsyncDuckDB>;
-  onCommit: (event: CatalogCommitEvent) => void;
+  /**
+   * Called when a commit message arrives, before the view refresh starts.
+   * Receives the refresh promise so the caller can track it immediately.
+   */
+  onCommit: (event: CatalogCommitEvent, refreshPromise: Promise<void>) => void;
   onStatusChange?: (connected: boolean) => void;
 }): CatalogConnection {
   const { workerBase, getAuthHeaders, getDb, onCommit, onStatusChange } = config;
@@ -29,7 +36,8 @@ export function connectCatalogWs(config: {
   let ws: WebSocket | null = null;
   let closed = false;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  // Starts resolved; updated to a pending promise while a view refresh is in flight.
+  let visibilityHandler: (() => void) | null = null;
+  // Accumulates across commits: resolves when every in-flight view refresh is done.
   let currentRefreshPromise: Promise<void> = Promise.resolve();
 
   async function connect() {
@@ -76,11 +84,6 @@ export function connectCatalogWs(config: {
         format: (msg.format as string | null) ?? null,
       };
 
-      // Notify App so it can update catalog state and flash the indicator.
-      onCommit(commitEvent);
-
-      // Refresh the DuckDB view for this table. Track the promise so transform
-      // jobs dispatched by the same commit can await it before running their SQL.
       const snapshot: CatalogSnapshot = {
         id: commitEvent.snapshotId,
         table_id: "",
@@ -91,7 +94,10 @@ export function connectCatalogWs(config: {
         created_at: Date.now(),
       };
 
-      currentRefreshPromise = (async () => {
+      // Create the refresh promise BEFORE notifying the caller so they can
+      // immediately track it. Chain with any existing in-flight refresh so
+      // getRefreshPromise() covers ALL pending catalog updates, not just the last.
+      const thisRefresh = (async () => {
         try {
           const db = await getDb();
           await refreshSingleView(db, commitEvent.table, snapshot, workerBase, getAuthHeaders);
@@ -99,6 +105,11 @@ export function connectCatalogWs(config: {
           // Non-fatal — the next full refresh will fix it.
         }
       })();
+
+      currentRefreshPromise = Promise.all([currentRefreshPromise, thisRefresh]).then(() => {});
+
+      // Notify App with the accumulated promise so catalogReadyRef is always current.
+      onCommit(commitEvent, currentRefreshPromise);
     };
 
     socket.onclose = () => {
@@ -122,7 +133,7 @@ export function connectCatalogWs(config: {
 
   // Reconnect when the tab becomes visible after being backgrounded.
   if (typeof document !== "undefined") {
-    document.addEventListener("visibilitychange", () => {
+    visibilityHandler = () => {
       if (document.visibilityState === "visible" && !closed && ws?.readyState !== WebSocket.OPEN) {
         if (reconnectTimer !== null) {
           clearTimeout(reconnectTimer);
@@ -130,7 +141,8 @@ export function connectCatalogWs(config: {
         }
         connect().catch(() => {});
       }
-    });
+    };
+    document.addEventListener("visibilitychange", visibilityHandler);
   }
 
   connect().catch(() => {});
@@ -140,6 +152,10 @@ export function connectCatalogWs(config: {
       closed = true;
       if (reconnectTimer !== null) clearTimeout(reconnectTimer);
       ws?.close();
+      if (visibilityHandler !== null) {
+        document.removeEventListener("visibilitychange", visibilityHandler);
+        visibilityHandler = null;
+      }
     },
     isConnected() {
       return ws?.readyState === WebSocket.OPEN;

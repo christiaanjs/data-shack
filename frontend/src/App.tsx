@@ -123,7 +123,7 @@ export function App() {
     }
   }, []);
 
-  const handleCommit = useCallback((event: CatalogCommitEvent) => {
+  const handleCommit = useCallback((event: CatalogCommitEvent, refreshPromise: Promise<void>) => {
     // Flash the new-data indicator for 3 seconds.
     setHasNewData(true);
     if (newDataTimerRef.current !== null) clearTimeout(newDataTimerRef.current);
@@ -173,9 +173,9 @@ export function App() {
     // Remove the table from the failed list if it was previously failing.
     setCatalogFailed((prev) => prev.filter((n) => n !== event.table));
 
-    // The view refresh is tracked by the catalog WS connection; update the ref
-    // so transform jobs dispatched by this same commit will wait for it.
-    catalogReadyRef.current = catalogWsRef.current?.getRefreshPromise() ?? Promise.resolve();
+    // refreshPromise was created before onCommit was called, so it accurately
+    // covers this commit's view refresh (and any still-in-flight prior refreshes).
+    catalogReadyRef.current = refreshPromise;
   }, []);
 
   // ── Session + Catalog WebSocket connections ───────────────────────────────
