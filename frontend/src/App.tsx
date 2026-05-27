@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import { CatalogPanel } from "./CatalogPanel.tsx";
+import { DashboardsPanel } from "./DashboardsPanel.tsx";
 import { LoadJobsPanel } from "./LoadJobsPanel.tsx";
 import { QueryPanel } from "./QueryPanel.tsx";
 import { SettingsPanel } from "./SettingsPanel.tsx";
@@ -13,7 +14,7 @@ import { type JobEvent, type SessionConnection, connectSession } from "./session
 const WORKER_BASE = import.meta.env.VITE_WORKER_URL ?? "";
 const DEV_TOKEN = import.meta.env.VITE_DEV_TOKEN as string | undefined;
 
-type Tab = "query" | "catalog" | "jobs" | "transforms" | "settings";
+type Tab = "query" | "catalog" | "jobs" | "transforms" | "settings" | "dashboards";
 
 async function getAuthHeaders(): Promise<Record<string, string>> {
   if (DEV_TOKEN) return { "X-Dev-Token": DEV_TOKEN };
@@ -52,6 +53,13 @@ export function App() {
   const setJobListener = useCallback((listener: ((ev: JobEvent) => void) | null) => {
     jobEventListenerRef.current = listener;
   }, []);
+  const dashboardCommitListenerRef = useRef<((ev: CatalogCommitEvent) => void) | null>(null);
+  const setDashboardCommitListener = useCallback(
+    (listener: ((ev: CatalogCommitEvent) => void) | null) => {
+      dashboardCommitListenerRef.current = listener;
+    },
+    [],
+  );
 
   // Stable getter — sessionWs reads this ref on every message.
   const getCatalogReady = useCallback(() => catalogReadyRef.current, []);
@@ -176,6 +184,8 @@ export function App() {
     // refreshPromise was created before onCommit was called, so it accurately
     // covers this commit's view refresh (and any still-in-flight prior refreshes).
     catalogReadyRef.current = refreshPromise;
+
+    dashboardCommitListenerRef.current?.(event);
   }, []);
 
   // ── Session + Catalog WebSocket connections ───────────────────────────────
@@ -306,6 +316,14 @@ export function App() {
             >
               Settings
             </button>
+            <button
+              type="button"
+              role="tab"
+              class={`tab${activeTab === "dashboards" ? " tab-active" : ""}`}
+              onClick={() => setActiveTab("dashboards")}
+            >
+              Dashboards
+            </button>
           </div>
         </div>
         <div class="navbar-end gap-3 pr-2">
@@ -366,6 +384,14 @@ export function App() {
         )}
         {activeTab === "settings" && (
           <SettingsPanel workerBase={WORKER_BASE} getAuthHeaders={getAuthHeaders} />
+        )}
+        {activeTab === "dashboards" && (
+          <DashboardsPanel
+            workerBase={WORKER_BASE}
+            getAuthHeaders={getAuthHeaders}
+            dbReady={dbReady}
+            setCatalogCommitListener={setDashboardCommitListener}
+          />
         )}
       </main>
     </div>

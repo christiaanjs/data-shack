@@ -9,6 +9,7 @@ export { CatalogDO };
 import { SessionDO } from "./session/do.ts";
 export { SessionDO };
 import { decryptConfig, encryptConfig } from "./crypto.ts";
+import { deleteDashboard, getDashboard, listDashboards } from "./db/dashboards.ts";
 import {
   advanceNextRunAt,
   deleteLoadJob,
@@ -900,6 +901,32 @@ app.delete("/api/triggers/:id", requireAuth, async (c) => {
     { method: "DELETE" },
   );
   return new Response(res.body, { status: res.status });
+});
+
+// ── Dashboard endpoints ───────────────────────────────────────────────────
+
+app.get("/api/dashboards", requireAuth, async (c) => {
+  const dashboards = await listDashboards(c.env.DB, c.get("userId"));
+  return c.json({ dashboards });
+});
+
+app.get("/api/dashboards/:id", requireAuth, async (c) => {
+  const row = await getDashboard(c.env.DB, c.req.param("id"), c.get("userId"));
+  if (!row) return c.json({ error: "not found" }, 404);
+  return c.json({
+    id: row.id,
+    title: row.title,
+    artifact_source: row.artifact_source,
+    queries: JSON.parse(row.queries) as string[],
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  });
+});
+
+app.delete("/api/dashboards/:id", requireAuth, async (c) => {
+  const deleted = await deleteDashboard(c.env.DB, c.req.param("id"), c.get("userId"));
+  if (!deleted) return new Response("Not Found", { status: 404 });
+  return new Response(null, { status: 204 });
 });
 
 // ── Root ─────────────────────────────────────────────────────────────────

@@ -1,4 +1,5 @@
 import { decryptConfig } from "../crypto.ts";
+import { insertDashboard } from "../db/dashboards.ts";
 import {
   getCredentialByNameOrId,
   getCredentialConfig,
@@ -71,6 +72,32 @@ const TOOLS: Tool[] = [
         },
       },
       required: ["uri"],
+    },
+  },
+  {
+    name: "submit_dashboard",
+    description:
+      "Persist a React dashboard artifact with bound SQL queries so it survives beyond this conversation. Call this once you and the user have finalised a visualisation. The component named `Dashboard` receives `props.data`: an array where `data[i]` is an array of row objects (plain key/value pairs) for `queries[i]`. Can use React hooks and Recharts (BarChart, LineChart, PieChart, AreaChart, etc.) which are pre-loaded in the rendering environment.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        title: {
+          type: "string",
+          description: "Dashboard title shown in the UI",
+        },
+        artifact_source: {
+          type: "string",
+          description:
+            "JSX source code for a React component named `Dashboard` that accepts `{ data }` props. `data[i]` is an array of row objects for `queries[i]`. Do not include import statements — React, useState, useEffect, and Recharts components are available as globals.",
+        },
+        queries: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "SQL queries executed against the warehouse. Results are passed as `data[0]`, `data[1]`, etc.",
+        },
+      },
+      required: ["title", "artifact_source", "queries"],
     },
   },
 ];
@@ -171,6 +198,10 @@ export async function mcpHandler(
         return respondError(-32602, "uri is required");
       }
       return handleReadData(respond, respondError, uri, userId, env);
+    }
+
+    if (toolName === "submit_dashboard") {
+      return handleSubmitDashboard(respond, respondError, args, userId, env);
     }
 
     return respondError(-32601, `Unknown tool: ${toolName}`);
@@ -476,6 +507,54 @@ async function readAndReturnJson(
   }
   const text = new TextDecoder().decode(buf);
   return parseAndRespond(respond, respondError, text, ct);
+}
+
+async function handleSubmitDashboard(
+  respond: (r: unknown) => Response,
+  respondError: (code: number, msg: string) => Response,
+  args: Record<string, unknown>,
+  userId: string,
+  env: Env,
+): Promise<Response> {
+  const title = args.title;
+  const artifactSource = args.artifact_source;
+  const queries = args.queries;
+
+  if (typeof title !== "string" || !title.trim()) {
+    return respondError(-32602, "title is required");
+  }
+  if (typeof artifactSource !== "string" || !artifactSource.trim()) {
+    return respondError(-32602, "artifact_source is required");
+  }
+  if (!Array.isArray(queries) || queries.some((q) => typeof q !== "string")) {
+    return respondError(-32602, "queries must be an array of strings");
+  }
+  if (new TextEncoder().encode(artifactSource).length > 50_000) {
+    return respondError(-32602, "artifact_source exceeds 50 KB limit");
+  }
+
+  const disallowed = ["<script", "document.cookie", "localStorage", "sessionStorage"];
+  for (const pattern of disallowed) {
+    if (artifactSource.toLowerCase().includes(pattern.toLowerCase())) {
+      return respondError(-32602, `artifact_source contains disallowed pattern: ${pattern}`);
+    }
+  }
+
+  const { id } = await insertDashboard(env.DB, {
+    userId,
+    title: title.trim(),
+    artifactSource,
+    queries: queries as string[],
+  });
+
+  return respond({
+    content: [
+      {
+        type: "text",
+        text: `Dashboard "${title.trim()}" saved (id: ${id}). Open the Dashboards tab in the browser to view it.`,
+      },
+    ],
+  });
 }
 
 function parseAndRespond(
