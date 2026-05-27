@@ -132,8 +132,19 @@ export class CatalogDO implements DurableObject {
     const url = new URL(request.url);
     const { pathname } = url;
 
+    if (request.method === "GET" && pathname === "/ws") {
+      if (request.headers.get("Upgrade") !== "websocket") {
+        return new Response("Expected Upgrade: websocket", { status: 426 });
+      }
+      return this.handleWebSocketUpgrade(request);
+    }
+
     if (request.method === "GET" && pathname === "/tables") {
       return this.getTables();
+    }
+
+    if (request.method === "GET" && pathname === "/snapshots-latest") {
+      return this.getSnapshotsLatest();
     }
 
     if (request.method === "GET" && pathname.startsWith("/snapshots/")) {
@@ -254,6 +265,27 @@ export class CatalogDO implements DurableObject {
     return new Response("Not Found", { status: 404 });
   }
 
+  private handleWebSocketUpgrade(request: Request): Response {
+    const pair = new WebSocketPair();
+    const [client, server] = Object.values(pair) as [WebSocket, WebSocket];
+    this.ctx.acceptWebSocket(server);
+    const protocol = request.headers.get("Sec-WebSocket-Protocol");
+    const headers = protocol ? { "Sec-WebSocket-Protocol": protocol } : undefined;
+    return new Response(null, { status: 101, webSocket: client, headers });
+  }
+
+  async webSocketMessage(_ws: WebSocket, _message: string | ArrayBuffer): Promise<void> {
+    // Ping messages keep the connection alive; nothing else requires a response.
+  }
+
+  async webSocketClose(_ws: WebSocket, _code: number, _reason: string): Promise<void> {
+    // Stateless subscription — no cleanup needed.
+  }
+
+  async webSocketError(_ws: WebSocket, _error: unknown): Promise<void> {
+    // No cleanup needed.
+  }
+
   private getTables(): Response {
     const rows = this.ctx.storage.sql
       .exec(
@@ -261,6 +293,53 @@ export class CatalogDO implements DurableObject {
       )
       .toArray();
     return Response.json({ tables: rows });
+  }
+
+  private getSnapshotsLatest(): Response {
+    const rows = this.ctx.storage.sql
+      .exec(
+        `SELECT
+           t.id          AS table_id,
+           t.name,
+           t.description,
+           t.created_at,
+           s.id          AS snap_id,
+           s.uri,
+           s.storage_backend,
+           s.access_mode,
+           s.format,
+           s.created_at  AS snap_created_at
+         FROM tables t
+         LEFT JOIN snapshots s ON s.id = (
+           SELECT id FROM snapshots
+           WHERE table_id = t.id
+           ORDER BY created_at DESC
+           LIMIT 1
+         )
+         WHERE t.deleted_at IS NULL
+         ORDER BY t.name`,
+      )
+      .toArray();
+
+    const tables = rows.map((r) => ({
+      id: r.table_id as string,
+      name: r.name as string,
+      description: r.description as string | null,
+      created_at: r.created_at as number,
+      latestSnapshot: r.snap_id
+        ? {
+            id: r.snap_id as string,
+            table_id: r.table_id as string,
+            uri: r.uri as string,
+            storage_backend: r.storage_backend as string,
+            access_mode: r.access_mode as string,
+            format: r.format as string | null,
+            created_at: r.snap_created_at as number,
+          }
+        : null,
+    }));
+
+    return Response.json({ tables });
   }
 
   private getSnapshots(tableRef: string): Response {
@@ -410,6 +489,24 @@ export class CatalogDO implements DurableObject {
 
       return { tableId: resolvedId, triggeredJobIds: fired };
     });
+
+    // Broadcast commit to all connected browser tabs so they can refresh views.
+    const broadcastMsg = JSON.stringify({
+      type: "commit",
+      table,
+      snapshotId,
+      uri,
+      storage_backend: storageBackend,
+      access_mode: accessMode,
+      format: format ?? null,
+    });
+    for (const ws of this.ctx.getWebSockets()) {
+      try {
+        ws.send(broadcastMsg);
+      } catch {
+        // Ignore closed or stale sockets.
+      }
+    }
 
     return Response.json({ tableId, snapshotId, commitId, triggeredJobIds }, { status: 201 });
   }

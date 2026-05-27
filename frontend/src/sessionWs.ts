@@ -1,5 +1,4 @@
 import type { AsyncDuckDB } from "@duckdb/duckdb-wasm";
-import { registerCatalogViews } from "./catalogViews.ts";
 import { runQuery } from "./duckdb.ts";
 import { resolveStorageUris } from "./resolveQuery.ts";
 
@@ -31,15 +30,16 @@ export function connectSession(config: {
   workerBase: string;
   getAuthHeaders: () => Promise<Record<string, string>>;
   getDb: () => Promise<AsyncDuckDB>;
+  /** Returns a promise that resolves when catalog views are current. */
+  getCatalogReady: () => Promise<void>;
   onStatusChange?: (connected: boolean) => void;
 }): SessionConnection {
-  const { workerBase, getAuthHeaders, getDb, onStatusChange } = config;
+  const { workerBase, getAuthHeaders, getDb, getCatalogReady, onStatusChange } = config;
 
   let ws: WebSocket | null = null;
   let closed = false;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let jobEventListener: ((ev: JobEvent) => void) | null = null;
-  let catalogViewsReady: Promise<void> | null = null;
   let visibilityHandler: (() => void) | null = null;
 
   // Prevent Chrome/Edge from throttling JS in background tabs.
@@ -70,7 +70,7 @@ export function connectSession(config: {
 
     let pingInterval: ReturnType<typeof setInterval> | null = null;
 
-    socket.onopen = async () => {
+    socket.onopen = () => {
       onStatusChange?.(true);
       // Heartbeat keeps the connection alive and lets the DO detect stale sockets.
       pingInterval = setInterval(() => {
@@ -78,18 +78,11 @@ export function connectSession(config: {
           socket.send(JSON.stringify({ type: "ping" }));
         }
       }, 25_000);
-      // Register catalog views eagerly; gate all incoming messages on this promise
-      // so queries never run against a partially-registered catalog.
-      const db = await getDb();
-      catalogViewsReady = registerCatalogViews(db, workerBase, getAuthHeaders).then(
-        () => {},
-        () => {},
-      );
     };
 
     socket.onmessage = async (event: MessageEvent) => {
       // Ensure catalog views are ready before processing any query or job.
-      if (catalogViewsReady) await catalogViewsReady;
+      await getCatalogReady();
 
       let msg: ServerMessage;
       try {
@@ -118,7 +111,6 @@ export function connectSession(config: {
         clearInterval(pingInterval);
         pingInterval = null;
       }
-      catalogViewsReady = null;
       ws = null;
       onStatusChange?.(false);
       if (!closed) {
@@ -225,9 +217,8 @@ async function handleTransformJob(
 
   try {
     const db = await getDb();
-    // Refresh all catalog views so the job runs against the latest committed snapshots,
-    // not the views registered at session connect time.
-    await registerCatalogViews(db, workerBase, getAuthHeaders);
+    // Catalog views are kept current by the catalog WebSocket (getCatalogReady was awaited
+    // before this handler was called in onmessage). No full re-registration needed here.
     const { sql, preamble } = await resolveStorageUris(msg.sql, workerBase, getAuthHeaders);
     await runQuery(db, sql, preamble.length > 0 ? preamble : undefined);
     ws.send(JSON.stringify({ type: "job_complete", jobId: msg.jobId }));

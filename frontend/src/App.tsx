@@ -5,6 +5,8 @@ import { QueryPanel } from "./QueryPanel.tsx";
 import { SettingsPanel } from "./SettingsPanel.tsx";
 import { TransformJobsPanel } from "./TransformJobsPanel.tsx";
 import { clearTokens, getAccessToken, getValidToken, handleCallback, startLogin } from "./auth.ts";
+import { type CatalogTableWithSnapshot, registerCatalogViews } from "./catalogViews.ts";
+import { type CatalogCommitEvent, type CatalogConnection, connectCatalogWs } from "./catalogWs.ts";
 import { initDuckDB } from "./duckdb.ts";
 import { type JobEvent, type SessionConnection, connectSession } from "./sessionWs.ts";
 
@@ -26,11 +28,35 @@ export function App() {
   const [userId, setUserId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<Tab>("query");
   const [sessionConnected, setSessionConnected] = useState(false);
+
+  // ── Catalog state (lifted from QueryPanel) ───────────────────────────────
+  const [catalogTables, setCatalogTables] = useState<CatalogTableWithSnapshot[]>([]);
+  const [catalogLoading, setCatalogLoading] = useState(false);
+  const [catalogError, setCatalogError] = useState<string | null>(null);
+  const [catalogFailed, setCatalogFailed] = useState<string[]>([]);
+  // Flash indicator: true for 3s after any catalog commit arrives.
+  const [hasNewData, setHasNewData] = useState(false);
+  const newDataTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // DuckDB readiness (singleton across the app — initDuckDB() is already a module singleton).
+  const [dbReady, setDbReady] = useState(false);
+  const [dbError, setDbError] = useState<string | null>(null);
+
+  // Promise tracking: kept current so getCatalogReady() always returns
+  // a promise that resolves once catalog views are fully up to date.
+  const catalogReadyRef = useRef<Promise<void>>(Promise.resolve());
+
   const sessionRef = useRef<SessionConnection | null>(null);
+  const catalogWsRef = useRef<CatalogConnection | null>(null);
   const jobEventListenerRef = useRef<((ev: JobEvent) => void) | null>(null);
   const setJobListener = useCallback((listener: ((ev: JobEvent) => void) | null) => {
     jobEventListenerRef.current = listener;
   }, []);
+
+  // Stable getter — sessionWs reads this ref on every message.
+  const getCatalogReady = useCallback(() => catalogReadyRef.current, []);
+
+  // ── Auth state machine ────────────────────────────────────────────────────
 
   useEffect(() => {
     if (DEV_TOKEN) {
@@ -79,19 +105,117 @@ export function App() {
     fetchUserId().catch(() => {});
   }, [authed]);
 
-  // Establish Session DO WebSocket after auth to receive MCP queries and transform jobs.
+  // ── Catalog initialization ────────────────────────────────────────────────
+
+  const runCatalogInit = useCallback(async () => {
+    setCatalogLoading(true);
+    setCatalogError(null);
+    setCatalogFailed([]);
+    try {
+      const db = await initDuckDB();
+      const { tables, failed } = await registerCatalogViews(db, WORKER_BASE, getAuthHeaders);
+      setCatalogTables(tables);
+      if (failed.length > 0) setCatalogFailed(failed);
+    } catch (err) {
+      setCatalogError(err instanceof Error ? err.message : "Catalog load failed");
+    } finally {
+      setCatalogLoading(false);
+    }
+  }, []);
+
+  const handleCommit = useCallback((event: CatalogCommitEvent, refreshPromise: Promise<void>) => {
+    // Flash the new-data indicator for 3 seconds.
+    setHasNewData(true);
+    if (newDataTimerRef.current !== null) clearTimeout(newDataTimerRef.current);
+    newDataTimerRef.current = setTimeout(() => setHasNewData(false), 3000);
+
+    // Update the local catalog table list so new tables appear immediately.
+    setCatalogTables((prev) => {
+      const exists = prev.some((t) => t.name === event.table);
+      if (exists) {
+        return prev.map((t) =>
+          t.name === event.table
+            ? {
+                ...t,
+                latestSnapshot: {
+                  id: event.snapshotId,
+                  table_id: t.id,
+                  uri: event.uri,
+                  storage_backend: event.storage_backend,
+                  access_mode: event.access_mode,
+                  format: event.format,
+                  created_at: Date.now(),
+                },
+              }
+            : t,
+        );
+      }
+      // New table — add a placeholder; id will be populated on the next full refresh.
+      return [
+        ...prev,
+        {
+          id: "",
+          name: event.table,
+          description: null,
+          created_at: Date.now(),
+          latestSnapshot: {
+            id: event.snapshotId,
+            table_id: "",
+            uri: event.uri,
+            storage_backend: event.storage_backend,
+            access_mode: event.access_mode,
+            format: event.format,
+            created_at: Date.now(),
+          },
+        },
+      ];
+    });
+    // Remove the table from the failed list if it was previously failing.
+    setCatalogFailed((prev) => prev.filter((n) => n !== event.table));
+
+    // refreshPromise was created before onCommit was called, so it accurately
+    // covers this commit's view refresh (and any still-in-flight prior refreshes).
+    catalogReadyRef.current = refreshPromise;
+  }, []);
+
+  // ── Session + Catalog WebSocket connections ───────────────────────────────
+
   useEffect(() => {
     if (!authed) {
       sessionRef.current?.close();
       sessionRef.current = null;
+      catalogWsRef.current?.close();
+      catalogWsRef.current = null;
       setSessionConnected(false);
       return;
     }
 
+    // 1. Init DuckDB (singleton — safe to call multiple times).
+    initDuckDB()
+      .then(() => setDbReady(true))
+      .catch((err: unknown) => {
+        setDbError(err instanceof Error ? err.message : "DuckDB failed to initialize");
+      });
+
+    // 2. Start catalog initialization; track the promise so transform jobs can await it.
+    const initPromise = runCatalogInit();
+    catalogReadyRef.current = initPromise;
+
+    // 3. Connect catalog WebSocket for live commit updates.
+    const catConn = connectCatalogWs({
+      workerBase: WORKER_BASE,
+      getAuthHeaders,
+      getDb: initDuckDB,
+      onCommit: handleCommit,
+    });
+    catalogWsRef.current = catConn;
+
+    // 4. Connect session WebSocket (MCP queries + transform job dispatch).
     const conn = connectSession({
       workerBase: WORKER_BASE,
       getAuthHeaders,
       getDb: initDuckDB,
+      getCatalogReady,
       onStatusChange: setSessionConnected,
     });
     conn.setJobEventListener((ev) => jobEventListenerRef.current?.(ev));
@@ -99,9 +223,13 @@ export function App() {
 
     return () => {
       conn.close();
+      catConn.close();
       sessionRef.current = null;
+      catalogWsRef.current = null;
     };
-  }, [authed]);
+  }, [authed, runCatalogInit, handleCommit, getCatalogReady]);
+
+  // ── Loading screen ────────────────────────────────────────────────────────
 
   if (authed === null) {
     return (
@@ -181,6 +309,11 @@ export function App() {
           </div>
         </div>
         <div class="navbar-end gap-3 pr-2">
+          {/* New-data flash: turns amber for 3s after a catalog commit */}
+          <span
+            class={`w-2 h-2 rounded-full flex-shrink-0 transition-colors duration-300 ${hasNewData ? "bg-warning" : "bg-transparent"}`}
+            title={hasNewData ? "New data committed" : undefined}
+          />
           <span
             class={`w-2 h-2 rounded-full flex-shrink-0 ${sessionConnected ? "bg-success" : "bg-base-content/20"}`}
             title={sessionConnected ? "Browser session active" : "No MCP session"}
@@ -206,7 +339,17 @@ export function App() {
 
       <main class="flex-1">
         {activeTab === "query" && (
-          <QueryPanel workerBase={WORKER_BASE} getAuthHeaders={getAuthHeaders} />
+          <QueryPanel
+            workerBase={WORKER_BASE}
+            getAuthHeaders={getAuthHeaders}
+            catalogTables={catalogTables}
+            catalogLoading={catalogLoading}
+            catalogError={catalogError}
+            catalogFailed={catalogFailed}
+            onRefreshCatalog={runCatalogInit}
+            dbReady={dbReady}
+            dbError={dbError}
+          />
         )}
         {activeTab === "catalog" && (
           <CatalogPanel workerBase={WORKER_BASE} getAuthHeaders={getAuthHeaders} />

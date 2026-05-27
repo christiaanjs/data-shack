@@ -18,7 +18,8 @@ Each stage produces something functional and testable independently. Stages 1–
 | Stage 6 | Session DO + MCP server (`get_warehouse_schema`, `run_query`, `read_data`) | ✅ Done |
 | Stage 7 | Transform jobs + triggers; session DO dispatch; browser execution in DuckDB-WASM | ✅ Done |
 | Stage 9 | Multi-table trigger coordination (`policy: 'any'/'all'`) + Google Sheets data source | ✅ Done |
-| Stage 5, 8, 10 | See below | Not started |
+| Stage 5 | Catalog DO WebSocket broadcast; live view sync; batch snapshot init; lifted catalog state | ✅ Done |
+| Stage 8, 10 | See below | Not started |
 | Stage 11 | IaC sync CLI — version-controlled warehouse config with plan/apply/destroy | Not started |
 | Stage 12 | Job history, audit log & error reporting — run log table, failure notifications, freshness SLAs | Not started |
 | Stage 13 | Data lineage graph — DAG of sources → tables → transforms in UI and MCP | Not started |
@@ -104,9 +105,9 @@ Implemented as a standalone Cloudflare Worker with D1, ahead of Stage 1, to esta
 - `format` column added via `ALTER TABLE ADD COLUMN` in the DO constructor (idempotent migration for existing instances)
 - 10 integration tests in `test/catalog.test.ts`
 
-### Deferred
+### Completed in Stage 5
 
-- WebSocket broadcast on commit (Stage 5 — live sync)
+- WebSocket broadcast on commit — implemented in Stage 5
 
 ---
 
@@ -130,13 +131,22 @@ Implemented as a standalone Cloudflare Worker with D1, ahead of Stage 1, to esta
 
 ---
 
-## Stage 5 — WebSocket broadcast and live sync
+## Stage 5 — WebSocket broadcast and live sync ✅ Done
 
 **Goal:** The browser learns about new data without polling.
 
-- Catalog DO handles WebSocket connections from browser tabs; broadcasts on every commit
-- Browser opens a WebSocket to the catalog DO on startup; re-resolves affected table views on commit
-- Sidebar indicator flashes on commit
+### ✅ Implemented
+
+- `GET /catalog/ws` Worker route: authenticates via `Sec-WebSocket-Protocol` token (same pattern as `/session/ws`) and forwards the upgrade to the catalog DO
+- `GET /catalog/snapshots-latest` Worker + DO route: single LEFT JOIN SQL query returns all tables with their latest snapshot in one request (replaces N+1 pattern)
+- Catalog DO `handleWebSocketUpgrade`: registers connected browser tabs using `ctx.acceptWebSocket` (hibernation API); `webSocketMessage`/`webSocketClose`/`webSocketError` stubs satisfy the DO contract
+- `POST /commit` broadcasts `{ type: "commit", table, snapshotId, uri, storage_backend, access_mode, format }` to all connected sockets via `ctx.getWebSockets()` after the transaction; stale sockets are silently skipped
+- `frontend/src/catalogWs.ts` (new): `connectCatalogWs()` manages the browser-side WebSocket; on each `commit` message, creates a `refreshSingleView` promise, chains it with `Promise.all` onto the accumulated refresh promise (so `getCatalogReady()` covers all in-flight refreshes), then calls `onCommit(event, refreshPromise)` with the accumulated promise; reconnects on close with 5 s backoff; eager-reconnects on tab visibility restore; removes `visibilitychange` listener on close
+- `frontend/src/catalogViews.ts`: `registerCatalogViews` now uses the batch `/catalog/snapshots-latest` endpoint (1 request instead of N+1); batch-resolves `http-ds://` URIs via a single `POST /api/storage/resolve` call before creating views; `refreshSingleView` re-creates a single view for incoming commit events; shared private `registerView` with `preResolvedUrl?` parameter avoids per-table round-trips for `http-ds://` entries
+- `frontend/src/App.tsx`: catalog state (`catalogTables`, `catalogLoading`, `catalogError`, `catalogFailed`) and DuckDB readiness (`dbReady`, `dbError`) lifted to App; `catalogReadyRef` tracks a chained promise for all in-flight view refreshes; amber `hasNewData` flash indicator in the navbar fires for 3 s on each commit; `handleCommit` updates the local table list and removes table from the failed list; catalog state passed as props to `QueryPanel`
+- `frontend/src/QueryPanel.tsx`: receives catalog and DuckDB state as props; no longer initialises its own catalog views — state persists across tab switches; uses the module-level `initDuckDB()` singleton for query execution
+- `frontend/src/sessionWs.ts`: `connectSession` config now includes `getCatalogReady`; `socket.onmessage` awaits `getCatalogReady()` before processing any message; `handleTransformJob` no longer calls `registerCatalogViews` — views are kept current by the catalog WebSocket; `resolveStorageUris` handles any needed URI resolution for the output backend
+- 7 new integration tests in `test/catalog.test.ts` (snapshots-latest endpoint + WebSocket broadcast)
 
 **Test:** Open two browser tabs. Trigger a manual catalog commit. Both tabs update within a second. Trigger a cron Akahu load — browser updates without a reload.
 

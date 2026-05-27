@@ -32,6 +32,10 @@ A personal data integration platform built on Cloudflare that brings your data t
 | Google Sheets load jobs: cron-triggered Sheets API v4 → NDJSON → R2 → catalog | ✅ Done |
 | Google Sheets S3 proxy backend: GET returns JSON (for `read_json`), PUT writes via Sheets values API; key = sheet tab name | ✅ Done |
 | Credential test endpoint for `google-sheets` type: verifies token refresh works | ✅ Done |
+| Catalog WebSocket broadcast: `GET /catalog/ws` + `GET /catalog/snapshots-latest`; commit broadcasts to all connected tabs | ✅ Done |
+| Live view sync: `catalogWs.ts` + `refreshSingleView`; amber navbar flash; Promise-chained catalog readiness for transform jobs | ✅ Done |
+| Batch catalog init: single LEFT JOIN replaces N+1 fetch; `http-ds://` URIs batch-resolved before view creation | ✅ Done |
+| Catalog state lifted to App: persists across tab switches; `QueryPanel` receives state as props | ✅ Done |
 | Dashboarding platform | Not started |
 
 See [`build-plan.md`](./build-plan.md) for the full sequenced plan.
@@ -184,10 +188,10 @@ The catalog DO is the source of truth for all warehouse metadata. It holds a SQL
 - `tables` — table definitions (name, description, created_at)
 - `snapshots` — every storage URI that constitutes a table, with backend ID, access mode, format, and timestamp
 - `commits` — a log of every change, enabling time-travel queries
-- `jobs` — the pending/claimed/done queue for transform jobs *(deferred to Stage 7)*
-- `triggers` — the mapping from input tables to downstream transform jobs *(deferred to Stage 7)*
+- `jobs` — the pending/claimed/done queue for transform jobs
+- `triggers` — the mapping from input tables to downstream transform jobs
 
-Each user gets their own DO instance, isolated by user ID. All writes are processed single-threadedly inside the DO isolate, eliminating race conditions between concurrent ETL Workers. After every commit, the DO will broadcast a notification to all connected browser tabs over WebSocket *(deferred to Stage 5)*.
+Each user gets their own DO instance, isolated by user ID. All writes are processed single-threadedly inside the DO isolate, eliminating race conditions between concurrent ETL Workers. After every commit, the DO broadcasts `{ type: "commit", ... }` to all connected browser tabs over WebSocket via `ctx.getWebSockets()`.
 
 This is a distinct class from the session DO. The catalog DO holds persistent state that outlives any browser session. The session DO is ephemeral — it exists only to route MCP queries to an active browser tab.
 

@@ -481,6 +481,41 @@ app.get("/catalog/tables", requireAuth, async (c) => {
   return new Response(res.body, { status: res.status, headers: res.headers });
 });
 
+app.get("/catalog/snapshots-latest", requireAuth, async (c) => {
+  const res = await catalogStub(c.env, c.get("userId")).fetch("http://do/snapshots-latest");
+  return new Response(res.body, { status: res.status, headers: res.headers });
+});
+
+// Catalog WebSocket — auth-gated upgrade forwarded to the Catalog DO.
+app.get("/catalog/ws", async (c) => {
+  if (c.req.header("Upgrade") !== "websocket") {
+    return c.text("Expected Upgrade: websocket", 426);
+  }
+  // Auth: prefer Sec-WebSocket-Protocol token, fall back to ?token= query param.
+  const wsProtocol = c.req.header("Sec-WebSocket-Protocol");
+  const queryToken = new URL(c.req.url).searchParams.get("token");
+  const rawToken = wsProtocol ?? queryToken;
+  let authRequest = c.req.raw;
+  if (rawToken) {
+    const augmented = new Headers(c.req.raw.headers);
+    if (c.env.DEV_TOKEN && rawToken === c.env.DEV_TOKEN) {
+      augmented.set("X-Dev-Token", rawToken);
+    } else {
+      augmented.set("Authorization", `Bearer ${rawToken}`);
+    }
+    authRequest = new Request(c.req.url, { headers: augmented, method: c.req.method });
+  }
+  const auth = await authenticate(authRequest, c.env);
+  if (!auth) return new Response("Unauthorized", { status: 401 });
+
+  return catalogStub(c.env, auth.userId).fetch(
+    new Request("http://do/ws", {
+      headers: c.req.raw.headers,
+      cf: (c.req.raw as Request & { cf?: unknown }).cf,
+    }),
+  );
+});
+
 app.get("/catalog/snapshots/:table", requireAuth, async (c) => {
   const table = c.req.param("table");
   const res = await catalogStub(c.env, c.get("userId")).fetch(
