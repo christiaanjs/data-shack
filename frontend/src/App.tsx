@@ -47,9 +47,11 @@ export function App() {
   const [userId, setUserId] = useState<string | null>(null);
   const [sessionConnected, setSessionConnected] = useState(false);
 
-  // DuckDB toggle — default off on coarse-pointer (touch) devices.
+  // DuckDB toggle — persisted in localStorage; default off on coarse-pointer (touch) devices.
   const [sessionEnabled, setSessionEnabled] = useState(() => {
     if (typeof window === "undefined") return true;
+    const stored = localStorage.getItem("duckdb-session-enabled");
+    if (stored !== null) return stored === "true";
     return !window.matchMedia("(pointer: coarse), (max-width: 640px)").matches;
   });
   const sessionEnabledRef = useRef(sessionEnabled);
@@ -354,7 +356,11 @@ export function App() {
               type="checkbox"
               class="toggle toggle-xs toggle-success"
               checked={sessionEnabled}
-              onChange={(e) => setSessionEnabled((e.target as HTMLInputElement).checked)}
+              onChange={(e) => {
+                const checked = (e.target as HTMLInputElement).checked;
+                localStorage.setItem("duckdb-session-enabled", String(checked));
+                setSessionEnabled(checked);
+              }}
             />
           </label>
           {userId && (
