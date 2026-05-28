@@ -958,12 +958,14 @@ app.get("/api/table-data/:tableName", requireAuth, async (c) => {
   }
 
   const dataRes = await fetchStorageUri(snap.uri, userId, c.env);
-  return new Response(dataRes.body, {
-    status: dataRes.status,
-    headers: {
-      "Content-Type": dataRes.headers.get("Content-Type") ?? "application/octet-stream",
-    },
-  });
+  if (!dataRes.ok) {
+    return c.json(
+      { error: `Storage fetch failed (${dataRes.status})` },
+      dataRes.status as 400 | 404 | 502,
+    );
+  }
+  const contentType = effectiveFormat === "ndjson" ? "application/x-ndjson" : "application/json";
+  return new Response(dataRes.body, { headers: { "Content-Type": contentType } });
 });
 
 // ── Root ─────────────────────────────────────────────────────────────────

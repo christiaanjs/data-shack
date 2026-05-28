@@ -488,13 +488,6 @@ async function handleSubmitDashboard(
     return respondError(-32602, "artifact_source exceeds 50 KB limit");
   }
 
-  const disallowed = ["<script", "document.cookie", "localStorage", "sessionStorage"];
-  for (const pattern of disallowed) {
-    if (artifactSource.toLowerCase().includes(pattern.toLowerCase())) {
-      return respondError(-32602, `artifact_source contains disallowed pattern: ${pattern}`);
-    }
-  }
-
   const { id } = await insertDashboard(env.DB, {
     userId,
     title: title.trim(),

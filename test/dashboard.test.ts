@@ -120,53 +120,6 @@ describe("submit_dashboard MCP tool", () => {
     expect(body.error.message).toContain("queries");
   });
 
-  it("rejects artifact containing <script tag", async () => {
-    const res = await SELF.fetch("http://localhost/mcp", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: 1,
-        method: "tools/call",
-        params: {
-          name: "submit_dashboard",
-          arguments: {
-            title: "T",
-            artifact_source: 'function Dashboard() { return <script src="evil.js"></script>; }',
-            queries: [],
-          },
-        },
-      }),
-    });
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as { error: { message: string } };
-    expect(body.error.message).toContain("disallowed");
-  });
-
-  it("rejects artifact containing document.cookie", async () => {
-    const res = await SELF.fetch("http://localhost/mcp", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: 1,
-        method: "tools/call",
-        params: {
-          name: "submit_dashboard",
-          arguments: {
-            title: "T",
-            artifact_source:
-              "function Dashboard() { console.log(document.cookie); return <div/>; }",
-            queries: [],
-          },
-        },
-      }),
-    });
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as { error: { message: string } };
-    expect(body.error.message).toContain("disallowed");
-  });
-
   it("rejects artifact exceeding 50 KB", async () => {
     const res = await SELF.fetch("http://localhost/mcp", {
       method: "POST",
@@ -197,19 +150,29 @@ describe("GET /api/dashboards", () => {
     expect(res.status).toBe(401);
   });
 
-  it("returns empty list for a new user before any dashboards are created", async () => {
-    // Use a fresh user to avoid interference from other tests.
+  it("does not expose dashboards from other users", async () => {
     await env.DB.prepare("INSERT OR IGNORE INTO users (id, email, created_at) VALUES (?, ?, ?)")
-      .bind("usr_dash_list_test", "dash-list@example.com", Date.now())
+      .bind("usr_list_isolation", "list-iso@example.com", Date.now())
       .run();
-    const res = await SELF.fetch("http://localhost/api/dashboards", {
-      headers: { "X-Dev-Token": "test-token", "X-Dev-User-Id": "usr_dash_list_test" },
-    });
-    // Dev auth uses the configured DEV_USER_ID; just check the main user returns a list
-    const mainRes = await SELF.fetch("http://localhost/api/dashboards", { headers: DEV_HEADERS });
-    expect(mainRes.status).toBe(200);
-    const data = (await mainRes.json()) as { dashboards: unknown[] };
-    expect(Array.isArray(data.dashboards)).toBe(true);
+    const otherId = `dash_list_iso_${Date.now()}`;
+    await env.DB.prepare(
+      "INSERT INTO dashboards (id, user_id, title, artifact_source, queries, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+      .bind(
+        otherId,
+        "usr_list_isolation",
+        "Other User Dash",
+        SIMPLE_ARTIFACT,
+        "[]",
+        Date.now(),
+        Date.now(),
+      )
+      .run();
+
+    const res = await SELF.fetch("http://localhost/api/dashboards", { headers: DEV_HEADERS });
+    expect(res.status).toBe(200);
+    const { dashboards } = (await res.json()) as { dashboards: { id: string }[] };
+    expect(dashboards.find((d) => d.id === otherId)).toBeUndefined();
   });
 
   it("returns created dashboards in the list", async () => {
@@ -333,5 +296,62 @@ describe("DELETE /api/dashboards/:id", () => {
     const res = await SELF.fetch("http://localhost/api/dashboards", { headers: DEV_HEADERS });
     const data = (await res.json()) as { dashboards: { id: string }[] };
     expect(data.dashboards.find((d) => d.id === id)).toBeUndefined();
+  });
+});
+
+async function commitSnapshot(table: string, uri: string, format?: string): Promise<void> {
+  await SELF.fetch("http://localhost/catalog/commit", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+    body: JSON.stringify({
+      table,
+      uri,
+      storageBackend: "r2-bound",
+      accessMode: "r2-bound",
+      format,
+    }),
+  });
+}
+
+describe("GET /api/table-data/:tableName", () => {
+  it("returns 401 without auth", async () => {
+    const res = await SELF.fetch("http://localhost/api/table-data/any_table");
+    expect(res.status).toBe(401);
+  });
+
+  it("returns 404 for a table not in the catalog", async () => {
+    const res = await SELF.fetch("http://localhost/api/table-data/td_nonexistent_table_xyz", {
+      headers: DEV_HEADERS,
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it("returns 400 for a parquet snapshot (requires DuckDB)", async () => {
+    await commitSnapshot("td_parquet_table", "r2://data-shack/td-parquet-file.parquet");
+    const res = await SELF.fetch("http://localhost/api/table-data/td_parquet_table", {
+      headers: DEV_HEADERS,
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toMatch(/DuckDB/);
+  });
+
+  it("streams JSON content for an r2://data-shack snapshot", async () => {
+    const rows = [
+      { id: 1, name: "alpha" },
+      { id: 2, name: "beta" },
+    ];
+    await env.R2.put("users/usr_test/td-json-test.json", JSON.stringify(rows));
+    await commitSnapshot("td_json_table", "r2://data-shack/td-json-test.json");
+
+    const res = await SELF.fetch("http://localhost/api/table-data/td_json_table", {
+      headers: DEV_HEADERS,
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Type")).toContain("application/json");
+    const parsed = (await res.json()) as { id: number; name: string }[];
+    expect(Array.isArray(parsed)).toBe(true);
+    expect(parsed).toHaveLength(2);
+    expect(parsed[0]?.name).toBe("alpha");
   });
 });

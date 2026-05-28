@@ -28,6 +28,9 @@ interface DashboardDetail {
 }
 
 function extractTableName(sql: string): string | null {
+  if (/\bJOIN\b/i.test(sql)) return null;
+  const froms = [...sql.matchAll(/\bFROM\b/gi)];
+  if (froms.length !== 1) return null;
   return /\bFROM\s+["'`]?(\w+)["'`]?/i.exec(sql)?.[1] ?? null;
 }
 
@@ -57,7 +60,14 @@ async function runProxyQuery(
   getAuthHeaders: () => Promise<Record<string, string>>,
 ): Promise<{ columns: string[]; rows: unknown[][] }> {
   const tableName = extractTableName(sql);
-  if (!tableName) throw new Error(`Cannot extract table name from query: ${sql}`);
+  if (!tableName) {
+    const isComplex = /\bJOIN\b/i.test(sql) || (sql.match(/\bFROM\b/gi)?.length ?? 0) !== 1;
+    throw new Error(
+      isComplex
+        ? "Proxy mode supports single-table queries only — enable DuckDB for JOINs and complex queries"
+        : `Cannot extract table name from query: ${sql}`,
+    );
+  }
   const headers = await getAuthHeaders();
   const res = await fetch(`${workerBase}/api/table-data/${encodeURIComponent(tableName)}`, {
     headers,
@@ -88,10 +98,10 @@ function buildIframeHtml(
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>* { box-sizing: border-box; } body { margin: 0; padding: 12px; font-family: system-ui, -apple-system, sans-serif; }</style>
-<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-<script src="https://unpkg.com/recharts/umd/Recharts.js"></script>
+<script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7.26.4/babel.min.js"></script>
+<script src="https://unpkg.com/recharts@2.13.3/umd/Recharts.js"></script>
 </head>
 <body>
 <div id="root"></div>
