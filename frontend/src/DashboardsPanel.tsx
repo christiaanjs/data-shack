@@ -31,6 +31,26 @@ function extractTableName(sql: string): string | null {
   return /\bFROM\s+["'`]?(\w+)["'`]?/i.exec(sql)?.[1] ?? null;
 }
 
+function parseJsonColumnar(text: string): { columns: string[]; rows: unknown[][] } {
+  const trimmed = text.trim();
+  if (!trimmed) return { columns: [], rows: [] };
+
+  let records: Record<string, unknown>[];
+  if (trimmed.startsWith("[")) {
+    records = JSON.parse(trimmed) as Record<string, unknown>[];
+  } else {
+    records = trimmed
+      .split("\n")
+      .filter((line) => line.trim())
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+  }
+
+  if (records.length === 0) return { columns: [], rows: [] };
+  const columns = Object.keys(records[0]);
+  const rows = records.map((rec) => columns.map((col) => rec[col]));
+  return { columns, rows };
+}
+
 async function runProxyQuery(
   sql: string,
   workerBase: string,
@@ -46,7 +66,8 @@ async function runProxyQuery(
     const body = (await res.json()) as { error?: string };
     throw new Error(body.error ?? `Failed to load table data (${res.status})`);
   }
-  return res.json() as Promise<{ columns: string[]; rows: unknown[][] }>;
+  const text = await res.text();
+  return parseJsonColumnar(text);
 }
 
 function buildIframeHtml(

@@ -1,13 +1,17 @@
-import { decryptConfig } from "../crypto.ts";
 import { insertDashboard } from "../db/dashboards.ts";
 import {
   getCredentialByNameOrId,
   getCredentialConfig,
-  getStorageBackendByNameOrId,
   listHttpCredentials,
 } from "../db/settings.ts";
 import { decryptHttpConfig, resolveHeaderTemplates } from "../http-config.ts";
-import { signS3Request } from "../storage/resolve.ts";
+import {
+  fetchStorageUri,
+  inferSnapshotFormat,
+  isProxyReadableFormat,
+  isProxyReadableUri,
+  resolveTableSnapshot,
+} from "../storage/catalog-fetch.ts";
 import type { Env } from "../types.ts";
 
 const PROTOCOL_VERSION = "2025-03-26";
@@ -253,9 +257,14 @@ async function handleGetSchema(
       continue;
     }
     const latest = snapshots[0]!;
+    const effectiveFormat = inferSnapshotFormat(latest.format, latest.uri);
+    const directAccess = isProxyReadableFormat(effectiveFormat) && isProxyReadableUri(latest.uri);
     lines.push(`  Latest snapshot: ${latest.uri}`);
     if (latest.format) lines.push(`  Format: ${latest.format}`);
     lines.push(`  Backend: ${latest.storage_backend}`);
+    lines.push(
+      `  Direct access (no browser session): ${directAccess ? `yes — use read_data with uri catalog://${table.name}` : "no — requires run_query with active browser session"}`,
+    );
     lines.push(`  Snapshots: ${snapshots.length} total\n`);
   }
 
@@ -371,51 +380,21 @@ async function handleReadData(
   }
 
   if (uri.startsWith("r2://") || uri.startsWith("r2-s3compat://")) {
-    return handleReadR2(respond, respondError, uri, userId, env);
+    return readStorageUri(respond, respondError, uri, userId, env);
   }
 
   if (uri.startsWith("catalog://")) {
-    return handleReadCatalogTable(respond, respondError, uri, userId, env, catalogStub);
+    const tableName = uri.slice("catalog://".length).trim();
+    if (!tableName) return respondError(-32602, "catalog:// URI must include a table name");
+    const snap = await resolveTableSnapshot(tableName, catalogStub);
+    if (!snap) return respondError(-32602, `Table not found in catalog: ${tableName}`);
+    if (!isProxyReadableUri(snap.uri)) {
+      return respondError(-32602, `Storage scheme not supported for direct read: ${snap.uri}`);
+    }
+    return readStorageUri(respond, respondError, snap.uri, userId, env);
   }
 
   return respondError(-32602, "Unsupported URI scheme. Supported: http-ds://, r2://, catalog://");
-}
-
-async function handleReadCatalogTable(
-  respond: (r: unknown) => Response,
-  respondError: (code: number, msg: string) => Response,
-  uri: string,
-  userId: string,
-  env: Env,
-  catalogStub: ReturnType<DurableObjectNamespace["get"]>,
-): Promise<Response> {
-  const tableName = uri.slice("catalog://".length).trim();
-  if (!tableName) return respondError(-32602, "catalog:// URI must include a table name");
-
-  const snapshotRes = await catalogStub.fetch(
-    `http://do/snapshots/${encodeURIComponent(tableName)}`,
-  );
-  if (snapshotRes.status === 404) {
-    return respondError(-32602, `Table not found in catalog: ${tableName}`);
-  }
-  if (!snapshotRes.ok) return respondError(-32603, "Failed to read catalog snapshots");
-
-  const { snapshots } = (await snapshotRes.json()) as {
-    snapshots: Array<{ uri: string; format: string | null }>;
-  };
-  if (snapshots.length === 0) {
-    return respondError(-32602, `No snapshots for table: ${tableName}`);
-  }
-
-  const snap = snapshots[0]!;
-  const snapshotUri = snap.uri;
-
-  // Delegate to the R2 reader using the snapshot's storage URI.
-  if (snapshotUri.startsWith("r2://") || snapshotUri.startsWith("r2-s3compat://")) {
-    return handleReadR2(respond, respondError, snapshotUri, userId, env);
-  }
-
-  return respondError(-32602, `Unsupported snapshot URI scheme: ${snapshotUri}`);
 }
 
 async function handleReadHttpDs(
@@ -456,85 +435,19 @@ async function handleReadHttpDs(
   return readAndReturnJson(respond, respondError, upstream);
 }
 
-async function handleReadR2(
+async function readStorageUri(
   respond: (r: unknown) => Response,
   respondError: (code: number, msg: string) => Response,
   uri: string,
   userId: string,
   env: Env,
 ): Promise<Response> {
-  const scheme = uri.startsWith("r2://") ? "r2://" : "r2-s3compat://";
-  const rest = uri.slice(scheme.length);
-  const slash = rest.indexOf("/");
-  if (slash === -1) return respondError(-32602, "Invalid URI: missing key after backend name");
-
-  const backendName = rest.slice(0, slash);
-  const key = rest.slice(slash + 1);
-
-  // Built-in R2 binding.
-  if (backendName === "r2-bound" || backendName === "data-shack") {
-    const obj = await env.R2.get(`users/${userId}/${key}`);
-    if (!obj) return respondError(-32602, `Object not found: ${uri}`);
-    if (obj.size > MAX_READ_BYTES) {
-      return respondError(-32602, `Object too large (${obj.size} bytes, limit 1 MB)`);
-    }
-    const text = await obj.text();
-    return parseAndRespond(respond, respondError, text, obj.httpMetadata?.contentType);
+  const dataRes = await fetchStorageUri(uri, userId, env);
+  if (!dataRes.ok) {
+    if (dataRes.status === 404) return respondError(-32602, `Object not found: ${uri}`);
+    return respondError(-32603, `Storage fetch failed (${dataRes.status})`);
   }
-
-  // Named backend via D1 lookup.
-  const backend = await getStorageBackendByNameOrId(env.DB, backendName, userId);
-  if (!backend) return respondError(-32602, `Storage backend not found: ${backendName}`);
-
-  if (backend.type !== "r2-s3compat") {
-    return respondError(-32602, `Direct read not supported for backend type: ${backend.type}`);
-  }
-
-  let s3Config: {
-    bucket: string;
-    region: string;
-    endpoint: string;
-    accessKeyId: string;
-    secretAccessKey: string;
-  };
-  try {
-    s3Config = JSON.parse(
-      await decryptConfig(backend.encrypted_config, env.JWT_SECRET),
-    ) as typeof s3Config;
-  } catch {
-    return respondError(-32603, "Failed to decrypt backend config");
-  }
-
-  let signedUrl: string;
-  let signedHeaders: Record<string, string>;
-  try {
-    const signed = await signS3Request({
-      method: "GET",
-      endpoint: s3Config.endpoint,
-      bucket: s3Config.bucket,
-      key,
-      region: s3Config.region,
-      accessKeyId: s3Config.accessKeyId,
-      secretAccessKey: s3Config.secretAccessKey,
-    });
-    signedUrl = signed.url;
-    signedHeaders = signed.headers;
-  } catch {
-    return respondError(-32603, "Failed to sign S3 request");
-  }
-
-  let upstream: Response;
-  try {
-    upstream = await fetch(signedUrl, { method: "GET", headers: signedHeaders });
-  } catch {
-    return respondError(-32603, "Failed to fetch from S3-compatible backend");
-  }
-
-  if (!upstream.ok) {
-    return respondError(-32603, `Backend returned ${upstream.status}`);
-  }
-
-  return readAndReturnJson(respond, respondError, upstream);
+  return readAndReturnJson(respond, respondError, dataRes);
 }
 
 async function readAndReturnJson(

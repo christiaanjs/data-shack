@@ -26,7 +26,6 @@ import {
   deleteStorageBackend,
   getCredentialByNameOrId,
   getCredentialConfig,
-  getStorageBackendByNameOrId,
   getStorageBackendConfig,
   insertCredential,
   insertStorageBackend,
@@ -40,15 +39,14 @@ import { refreshGoogleAccessToken, runGoogleSheetsLoadJob } from "./loaders/goog
 import { runHttpLoadJob } from "./loaders/http.ts";
 import { mcpHandler } from "./mcp/server.ts";
 import {
-  parseHttpDsUri,
-  parseR2S3CompatUri,
-  parseR2Uri,
-  r2BoundKey,
-  signDataSourceToken,
-  signS3Request,
-  verifyDataSourceToken,
-} from "./storage/resolve.ts";
-import { decryptR2S3CompatConfig, storageRouter } from "./storage/router.ts";
+  fetchStorageUri,
+  inferSnapshotFormat,
+  isProxyReadableFormat,
+  isProxyReadableUri,
+  resolveTableSnapshot,
+} from "./storage/catalog-fetch.ts";
+import { parseHttpDsUri, signDataSourceToken, verifyDataSourceToken } from "./storage/resolve.ts";
+import { storageRouter } from "./storage/router.ts";
 import type { Env } from "./types.ts";
 
 function isAllowedOrigin(origin: string, allowedOrigin: string, allowSubdomains: boolean): boolean {
@@ -939,163 +937,33 @@ app.delete("/api/dashboards/:id", requireAuth, async (c) => {
 });
 
 // ── Table data proxy (proxy mode for dashboards without DuckDB) ───────────
+// Streams raw JSON/NDJSON from storage; format validation and JSON parsing happen client-side.
 
 app.get("/api/table-data/:tableName", requireAuth, async (c) => {
-  const tableName = c.req.param("tableName");
   const userId = c.get("userId");
+  const snap = await resolveTableSnapshot(c.req.param("tableName"), catalogStub(c.env, userId));
+  if (!snap) return c.json({ error: "Table not found or no snapshot" }, 404);
 
-  const snapshotRes = await catalogStub(c.env, userId).fetch(
-    `http://do/snapshots/${encodeURIComponent(tableName)}`,
-  );
-  if (!snapshotRes.ok) return c.json({ error: "Table not found" }, 404);
-
-  const { snapshots } = (await snapshotRes.json()) as {
-    snapshots: Array<{ uri: string; format: string | null }>;
-  };
-  if (snapshots.length === 0) return c.json({ error: "No snapshot for table" }, 404);
-
-  const snap = snapshots[0]!;
-  const { uri, format } = snap;
-
-  const effectiveFormat =
-    format ??
-    (uri.endsWith(".parquet")
-      ? "parquet"
-      : uri.endsWith(".csv")
-        ? "csv"
-        : uri.endsWith(".ndjson") || uri.endsWith(".jsonl")
-          ? "ndjson"
-          : "json");
-
-  if (effectiveFormat === "parquet") {
+  const effectiveFormat = inferSnapshotFormat(snap.format, snap.uri);
+  if (!isProxyReadableFormat(effectiveFormat)) {
     return c.json(
       {
-        error: "Parquet format is not supported in proxy mode. Enable DuckDB to query this table.",
+        error: `${effectiveFormat} format requires DuckDB. Enable DuckDB to query this table.`,
       },
       400,
     );
   }
-  if (effectiveFormat === "csv") {
-    return c.json(
-      { error: "CSV format is not supported in proxy mode. Enable DuckDB to query this table." },
-      400,
-    );
+  if (!isProxyReadableUri(snap.uri)) {
+    return c.json({ error: "Storage backend not supported in proxy mode" }, 400);
   }
 
-  const MAX_BYTES = 5 * 1024 * 1024;
-  let text: string;
-
-  if (uri.startsWith("r2://")) {
-    const parsed = parseR2Uri(uri);
-    if (!parsed) return c.json({ error: "Invalid r2:// URI" }, 400);
-    const { bucket, key } = parsed;
-
-    if (bucket === "r2-bound" || bucket === "data-shack") {
-      const obj = await c.env.R2.get(r2BoundKey(userId, key));
-      if (!obj) return c.json({ error: "Object not found in storage" }, 404);
-      if (obj.size > MAX_BYTES) {
-        return c.json(
-          {
-            error: "File too large for proxy mode (>5 MB). Enable DuckDB to query this table.",
-          },
-          413,
-        );
-      }
-      text = await obj.text();
-    } else {
-      const backendRow = await getStorageBackendByNameOrId(c.env.DB, bucket, userId);
-      if (!backendRow || backendRow.type !== "r2-s3compat") {
-        return c.json({ error: "Storage backend not found or not supported in proxy mode" }, 404);
-      }
-      const cfg = await decryptR2S3CompatConfig(backendRow.encrypted_config, c.env.JWT_SECRET);
-      if (!cfg) return c.json({ error: "Failed to decrypt backend config" }, 502);
-      const { url, headers } = await signS3Request({
-        method: "GET",
-        endpoint: cfg.endpoint,
-        bucket: cfg.bucket,
-        key,
-        region: cfg.region,
-        accessKeyId: cfg.accessKeyId,
-        secretAccessKey: cfg.secretAccessKey,
-      });
-      let upstream: Response;
-      try {
-        upstream = await fetch(url, { headers });
-      } catch {
-        return c.json({ error: "Failed to fetch from storage backend" }, 502);
-      }
-      if (!upstream.ok) return c.json({ error: `Storage fetch failed: ${upstream.status}` }, 502);
-      const buf = await upstream.arrayBuffer();
-      if (buf.byteLength > MAX_BYTES) {
-        return c.json(
-          {
-            error: "File too large for proxy mode (>5 MB). Enable DuckDB to query this table.",
-          },
-          413,
-        );
-      }
-      text = new TextDecoder().decode(buf);
-    }
-  } else if (uri.startsWith("r2-s3compat://")) {
-    const parsed = parseR2S3CompatUri(uri);
-    if (!parsed) return c.json({ error: "Invalid r2-s3compat:// URI" }, 400);
-    const { backendId, key } = parsed;
-    const backendRow = await getStorageBackendConfig(c.env.DB, backendId, userId);
-    if (!backendRow || backendRow.type !== "r2-s3compat") {
-      return c.json({ error: "Storage backend not found" }, 404);
-    }
-    const cfg = await decryptR2S3CompatConfig(backendRow.encrypted_config, c.env.JWT_SECRET);
-    if (!cfg) return c.json({ error: "Failed to decrypt backend config" }, 502);
-    const { url, headers } = await signS3Request({
-      method: "GET",
-      endpoint: cfg.endpoint,
-      bucket: cfg.bucket,
-      key,
-      region: cfg.region,
-      accessKeyId: cfg.accessKeyId,
-      secretAccessKey: cfg.secretAccessKey,
-    });
-    let upstream: Response;
-    try {
-      upstream = await fetch(url, { headers });
-    } catch {
-      return c.json({ error: "Failed to fetch from storage backend" }, 502);
-    }
-    if (!upstream.ok) return c.json({ error: `Storage fetch failed: ${upstream.status}` }, 502);
-    const buf = await upstream.arrayBuffer();
-    if (buf.byteLength > MAX_BYTES) {
-      return c.json(
-        { error: "File too large for proxy mode (>5 MB). Enable DuckDB to query this table." },
-        413,
-      );
-    }
-    text = new TextDecoder().decode(buf);
-  } else {
-    return c.json({ error: "Unsupported storage URI scheme" }, 400);
-  }
-
-  let columns: string[];
-  let rows: unknown[][];
-  try {
-    if (effectiveFormat === "ndjson") {
-      const objects = text
-        .split("\n")
-        .map((l) => l.trim())
-        .filter(Boolean)
-        .map((l) => JSON.parse(l) as Record<string, unknown>);
-      columns = objects.length > 0 ? Object.keys(objects[0]!) : [];
-      rows = objects.map((obj) => columns.map((col) => obj[col] ?? null));
-    } else {
-      const arr = JSON.parse(text) as Record<string, unknown>[];
-      if (!Array.isArray(arr)) throw new Error("Expected JSON array");
-      columns = arr.length > 0 ? Object.keys(arr[0]!) : [];
-      rows = arr.map((obj) => columns.map((col) => obj[col] ?? null));
-    }
-  } catch {
-    return c.json({ error: "Failed to parse table data as JSON" }, 502);
-  }
-
-  return c.json({ columns, rows });
+  const dataRes = await fetchStorageUri(snap.uri, userId, c.env);
+  return new Response(dataRes.body, {
+    status: dataRes.status,
+    headers: {
+      "Content-Type": dataRes.headers.get("Content-Type") ?? "application/octet-stream",
+    },
+  });
 });
 
 // ── Root ─────────────────────────────────────────────────────────────────
