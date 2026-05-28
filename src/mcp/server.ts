@@ -61,14 +61,14 @@ const TOOLS: Tool[] = [
   {
     name: "read_data",
     description:
-      "Read JSON or NDJSON data directly from a URI without requiring a browser session. Supports http-ds://credentialId/path for HTTP data sources and r2://backendName/key for R2 storage (both r2-bound and r2-s3compat backends). Size limit: 1 MB.",
+      "Read JSON or NDJSON data directly from a URI without requiring a browser session. Supports http-ds://credentialId/path for HTTP data sources, r2://backendName/key for R2 storage (both r2-bound and r2-s3compat backends), and catalog://tableName to read the latest snapshot of a catalog table from its storage backend. Size limit: 1 MB.",
     inputSchema: {
       type: "object",
       properties: {
         uri: {
           type: "string",
           description:
-            "URI to read from. Examples: http-ds://cred_abc/accounts, r2://data-shack/reference/config.json",
+            "URI to read from. Examples: http-ds://cred_abc/accounts, r2://data-shack/reference/config.json, catalog://transactions",
         },
       },
       required: ["uri"],
@@ -197,7 +197,7 @@ export async function mcpHandler(
       if (typeof uri !== "string" || !uri.trim()) {
         return respondError(-32602, "uri is required");
       }
-      return handleReadData(respond, respondError, uri, userId, env);
+      return handleReadData(respond, respondError, uri, userId, env, catalogStub);
     }
 
     if (toolName === "submit_dashboard") {
@@ -364,6 +364,7 @@ async function handleReadData(
   uri: string,
   userId: string,
   env: Env,
+  catalogStub: ReturnType<DurableObjectNamespace["get"]>,
 ): Promise<Response> {
   if (uri.startsWith("http-ds://")) {
     return handleReadHttpDs(respond, respondError, uri, userId, env);
@@ -373,7 +374,48 @@ async function handleReadData(
     return handleReadR2(respond, respondError, uri, userId, env);
   }
 
-  return respondError(-32602, "Unsupported URI scheme. Supported: http-ds://, r2://");
+  if (uri.startsWith("catalog://")) {
+    return handleReadCatalogTable(respond, respondError, uri, userId, env, catalogStub);
+  }
+
+  return respondError(-32602, "Unsupported URI scheme. Supported: http-ds://, r2://, catalog://");
+}
+
+async function handleReadCatalogTable(
+  respond: (r: unknown) => Response,
+  respondError: (code: number, msg: string) => Response,
+  uri: string,
+  userId: string,
+  env: Env,
+  catalogStub: ReturnType<DurableObjectNamespace["get"]>,
+): Promise<Response> {
+  const tableName = uri.slice("catalog://".length).trim();
+  if (!tableName) return respondError(-32602, "catalog:// URI must include a table name");
+
+  const snapshotRes = await catalogStub.fetch(
+    `http://do/snapshots/${encodeURIComponent(tableName)}`,
+  );
+  if (snapshotRes.status === 404) {
+    return respondError(-32602, `Table not found in catalog: ${tableName}`);
+  }
+  if (!snapshotRes.ok) return respondError(-32603, "Failed to read catalog snapshots");
+
+  const { snapshots } = (await snapshotRes.json()) as {
+    snapshots: Array<{ uri: string; format: string | null }>;
+  };
+  if (snapshots.length === 0) {
+    return respondError(-32602, `No snapshots for table: ${tableName}`);
+  }
+
+  const snap = snapshots[0]!;
+  const snapshotUri = snap.uri;
+
+  // Delegate to the R2 reader using the snapshot's storage URI.
+  if (snapshotUri.startsWith("r2://") || snapshotUri.startsWith("r2-s3compat://")) {
+    return handleReadR2(respond, respondError, snapshotUri, userId, env);
+  }
+
+  return respondError(-32602, `Unsupported snapshot URI scheme: ${snapshotUri}`);
 }
 
 async function handleReadHttpDs(

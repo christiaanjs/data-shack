@@ -1,3 +1,4 @@
+import { useLocation } from "preact-iso";
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import { CatalogPanel } from "./CatalogPanel.tsx";
 import { DashboardsPanel } from "./DashboardsPanel.tsx";
@@ -6,7 +7,11 @@ import { QueryPanel } from "./QueryPanel.tsx";
 import { SettingsPanel } from "./SettingsPanel.tsx";
 import { TransformJobsPanel } from "./TransformJobsPanel.tsx";
 import { clearTokens, getAccessToken, getValidToken, handleCallback, startLogin } from "./auth.ts";
-import { type CatalogTableWithSnapshot, registerCatalogViews } from "./catalogViews.ts";
+import {
+  type CatalogTableWithSnapshot,
+  fetchCatalogMetadata,
+  registerCatalogViews,
+} from "./catalogViews.ts";
 import { type CatalogCommitEvent, type CatalogConnection, connectCatalogWs } from "./catalogWs.ts";
 import { initDuckDB } from "./duckdb.ts";
 import { type JobEvent, type SessionConnection, connectSession } from "./sessionWs.ts";
@@ -23,28 +28,44 @@ async function getAuthHeaders(): Promise<Record<string, string>> {
   return { Authorization: `Bearer ${token}` };
 }
 
+function tabFromPath(path: string): Tab {
+  if (path.startsWith("/catalog")) return "catalog";
+  if (path.startsWith("/jobs")) return "jobs";
+  if (path.startsWith("/transforms")) return "transforms";
+  if (path.startsWith("/settings")) return "settings";
+  if (path.startsWith("/dashboards")) return "dashboards";
+  return "query";
+}
+
 export function App() {
+  const { path, route } = useLocation();
+
+  const activeTab = tabFromPath(path);
+
   const [authed, setAuthed] = useState<boolean | null>(null);
   const [callbackError, setCallbackError] = useState<string | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<Tab>("query");
   const [sessionConnected, setSessionConnected] = useState(false);
+
+  // DuckDB toggle — default off on coarse-pointer (touch) devices.
+  const [sessionEnabled, setSessionEnabled] = useState(() => {
+    if (typeof window === "undefined") return true;
+    return !window.matchMedia("(pointer: coarse), (max-width: 640px)").matches;
+  });
+  const sessionEnabledRef = useRef(sessionEnabled);
+  sessionEnabledRef.current = sessionEnabled;
 
   // ── Catalog state (lifted from QueryPanel) ───────────────────────────────
   const [catalogTables, setCatalogTables] = useState<CatalogTableWithSnapshot[]>([]);
   const [catalogLoading, setCatalogLoading] = useState(false);
   const [catalogError, setCatalogError] = useState<string | null>(null);
   const [catalogFailed, setCatalogFailed] = useState<string[]>([]);
-  // Flash indicator: true for 3s after any catalog commit arrives.
   const [hasNewData, setHasNewData] = useState(false);
   const newDataTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // DuckDB readiness (singleton across the app — initDuckDB() is already a module singleton).
   const [dbReady, setDbReady] = useState(false);
   const [dbError, setDbError] = useState<string | null>(null);
 
-  // Promise tracking: kept current so getCatalogReady() always returns
-  // a promise that resolves once catalog views are fully up to date.
   const catalogReadyRef = useRef<Promise<void>>(Promise.resolve());
 
   const sessionRef = useRef<SessionConnection | null>(null);
@@ -61,11 +82,17 @@ export function App() {
     [],
   );
 
-  // Stable getter — sessionWs reads this ref on every message.
   const getCatalogReady = useCallback(() => catalogReadyRef.current, []);
+
+  // getDb that refuses to start DuckDB when the session toggle is off.
+  const getDb = useCallback(async () => {
+    if (!sessionEnabledRef.current) throw new Error("DuckDB session is disabled");
+    return initDuckDB();
+  }, []);
 
   // ── Auth state machine ────────────────────────────────────────────────────
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: mount-only — path/route are stable on first render
   useEffect(() => {
     if (DEV_TOKEN) {
       setAuthed(true);
@@ -74,10 +101,10 @@ export function App() {
 
     const params = new URLSearchParams(location.search);
 
-    if (location.pathname === "/callback") {
+    if (path === "/callback") {
       handleCallback(params)
         .then(() => {
-          history.replaceState(null, "", "/");
+          route("/", true);
           setAuthed(true);
         })
         .catch((err: unknown) => {
@@ -132,12 +159,10 @@ export function App() {
   }, []);
 
   const handleCommit = useCallback((event: CatalogCommitEvent, refreshPromise: Promise<void>) => {
-    // Flash the new-data indicator for 3 seconds.
     setHasNewData(true);
     if (newDataTimerRef.current !== null) clearTimeout(newDataTimerRef.current);
     newDataTimerRef.current = setTimeout(() => setHasNewData(false), 3000);
 
-    // Update the local catalog table list so new tables appear immediately.
     setCatalogTables((prev) => {
       const exists = prev.some((t) => t.name === event.table);
       if (exists) {
@@ -158,7 +183,6 @@ export function App() {
             : t,
         );
       }
-      // New table — add a placeholder; id will be populated on the next full refresh.
       return [
         ...prev,
         {
@@ -178,49 +202,68 @@ export function App() {
         },
       ];
     });
-    // Remove the table from the failed list if it was previously failing.
     setCatalogFailed((prev) => prev.filter((n) => n !== event.table));
-
-    // refreshPromise was created before onCommit was called, so it accurately
-    // covers this commit's view refresh (and any still-in-flight prior refreshes).
     catalogReadyRef.current = refreshPromise;
-
     dashboardCommitListenerRef.current?.(event);
   }, []);
 
-  // ── Session + Catalog WebSocket connections ───────────────────────────────
+  // ── Effect A: Catalog WebSocket (always when authed) ─────────────────────
 
   useEffect(() => {
     if (!authed) {
-      sessionRef.current?.close();
-      sessionRef.current = null;
       catalogWsRef.current?.close();
       catalogWsRef.current = null;
+      return;
+    }
+    const catConn = connectCatalogWs({
+      workerBase: WORKER_BASE,
+      getAuthHeaders,
+      getDb,
+      onCommit: handleCommit,
+    });
+    catalogWsRef.current = catConn;
+    return () => {
+      catConn.close();
+      catalogWsRef.current = null;
+    };
+  }, [authed, handleCommit, getDb]);
+
+  // ── Effect B: Catalog metadata (depends on sessionEnabled) ───────────────
+
+  useEffect(() => {
+    if (!authed) return;
+    if (sessionEnabled) {
+      const p = runCatalogInit();
+      catalogReadyRef.current = p;
+    } else {
+      setCatalogLoading(true);
+      setCatalogError(null);
+      setCatalogFailed([]);
+      fetchCatalogMetadata(WORKER_BASE, getAuthHeaders)
+        .then((tables) => setCatalogTables(tables))
+        .catch((err: unknown) => {
+          setCatalogError(err instanceof Error ? err.message : "Catalog load failed");
+        })
+        .finally(() => setCatalogLoading(false));
+    }
+  }, [authed, sessionEnabled, runCatalogInit]);
+
+  // ── Effect C: DuckDB + session WebSocket (only when sessionEnabled) ───────
+
+  useEffect(() => {
+    if (!authed || !sessionEnabled) {
+      sessionRef.current?.close();
+      sessionRef.current = null;
       setSessionConnected(false);
       return;
     }
 
-    // 1. Init DuckDB (singleton — safe to call multiple times).
     initDuckDB()
       .then(() => setDbReady(true))
       .catch((err: unknown) => {
         setDbError(err instanceof Error ? err.message : "DuckDB failed to initialize");
       });
 
-    // 2. Start catalog initialization; track the promise so transform jobs can await it.
-    const initPromise = runCatalogInit();
-    catalogReadyRef.current = initPromise;
-
-    // 3. Connect catalog WebSocket for live commit updates.
-    const catConn = connectCatalogWs({
-      workerBase: WORKER_BASE,
-      getAuthHeaders,
-      getDb: initDuckDB,
-      onCommit: handleCommit,
-    });
-    catalogWsRef.current = catConn;
-
-    // 4. Connect session WebSocket (MCP queries + transform job dispatch).
     const conn = connectSession({
       workerBase: WORKER_BASE,
       getAuthHeaders,
@@ -233,11 +276,9 @@ export function App() {
 
     return () => {
       conn.close();
-      catConn.close();
       sessionRef.current = null;
-      catalogWsRef.current = null;
     };
-  }, [authed, runCatalogInit, handleCommit, getCatalogReady]);
+  }, [authed, sessionEnabled, getCatalogReady]);
 
   // ── Loading screen ────────────────────────────────────────────────────────
 
@@ -276,58 +317,29 @@ export function App() {
         </div>
         <div class="navbar-center">
           <div role="tablist" class="tabs tabs-border">
-            <button
-              type="button"
-              role="tab"
-              class={`tab${activeTab === "query" ? " tab-active" : ""}`}
-              onClick={() => setActiveTab("query")}
-            >
-              Query
-            </button>
-            <button
-              type="button"
-              role="tab"
-              class={`tab${activeTab === "catalog" ? " tab-active" : ""}`}
-              onClick={() => setActiveTab("catalog")}
-            >
-              Catalog
-            </button>
-            <button
-              type="button"
-              role="tab"
-              class={`tab${activeTab === "jobs" ? " tab-active" : ""}`}
-              onClick={() => setActiveTab("jobs")}
-            >
-              Jobs
-            </button>
-            <button
-              type="button"
-              role="tab"
-              class={`tab${activeTab === "transforms" ? " tab-active" : ""}`}
-              onClick={() => setActiveTab("transforms")}
-            >
-              Transforms
-            </button>
-            <button
-              type="button"
-              role="tab"
-              class={`tab${activeTab === "settings" ? " tab-active" : ""}`}
-              onClick={() => setActiveTab("settings")}
-            >
-              Settings
-            </button>
-            <button
-              type="button"
-              role="tab"
-              class={`tab${activeTab === "dashboards" ? " tab-active" : ""}`}
-              onClick={() => setActiveTab("dashboards")}
-            >
-              Dashboards
-            </button>
+            {(
+              [
+                ["query", "/", "Query"],
+                ["catalog", "/catalog", "Catalog"],
+                ["jobs", "/jobs", "Jobs"],
+                ["transforms", "/transforms", "Transforms"],
+                ["settings", "/settings", "Settings"],
+                ["dashboards", "/dashboards", "Dashboards"],
+              ] as [Tab, string, string][]
+            ).map(([tab, href, label]) => (
+              <button
+                key={tab}
+                type="button"
+                role="tab"
+                class={`tab${activeTab === tab ? " tab-active" : ""}`}
+                onClick={() => route(href)}
+              >
+                {label}
+              </button>
+            ))}
           </div>
         </div>
         <div class="navbar-end gap-3 pr-2">
-          {/* New-data flash: turns amber for 3s after a catalog commit */}
           <span
             class={`w-2 h-2 rounded-full flex-shrink-0 transition-colors duration-300 ${hasNewData ? "bg-warning" : "bg-transparent"}`}
             title={hasNewData ? "New data committed" : undefined}
@@ -336,6 +348,15 @@ export function App() {
             class={`w-2 h-2 rounded-full flex-shrink-0 ${sessionConnected ? "bg-success" : "bg-base-content/20"}`}
             title={sessionConnected ? "Browser session active" : "No MCP session"}
           />
+          <label class="flex items-center gap-1 cursor-pointer" title="Enable DuckDB + session">
+            <span class="text-xs text-base-content/50 hidden sm:block">DuckDB</span>
+            <input
+              type="checkbox"
+              class="toggle toggle-xs toggle-success"
+              checked={sessionEnabled}
+              onChange={(e) => setSessionEnabled((e.target as HTMLInputElement).checked)}
+            />
+          </label>
           {userId && (
             <span class="text-xs text-base-content/50 font-mono hidden sm:block">{userId}</span>
           )}
@@ -391,6 +412,8 @@ export function App() {
             getAuthHeaders={getAuthHeaders}
             dbReady={dbReady}
             setCatalogCommitListener={setDashboardCommitListener}
+            sessionEnabled={sessionEnabled}
+            getCatalogReady={getCatalogReady}
           />
         )}
       </main>

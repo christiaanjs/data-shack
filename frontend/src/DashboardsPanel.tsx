@@ -1,3 +1,4 @@
+import { useLocation } from "preact-iso";
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import type { CatalogCommitEvent } from "./catalogWs.ts";
 import { initDuckDB, runQuery } from "./duckdb.ts";
@@ -7,6 +8,8 @@ interface DashboardsPanelProps {
   getAuthHeaders: () => Promise<Record<string, string>>;
   dbReady: boolean;
   setCatalogCommitListener: (listener: ((ev: CatalogCommitEvent) => void) | null) => void;
+  sessionEnabled: boolean;
+  getCatalogReady: () => Promise<void>;
 }
 
 interface DashboardListRow {
@@ -22,6 +25,28 @@ interface DashboardDetail {
   queries: string[];
   created_at: number;
   updated_at: number;
+}
+
+function extractTableName(sql: string): string | null {
+  return /\bFROM\s+["'`]?(\w+)["'`]?/i.exec(sql)?.[1] ?? null;
+}
+
+async function runProxyQuery(
+  sql: string,
+  workerBase: string,
+  getAuthHeaders: () => Promise<Record<string, string>>,
+): Promise<{ columns: string[]; rows: unknown[][] }> {
+  const tableName = extractTableName(sql);
+  if (!tableName) throw new Error(`Cannot extract table name from query: ${sql}`);
+  const headers = await getAuthHeaders();
+  const res = await fetch(`${workerBase}/api/table-data/${encodeURIComponent(tableName)}`, {
+    headers,
+  });
+  if (!res.ok) {
+    const body = (await res.json()) as { error?: string };
+    throw new Error(body.error ?? `Failed to load table data (${res.status})`);
+  }
+  return res.json() as Promise<{ columns: string[]; rows: unknown[][] }>;
 }
 
 function buildIframeHtml(
@@ -79,8 +104,14 @@ export function DashboardsPanel({
   getAuthHeaders,
   dbReady,
   setCatalogCommitListener,
+  sessionEnabled,
+  getCatalogReady,
 }: DashboardsPanelProps) {
-  const [view, setView] = useState<"list" | "viewer">("list");
+  const { path, route } = useLocation();
+
+  // Derive viewer state from URL: /dashboards/dash_abc123 → viewer for that id.
+  const dashboardId = /^\/dashboards\/(dash_[a-z0-9]+)/.exec(path)?.[1] ?? null;
+
   const [dashboards, setDashboards] = useState<DashboardListRow[]>([]);
   const [listError, setListError] = useState<string | null>(null);
   const [activeDashboard, setActiveDashboard] = useState<DashboardDetail | null>(null);
@@ -89,7 +120,7 @@ export function DashboardsPanel({
   const [runError, setRunError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
 
-  // Keep activeDashboard accessible inside the commit listener without stale closure.
+  // Stable ref so the commit listener closure always sees the latest dashboard.
   const activeDashboardRef = useRef<DashboardDetail | null>(null);
   activeDashboardRef.current = activeDashboard;
 
@@ -110,40 +141,64 @@ export function DashboardsPanel({
     fetchList().catch(() => {});
   }, [fetchList]);
 
-  const runAllQueries = useCallback(async (detail: DashboardDetail) => {
-    setRunning(true);
-    setRunError(null);
-    try {
-      const db = await initDuckDB();
-      const results = await Promise.all(detail.queries.map((q) => runQuery(db, q)));
-      setIframeHtml(buildIframeHtml(detail.artifact_source, results));
-    } catch (err) {
-      setRunError(err instanceof Error ? err.message : "Query failed");
-    } finally {
-      setRunning(false);
-    }
-  }, []);
-
-  const openDashboard = useCallback(
-    async (id: string) => {
-      setRunError(null);
-      setIframeHtml(null);
+  const runAllQueries = useCallback(
+    async (detail: DashboardDetail) => {
       setRunning(true);
-      setView("viewer");
+      setRunError(null);
       try {
-        const headers = await getAuthHeaders();
-        const res = await fetch(`${workerBase}/api/dashboards/${id}`, { headers });
-        if (!res.ok) throw new Error(`Failed to load dashboard (${res.status})`);
-        const detail = (await res.json()) as DashboardDetail;
-        setActiveDashboard(detail);
-        await runAllQueries(detail);
+        let results: { columns: string[]; rows: unknown[][] }[];
+        if (sessionEnabled) {
+          await getCatalogReady();
+          const db = await initDuckDB();
+          results = await Promise.all(detail.queries.map((q) => runQuery(db, q)));
+        } else {
+          results = await Promise.all(
+            detail.queries.map((q) => runProxyQuery(q, workerBase, getAuthHeaders)),
+          );
+        }
+        setIframeHtml(buildIframeHtml(detail.artifact_source, results));
       } catch (err) {
-        setRunError(err instanceof Error ? err.message : "Failed to open dashboard");
+        setRunError(err instanceof Error ? err.message : "Query failed");
+      } finally {
         setRunning(false);
       }
     },
-    [workerBase, getAuthHeaders, runAllQueries],
+    [sessionEnabled, getCatalogReady, workerBase, getAuthHeaders],
   );
+
+  // Load and run whenever the URL-derived dashboard id changes.
+  useEffect(() => {
+    if (!dashboardId) {
+      setActiveDashboard(null);
+      setIframeHtml(null);
+      setRunError(null);
+      return;
+    }
+    let cancelled = false;
+    const load = async () => {
+      setRunning(true);
+      setRunError(null);
+      setIframeHtml(null);
+      try {
+        const headers = await getAuthHeaders();
+        const res = await fetch(`${workerBase}/api/dashboards/${dashboardId}`, { headers });
+        if (!res.ok) throw new Error(`Failed to load dashboard (${res.status})`);
+        const detail = (await res.json()) as DashboardDetail;
+        if (cancelled) return;
+        setActiveDashboard(detail);
+        await runAllQueries(detail);
+      } catch (err) {
+        if (!cancelled) {
+          setRunError(err instanceof Error ? err.message : "Failed to open dashboard");
+          setRunning(false);
+        }
+      }
+    };
+    load().catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [dashboardId, workerBase, getAuthHeaders, runAllQueries]);
 
   const handleDelete = useCallback(
     async (id: string) => {
@@ -157,7 +212,7 @@ export function DashboardsPanel({
         if (!res.ok && res.status !== 404) throw new Error(`Delete failed (${res.status})`);
         await fetchList();
       } catch {
-        // ignore — list will still reflect server state on next fetch
+        // ignore — list will reflect server state on next fetch
       } finally {
         setDeleting(null);
       }
@@ -165,16 +220,9 @@ export function DashboardsPanel({
     [workerBase, getAuthHeaders, fetchList],
   );
 
-  const handleBack = useCallback(() => {
-    setView("list");
-    setActiveDashboard(null);
-    setIframeHtml(null);
-    setRunError(null);
-  }, []);
-
   // Register catalog commit listener while a dashboard is open.
   useEffect(() => {
-    if (view !== "viewer") {
+    if (!dashboardId) {
       setCatalogCommitListener(null);
       return;
     }
@@ -183,17 +231,22 @@ export function DashboardsPanel({
       if (dash) runAllQueries(dash).catch(() => {});
     });
     return () => setCatalogCommitListener(null);
-  }, [view, setCatalogCommitListener, runAllQueries]);
+  }, [dashboardId, setCatalogCommitListener, runAllQueries]);
 
-  if (view === "viewer") {
+  // ── Viewer ────────────────────────────────────────────────────────────────
+
+  if (dashboardId) {
     return (
       <div class="p-4 flex flex-col gap-3">
         <div class="flex items-center gap-3">
-          <button type="button" class="btn btn-ghost btn-sm" onClick={handleBack}>
+          <button type="button" class="btn btn-ghost btn-sm" onClick={() => route("/dashboards")}>
             ← Back
           </button>
           {activeDashboard && <h2 class="text-lg font-semibold">{activeDashboard.title}</h2>}
           {running && <span class="loading loading-spinner loading-sm" />}
+          {!sessionEnabled && (
+            <span class="badge badge-outline badge-sm text-base-content/50">proxy mode</span>
+          )}
         </div>
 
         {runError && (
@@ -211,7 +264,7 @@ export function DashboardsPanel({
           </div>
         )}
 
-        {!dbReady && !runError && (
+        {sessionEnabled && !dbReady && !runError && (
           <div class="alert alert-warning">
             <span>DuckDB is still initialising…</span>
           </div>
@@ -228,6 +281,8 @@ export function DashboardsPanel({
       </div>
     );
   }
+
+  // ── List ─────────────────────────────────────────────────────────────────
 
   return (
     <div class="p-4 flex flex-col gap-4 max-w-3xl">
@@ -275,7 +330,7 @@ export function DashboardsPanel({
                       <button
                         type="button"
                         class="btn btn-primary btn-xs"
-                        onClick={() => openDashboard(d.id).catch(() => {})}
+                        onClick={() => route(`/dashboards/${d.id}`)}
                       >
                         Open
                       </button>
