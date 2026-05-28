@@ -100,7 +100,7 @@ const TOOLS: Tool[] = [
         artifact_source: {
           type: "string",
           description:
-            "JSX source code for a React component named `Dashboard` that accepts `{ data }` props. `data[i]` is an array of row objects for `queries[i]`. Do not include import statements — React, useState, useEffect, and Recharts components are available as globals.",
+            "JSX source code for a React component named `Dashboard` that accepts `{ data }` props. `data[i]` is an array of row objects for `queries[i]`. Do not include import statements. The following are available as globals — React hooks: useState, useEffect, useMemo, useCallback, useRef. Recharts: BarChart, Bar, LineChart, Line, AreaChart, Area, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ComposedChart, ScatterChart, Scatter. Use these names directly without any prefix.",
         },
         queries: {
           type: "array",
@@ -152,7 +152,7 @@ const TOOLS: Tool[] = [
         artifact_source: {
           type: "string",
           description:
-            "New JSX source for the Dashboard component. Same rules as submit_dashboard.",
+            "New JSX source for the Dashboard component. Same globals as submit_dashboard (React hooks + the listed Recharts components).",
         },
         queries: {
           type: "array",
