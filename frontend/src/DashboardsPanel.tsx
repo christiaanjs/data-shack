@@ -102,6 +102,7 @@ function buildIframeHtml(
 <style>* { box-sizing: border-box; } body { margin: 0; padding: 12px; font-family: system-ui, -apple-system, sans-serif; }</style>
 <script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
 <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/prop-types@15.8.1/prop-types.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone@7.26.4/babel.min.js"></script>
 <script src="https://unpkg.com/recharts@2.13.3/umd/Recharts.js"></script>
 </head>
