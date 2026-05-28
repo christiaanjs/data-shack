@@ -90,9 +90,10 @@ function buildIframeHtml(
   const rowObjects = results.map(({ columns, rows }) =>
     rows.map((row) => Object.fromEntries(columns.map((col, i) => [col, row[i]]))),
   );
-  // Escape </script> so the HTML parser doesn't terminate the script block early.
+  // JSON.stringify gives a safe JS string literal; additionally escape </script so the
+  // HTML parser doesn't terminate the enclosing <script> tag prematurely.
   const safeData = JSON.stringify(rowObjects).replace(/<\/script/gi, "<\\/script");
-  const safeSource = artifactSource.replace(/<\/script/gi, "<\\/script");
+  const safeSource = JSON.stringify(artifactSource).replace(/<\/script/gi, "<\\/script");
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -108,18 +109,31 @@ function buildIframeHtml(
 <body>
 <div id="root"></div>
 <script>window.__DATA__ = ${safeData};<\/script>
-<script type="text/babel" data-type="module" data-presets="react">
-${safeSource}
-
-import React from "react";
-import { createRoot } from "react-dom/client";
+<script type="module">
+const source = ${safeSource};
+let code;
 try {
-  createRoot(document.getElementById("root")).render(
-    <Dashboard data={window.__DATA__} />
-  );
+  ({ code } = Babel.transform(source, {
+    filename: "dashboard.jsx",
+    presets: [["react", { runtime: "automatic" }]],
+  }));
 } catch (err) {
   document.getElementById("root").innerHTML =
-    '<pre style="color:red;white-space:pre-wrap;padding:8px">Render error: ' + String(err) + '<\\/pre>';
+    '<pre style="color:red;white-space:pre-wrap;padding:8px">Babel error: ' + err + '</pre>';
+  throw err;
+}
+const blob = new Blob([code], { type: "text/javascript" });
+const url = URL.createObjectURL(blob);
+try {
+  const { default: Dashboard } = await import(url);
+  const { createRoot } = await import("react-dom/client");
+  const { createElement } = await import("react");
+  createRoot(document.getElementById("root")).render(createElement(Dashboard, { data: window.__DATA__ }));
+} catch (err) {
+  document.getElementById("root").innerHTML =
+    '<pre style="color:red;white-space:pre-wrap;padding:8px">Render error: ' + err + '</pre>';
+} finally {
+  URL.revokeObjectURL(url);
 }
 <\/script>
 </body>

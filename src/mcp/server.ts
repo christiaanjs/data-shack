@@ -100,7 +100,7 @@ const TOOLS: Tool[] = [
         artifact_source: {
           type: "string",
           description:
-            "JSX source code for a React component named `Dashboard` that accepts `{ data }` props. `data[i]` is an array of row objects for `queries[i]`. Use standard ES module imports — `import { useState, useEffect } from 'react'`, `import { BarChart, Bar, XAxis } from 'recharts'`, etc. Any named export from `react`, `react-dom`, or `recharts` is importable. Do not define exports.",
+            "JSX source for a React component. Must be the default export: `export default function Dashboard({ data }) { ... }`. `data[i]` is an array of row objects for `queries[i]`. Use standard ES module imports — `import { useState } from 'react'`, `import { BarChart, RadarChart } from 'recharts'`, etc. Any named export from `react`, `react-dom`, or `recharts` is importable.",
         },
         queries: {
           type: "array",
