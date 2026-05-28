@@ -261,6 +261,7 @@ export function App() {
     }
 
     initDuckDB()
+      .then(() => getCatalogReady())
       .then(() => setDbReady(true))
       .catch((err: unknown) => {
         setDbError(err instanceof Error ? err.message : "DuckDB failed to initialize");
@@ -394,6 +395,7 @@ export function App() {
             onRefreshCatalog={runCatalogInit}
             dbReady={dbReady}
             dbError={dbError}
+            sessionEnabled={sessionEnabled}
           />
         )}
         {activeTab === "catalog" && (
