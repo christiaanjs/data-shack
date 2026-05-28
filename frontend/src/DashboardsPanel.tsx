@@ -100,33 +100,26 @@ function buildIframeHtml(
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>* { box-sizing: border-box; } body { margin: 0; padding: 12px; font-family: system-ui, -apple-system, sans-serif; }</style>
-<script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
-<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
-<script src="https://unpkg.com/prop-types@15.8.1/prop-types.min.js"></script>
-<script src="https://unpkg.com/@babel/standalone@7.26.4/babel.min.js"></script>
-<script src="https://unpkg.com/recharts@2.13.3/umd/Recharts.js"></script>
+<script type="importmap">
+{"imports":{"react":"https://esm.sh/react@18.3.1","react/jsx-runtime":"https://esm.sh/react@18.3.1/jsx-runtime","react-dom":"https://esm.sh/react-dom@18.3.1","react-dom/client":"https://esm.sh/react-dom@18.3.1/client","recharts":"https://esm.sh/recharts@2.13.3"}}
+<\/script>
+<script src="https://unpkg.com/@babel/standalone@7.26.4/babel.min.js"><\/script>
 </head>
 <body>
 <div id="root"></div>
 <script>window.__DATA__ = ${safeData};<\/script>
-<script type="text/babel">
-const { useState, useEffect, useMemo, useCallback, useRef } = React;
-const {
-  BarChart, Bar, LineChart, Line, AreaChart, Area,
-  PieChart, Pie, Cell,
-  XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
-  ComposedChart, ScatterChart, Scatter,
-} = window.Recharts ?? {};
-
+<script type="text/babel" data-type="module" data-presets="react">
 ${safeSource}
 
+import React from "react";
+import { createRoot } from "react-dom/client";
 try {
-  ReactDOM.createRoot(document.getElementById('root')).render(
-    React.createElement(Dashboard, { data: window.__DATA__ })
+  createRoot(document.getElementById("root")).render(
+    <Dashboard data={window.__DATA__} />
   );
 } catch (err) {
-  document.getElementById('root').innerHTML =
-    '<pre style="color:red;white-space:pre-wrap;padding:8px">Render error: ' + String(err) + '</pre>';
+  document.getElementById("root").innerHTML =
+    '<pre style="color:red;white-space:pre-wrap;padding:8px">Render error: ' + String(err) + '<\\/pre>';
 }
 <\/script>
 </body>
