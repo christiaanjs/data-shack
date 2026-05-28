@@ -3,8 +3,28 @@ const STORAGE_KEY_CLIENT = "oauth_client_id";
 const STORAGE_KEY_ACCESS = "oauth_access_token";
 const STORAGE_KEY_REFRESH = "oauth_refresh_token";
 const STORAGE_KEY_EXP = "oauth_exp";
-const STORAGE_KEY_VERIFIER = "oauth_code_verifier";
-const STORAGE_KEY_STATE = "oauth_state";
+
+// PKCE verifier and state are stored in cookies (not localStorage) so they
+// survive the cross-context hop on Android: standalone PWA initiates the flow
+// but Chrome Custom Tab handles the /callback redirect — cookies are shared
+// between both contexts for the same origin, while localStorage is partitioned.
+const COOKIE_VERIFIER = "oauth_pkce_v";
+const COOKIE_STATE = "oauth_pkce_s";
+const OAUTH_COOKIE_TTL = 600; // seconds — enough for the round trip
+
+function setAuthCookie(name: string, value: string): void {
+  const secure = location.protocol === "https:" ? "; Secure" : "";
+  document.cookie = `${name}=${encodeURIComponent(value)}; max-age=${OAUTH_COOKIE_TTL}; path=/; SameSite=Lax${secure}`;
+}
+
+function getAuthCookie(name: string): string | null {
+  const m = document.cookie.match(new RegExp(`(?:^|; )${name}=([^;]*)`));
+  return m ? decodeURIComponent(m[1]) : null;
+}
+
+function deleteAuthCookie(name: string): void {
+  document.cookie = `${name}=; max-age=0; path=/`;
+}
 
 // ── PKCE helpers ──────────────────────────────────────────────────────────
 
@@ -62,8 +82,8 @@ export function clearTokens() {
   localStorage.removeItem(STORAGE_KEY_ACCESS);
   localStorage.removeItem(STORAGE_KEY_REFRESH);
   localStorage.removeItem(STORAGE_KEY_EXP);
-  localStorage.removeItem(STORAGE_KEY_VERIFIER);
-  localStorage.removeItem(STORAGE_KEY_STATE);
+  deleteAuthCookie(COOKIE_VERIFIER);
+  deleteAuthCookie(COOKIE_STATE);
 }
 
 function isExpiringSoon(): boolean {
@@ -112,10 +132,10 @@ export async function startLogin() {
   const clientId = await ensureClientId();
   const verifier = await generateCodeVerifier();
   const challenge = await codeChallenge(verifier);
-  localStorage.setItem(STORAGE_KEY_VERIFIER, verifier);
+  setAuthCookie(COOKIE_VERIFIER, verifier);
 
   const state = crypto.randomUUID();
-  localStorage.setItem(STORAGE_KEY_STATE, state);
+  setAuthCookie(COOKIE_STATE, state);
 
   const params = new URLSearchParams({
     response_type: "code",
@@ -131,8 +151,8 @@ export async function startLogin() {
 
 export async function handleCallback(searchParams: URLSearchParams): Promise<void> {
   const returnedState = searchParams.get("state");
-  const storedState = localStorage.getItem(STORAGE_KEY_STATE);
-  localStorage.removeItem(STORAGE_KEY_STATE);
+  const storedState = getAuthCookie(COOKIE_STATE);
+  deleteAuthCookie(COOKIE_STATE);
   if (!storedState || returnedState !== storedState) {
     throw new Error("State mismatch — possible CSRF");
   }
@@ -140,7 +160,7 @@ export async function handleCallback(searchParams: URLSearchParams): Promise<voi
   const code = searchParams.get("code");
   if (!code) throw new Error("No code in callback URL");
 
-  const verifier = localStorage.getItem(STORAGE_KEY_VERIFIER);
+  const verifier = getAuthCookie(COOKIE_VERIFIER);
   if (!verifier)
     throw new Error("No code_verifier found — callback arrived without a prior login attempt");
 
@@ -172,7 +192,7 @@ export async function handleCallback(searchParams: URLSearchParams): Promise<voi
     expires_in: number;
   };
   storeTokens(data.access_token, data.refresh_token, data.expires_in);
-  localStorage.removeItem(STORAGE_KEY_VERIFIER);
+  deleteAuthCookie(COOKIE_VERIFIER);
 }
 
 // ── Token getter with auto-refresh ────────────────────────────────────────
