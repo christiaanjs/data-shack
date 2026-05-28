@@ -8,12 +8,16 @@ const STORAGE_KEY_EXP = "oauth_exp";
 // survive the cross-context hop on Android: standalone PWA initiates the flow
 // but Chrome Custom Tab handles the /callback redirect — cookies are shared
 // between both contexts for the same origin, while localStorage is partitioned.
-const COOKIE_VERIFIER = "oauth_pkce_v";
-const COOKIE_STATE = "oauth_pkce_s";
+// On HTTPS we use the __Host- prefix so the browser enforces Secure + path=/ +
+// host-only scope (blocks subdomain cookie injection); plain names on http
+// localhost where the prefix isn't allowed.
+const HTTPS = location.protocol === "https:";
+const COOKIE_VERIFIER = HTTPS ? "__Host-oauth_pkce_v" : "oauth_pkce_v";
+const COOKIE_STATE = HTTPS ? "__Host-oauth_pkce_s" : "oauth_pkce_s";
 const OAUTH_COOKIE_TTL = 600; // seconds — enough for the round trip
 
 function setAuthCookie(name: string, value: string): void {
-  const secure = location.protocol === "https:" ? "; Secure" : "";
+  const secure = HTTPS ? "; Secure" : "";
   document.cookie = `${name}=${encodeURIComponent(value)}; max-age=${OAUTH_COOKIE_TTL}; path=/; SameSite=Lax${secure}`;
 }
 
@@ -23,7 +27,8 @@ function getAuthCookie(name: string): string | null {
 }
 
 function deleteAuthCookie(name: string): void {
-  document.cookie = `${name}=; max-age=0; path=/`;
+  const secure = HTTPS ? "; Secure" : "";
+  document.cookie = `${name}=; max-age=0; path=/; SameSite=Lax${secure}`;
 }
 
 // ── PKCE helpers ──────────────────────────────────────────────────────────
