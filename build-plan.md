@@ -19,7 +19,8 @@ Each stage produces something functional and testable independently. Stages 1–
 | Stage 7 | Transform jobs + triggers; session DO dispatch; browser execution in DuckDB-WASM | ✅ Done |
 | Stage 9 | Multi-table trigger coordination (`policy: 'any'/'all'`) + Google Sheets data source | ✅ Done |
 | Stage 5 | Catalog DO WebSocket broadcast; live view sync; batch snapshot init; lifted catalog state | ✅ Done |
-| Stage 8, 10 | See below | Not started |
+| Stage 8 | Dashboard platform (DashboardsPanel, submit_dashboard MCP tool, proxy mode, URL routing, DuckDB toggle) | ✅ Done |
+| Stage 10 | MCP tools for job management | Not started |
 | Stage 11 | IaC sync CLI — version-controlled warehouse config with plan/apply/destroy | Not started |
 | Stage 12 | Job history, audit log & error reporting — run log table, failure notifications, freshness SLAs | Not started |
 | Stage 13 | Data lineage graph — DAG of sources → tables → transforms in UI and MCP | Not started |
@@ -190,6 +191,21 @@ Implemented as a standalone Cloudflare Worker with D1, ahead of Stage 1, to esta
 - `dashboards` table in D1 (dashboards don't need the catalog DO's consistency guarantees): stores React artifact source, bound SQL queries, title
 - MCP tool `submit_dashboard`: Claude calls this after iterating on a dashboard with the user; Worker validates artifact for XSS risks before persisting
 - Dashboard viewer in Pages frontend: loads and renders persisted dashboards, subscribes to catalog DO WebSocket for relevant tables, re-runs bound queries on commit
+
+### ✅ Implemented
+
+- `dashboards` D1 table (`migrations/0010_dashboards.sql`): `id`, `user_id`, `title`, `artifact_source` (JSX source up to 50 KB), `queries` (JSON array of SQL strings), `created_at`, `updated_at`
+- `src/db/dashboards.ts`: `insertDashboard`, `getDashboard`, `listDashboards`, `deleteDashboard`
+- MCP tool `submit_dashboard` (`src/mcp/server.ts`): validates title/artifact/queries, enforces 50 KB artifact limit, persists to D1; sandbox iframe (`allow-scripts` without `allow-same-origin`) is the security boundary
+- REST API (`src/index.ts`): `GET /api/dashboards` (list — no `artifact_source`), `GET /api/dashboards/:id` (full detail; `queries` returned as parsed array), `DELETE /api/dashboards/:id`; creation is MCP-only
+- `GET /api/table-data/:tableName`: resolves catalog table → latest snapshot → streams raw JSON/NDJSON from storage; returns JSON error envelopes on failure; sets `Content-Type: application/json` or `application/x-ndjson`
+- `src/storage/catalog-fetch.ts`: shared helpers (`resolveTableSnapshot`, `fetchStorageUri`, `inferSnapshotFormat`, `isProxyReadableFormat`, `isProxyReadableUri`) used by both the table-data endpoint and the MCP `read_data`/`get_warehouse_schema` tools
+- `frontend/src/DashboardsPanel.tsx`: list view + URL-driven viewer; sandboxed iframe with React 18 + Babel standalone + Recharts (pinned versions); re-runs queries on catalog commit; proxy mode (`runProxyQuery`) when DuckDB is disabled parses raw JSON/NDJSON client-side
+- `frontend/src/App.tsx`: Dashboards tab; URL routing via preact-iso (`LocationProvider` + `useLocation()`); DuckDB session toggle (default off on mobile, persisted in `localStorage`); three split effects for catalog WS / catalog metadata / DuckDB session; `setDashboardCommitListener` forwards commits to the active dashboard
+- `frontend/src/catalogViews.ts`: `fetchCatalogMetadata` — lightweight catalog fetch without DuckDB (used when session is disabled)
+- `get_warehouse_schema` MCP tool: annotates each table with a direct-access indicator (`yes — use read_data with uri catalog://tableName` vs `no — requires run_query`)
+- `read_data` MCP tool: supports `catalog://tableName` URI for direct streaming from catalog storage without a browser session
+- 19 tests in `test/dashboard.test.ts`: MCP tool validation, REST CRUD, user isolation, `GET /api/table-data/:tableName` (auth, 404, parquet 400, R2 success)
 
 **Test:** Have a conversation with Claude that produces a spending breakdown dashboard. Submit it via MCP. Navigate to the dashboard viewer — renders with live data. Trigger an Akahu sync — dashboard updates automatically.
 
