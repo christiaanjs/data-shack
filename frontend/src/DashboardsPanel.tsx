@@ -15,12 +15,14 @@ interface DashboardsPanelProps {
 interface DashboardListRow {
   id: string;
   title: string;
+  slug: string | null;
   created_at: number;
 }
 
 interface DashboardDetail {
   id: string;
   title: string;
+  slug: string | null;
   artifact_source: string;
   queries: string[];
   created_at: number;
@@ -140,8 +142,8 @@ export function DashboardsPanel({
 }: DashboardsPanelProps) {
   const { path, route } = useLocation();
 
-  // Derive viewer state from URL: /dashboards/dash_abc123 → viewer for that id.
-  const dashboardId = /^\/dashboards\/(dash_[a-z0-9]+)/.exec(path)?.[1] ?? null;
+  // Derive viewer state from URL: /dashboards/dash_abc123 or /dashboards/my-slug
+  const dashboardId = /^\/dashboards\/([^/?#]+)/.exec(path)?.[1] ?? null;
 
   const [dashboards, setDashboards] = useState<DashboardListRow[]>([]);
   const [listError, setListError] = useState<string | null>(null);
@@ -352,7 +354,12 @@ export function DashboardsPanel({
             <tbody>
               {dashboards.map((d) => (
                 <tr key={d.id} class="hover">
-                  <td class="font-medium">{d.title}</td>
+                  <td class="font-medium">
+                    {d.title}
+                    {d.slug && (
+                      <span class="ml-2 font-mono text-xs text-base-content/40">/{d.slug}</span>
+                    )}
+                  </td>
                   <td class="text-base-content/60 text-xs">
                     {new Date(d.created_at).toLocaleString()}
                   </td>
@@ -361,7 +368,7 @@ export function DashboardsPanel({
                       <button
                         type="button"
                         class="btn btn-primary btn-xs"
-                        onClick={() => route(`/dashboards/${d.id}`)}
+                        onClick={() => route(`/dashboards/${d.slug ?? d.id}`)}
                       >
                         Open
                       </button>

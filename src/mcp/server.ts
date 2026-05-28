@@ -1,4 +1,12 @@
-import { insertDashboard } from "../db/dashboards.ts";
+import {
+  getDashboardByIdOrSlug,
+  insertDashboard,
+  listDashboards,
+  resolveUniqueSlug,
+  slugify,
+  snapshotDashboard,
+  updateDashboard,
+} from "../db/dashboards.ts";
 import {
   getCredentialByNameOrId,
   getCredentialConfig,
@@ -100,8 +108,64 @@ const TOOLS: Tool[] = [
           description:
             "SQL queries executed against the warehouse. Results are passed as `data[0]`, `data[1]`, etc.",
         },
+        slug: {
+          type: "string",
+          description:
+            "URL-friendly slug for referencing the dashboard (e.g. spending-breakdown). Auto-generated from the title if omitted.",
+        },
       },
       required: ["title", "artifact_source", "queries"],
+    },
+  },
+  {
+    name: "list_dashboards",
+    description: "List all saved dashboards. Returns id, slug, title, and creation date for each.",
+    inputSchema: { type: "object", properties: {}, required: [] },
+  },
+  {
+    name: "get_dashboard",
+    description:
+      "Retrieve the full source code and queries of a saved dashboard by its id or slug. Use this before updating a dashboard.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id_or_slug: {
+          type: "string",
+          description: "Dashboard id (dash_...) or URL slug (e.g. spending-breakdown)",
+        },
+      },
+      required: ["id_or_slug"],
+    },
+  },
+  {
+    name: "update_dashboard",
+    description:
+      "Update an existing dashboard's title, artifact source, queries, or slug. The previous version is automatically snapshotted. At least one field must be provided.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id_or_slug: {
+          type: "string",
+          description: "Dashboard id (dash_...) or slug to update",
+        },
+        title: { type: "string", description: "New title" },
+        artifact_source: {
+          type: "string",
+          description:
+            "New JSX source for the Dashboard component. Same rules as submit_dashboard.",
+        },
+        queries: {
+          type: "array",
+          items: { type: "string" },
+          description: "New SQL queries. Replaces the existing queries array.",
+        },
+        slug: {
+          type: "string",
+          description:
+            "New URL slug. Will be slugified and made unique. Pass empty string to clear the slug.",
+        },
+      },
+      required: ["id_or_slug"],
     },
   },
 ];
@@ -206,6 +270,22 @@ export async function mcpHandler(
 
     if (toolName === "submit_dashboard") {
       return handleSubmitDashboard(respond, respondError, args, userId, env);
+    }
+
+    if (toolName === "list_dashboards") {
+      return handleListDashboards(respond, userId, env);
+    }
+
+    if (toolName === "get_dashboard") {
+      const idOrSlug = args.id_or_slug;
+      if (typeof idOrSlug !== "string" || !idOrSlug.trim()) {
+        return respondError(-32602, "id_or_slug is required");
+      }
+      return handleGetDashboard(respond, respondError, idOrSlug.trim(), userId, env);
+    }
+
+    if (toolName === "update_dashboard") {
+      return handleUpdateDashboard(respond, respondError, args, userId, env);
     }
 
     return respondError(-32601, `Unknown tool: ${toolName}`);
@@ -488,18 +568,147 @@ async function handleSubmitDashboard(
     return respondError(-32602, "artifact_source exceeds 50 KB limit");
   }
 
+  // Resolve slug: use provided value or auto-generate from title.
+  let slug: string | undefined;
+  if (typeof args.slug === "string" && args.slug.trim()) {
+    slug = await resolveUniqueSlug(env.DB, userId, slugify(args.slug));
+  } else if (args.slug === undefined) {
+    slug = await resolveUniqueSlug(env.DB, userId, slugify(title.trim()));
+  }
+  // args.slug === null or empty string → no slug
+
   const { id } = await insertDashboard(env.DB, {
     userId,
     title: title.trim(),
     artifactSource,
     queries: queries as string[],
+    slug,
   });
 
   return respond({
     content: [
       {
         type: "text",
-        text: `Dashboard "${title.trim()}" saved (id: ${id}). Open the Dashboards tab in the browser to view it.`,
+        text: `Dashboard "${title.trim()}" saved (id: ${id}${slug ? `, slug: ${slug}` : ""}). Open the Dashboards tab in the browser to view it.`,
+      },
+    ],
+  });
+}
+
+async function handleListDashboards(
+  respond: (r: unknown) => Response,
+  userId: string,
+  env: Env,
+): Promise<Response> {
+  const dashboards = await listDashboards(env.DB, userId);
+  if (dashboards.length === 0) {
+    return respond({ content: [{ type: "text", text: "No dashboards saved yet." }] });
+  }
+  const lines = dashboards.map((d) => {
+    const date = new Date(d.created_at).toISOString().slice(0, 10);
+    return `- **${d.title}** — id: \`${d.id}\`${d.slug ? `, slug: \`${d.slug}\`` : ""} (${date})`;
+  });
+  return respond({ content: [{ type: "text", text: lines.join("\n") }] });
+}
+
+async function handleGetDashboard(
+  respond: (r: unknown) => Response,
+  respondError: (code: number, msg: string) => Response,
+  idOrSlug: string,
+  userId: string,
+  env: Env,
+): Promise<Response> {
+  const row = await getDashboardByIdOrSlug(env.DB, idOrSlug, userId);
+  if (!row) return respondError(-32602, `Dashboard not found: ${idOrSlug}`);
+  const queries = JSON.parse(row.queries) as string[];
+  const lines: string[] = [`# ${row.title}`, `**id:** ${row.id}`];
+  if (row.slug) lines.push(`**slug:** ${row.slug}`);
+  lines.push(`**updated:** ${new Date(row.updated_at).toISOString()}`);
+  if (queries.length > 0) {
+    lines.push("", "## Queries");
+    queries.forEach((q, i) => lines.push(`${i + 1}. \`${q}\``));
+  }
+  lines.push("", "## Artifact Source", "```jsx", row.artifact_source, "```");
+  return respond({ content: [{ type: "text", text: lines.join("\n") }] });
+}
+
+async function handleUpdateDashboard(
+  respond: (r: unknown) => Response,
+  respondError: (code: number, msg: string) => Response,
+  args: Record<string, unknown>,
+  userId: string,
+  env: Env,
+): Promise<Response> {
+  const idOrSlug = args.id_or_slug;
+  if (typeof idOrSlug !== "string" || !idOrSlug.trim()) {
+    return respondError(-32602, "id_or_slug is required");
+  }
+
+  const row = await getDashboardByIdOrSlug(env.DB, idOrSlug.trim(), userId);
+  if (!row) return respondError(-32602, `Dashboard not found: ${idOrSlug}`);
+
+  const updates: {
+    title?: string;
+    artifactSource?: string;
+    queries?: string[];
+    slug?: string | null;
+  } = {};
+
+  if (args.title !== undefined) {
+    if (typeof args.title !== "string" || !args.title.trim()) {
+      return respondError(-32602, "title must be a non-empty string");
+    }
+    updates.title = args.title.trim();
+  }
+
+  if (args.artifact_source !== undefined) {
+    if (typeof args.artifact_source !== "string" || !args.artifact_source.trim()) {
+      return respondError(-32602, "artifact_source must be a non-empty string");
+    }
+    if (new TextEncoder().encode(args.artifact_source).length > 50_000) {
+      return respondError(-32602, "artifact_source exceeds 50 KB limit");
+    }
+    updates.artifactSource = args.artifact_source;
+  }
+
+  if (args.queries !== undefined) {
+    if (
+      !Array.isArray(args.queries) ||
+      (args.queries as unknown[]).some((q) => typeof q !== "string")
+    ) {
+      return respondError(-32602, "queries must be an array of strings");
+    }
+    updates.queries = args.queries as string[];
+  }
+
+  if (args.slug !== undefined) {
+    if (typeof args.slug === "string" && args.slug.trim()) {
+      updates.slug = await resolveUniqueSlug(env.DB, userId, slugify(args.slug), row.id);
+    } else if (args.slug === "" || args.slug === null) {
+      updates.slug = null;
+    } else {
+      return respondError(-32602, "slug must be a string or empty string to clear");
+    }
+  }
+
+  if (Object.keys(updates).length === 0) {
+    return respondError(
+      -32602,
+      "at least one field (title, artifact_source, queries, slug) is required",
+    );
+  }
+
+  await snapshotDashboard(env.DB, row, userId, "update");
+  await updateDashboard(env.DB, row.id, userId, updates);
+
+  const newTitle = updates.title ?? row.title;
+  const newSlug = updates.slug !== undefined ? updates.slug : row.slug;
+  const ref = newSlug ?? row.id;
+  return respond({
+    content: [
+      {
+        type: "text",
+        text: `Dashboard "${newTitle}" updated (id: ${row.id}${newSlug ? `, slug: ${newSlug}` : ""}). View at /dashboards/${ref}.`,
       },
     ],
   });

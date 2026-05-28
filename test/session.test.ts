@@ -93,7 +93,7 @@ describe("POST /mcp - MCP server", () => {
     });
     expect(res.status).toBe(200);
     const data = (await res.json()) as { result: { tools: Array<{ name: string }> } };
-    expect(data.result.tools).toHaveLength(5);
+    expect(data.result.tools).toHaveLength(8);
     const names = data.result.tools.map((t) => t.name);
     expect(names).toContain("get_warehouse_schema");
     expect(names).toContain("run_query");
