@@ -16,9 +16,10 @@ function slugToTitle(slug: string): string {
 export async function onRequest(context: PagesContext): Promise<Response> {
   const { slug } = context.params;
 
-  const url = new URL(context.request.url);
-  url.pathname = "/index.html";
-  const asset: Response = await context.env.ASSETS.fetch(new Request(url, context.request));
+  // Fetch "/" not "/index.html" — Pages redirects /index.html → / internally,
+  // which would cause our function to return the redirect and lose the URL.
+  const rootUrl = new URL("/", context.request.url);
+  const asset: Response = await context.env.ASSETS.fetch(rootUrl.toString());
   if (!asset.ok) return asset;
 
   const title = slugToTitle(slug);
