@@ -354,3 +354,272 @@ describe("S3 proxy r2-bound OPTIONS", () => {
     expect(res.headers.get("Access-Control-Allow-Origin")).toBe("*");
   });
 });
+
+// ── r2-bound multipart upload ─────────────────────────────────────────────
+
+describe("S3 proxy r2-bound multipart upload", () => {
+  async function vendR2Cred(pathPrefix = "") {
+    const res = await SELF.fetch("http://localhost/api/storage/proxy-credentials", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({ backend: "r2-bound", pathPrefix }),
+    });
+    return (await res.json()) as { accessKeyId: string };
+  }
+
+  it("initiates a multipart upload and returns XML with UploadId", async () => {
+    const { accessKeyId } = await vendR2Cred();
+    const res = await SELF.fetch(
+      "http://localhost/api/storage/s3proxy/r2-bound/mp-init.parquet?uploads=",
+      { method: "POST", headers: { Authorization: fakeS3Auth(accessKeyId) } },
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Type")).toContain("application/xml");
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBe("*");
+    const xml = await res.text();
+    expect(xml).toContain("<InitiateMultipartUploadResult");
+    expect(/<UploadId>([^<]+)<\/UploadId>/.exec(xml)?.[1]).toBeTruthy();
+  });
+
+  it("completes a full multipart upload (initiate → upload part → complete)", async () => {
+    const { accessKeyId } = await vendR2Cred();
+    const key = "mp-full-flow.parquet";
+    const content = "hello multipart world";
+
+    // 1. Initiate
+    const initRes = await SELF.fetch(
+      `http://localhost/api/storage/s3proxy/r2-bound/${key}?uploads=`,
+      { method: "POST", headers: { Authorization: fakeS3Auth(accessKeyId) } },
+    );
+    expect(initRes.status).toBe(200);
+    const initXml = await initRes.text();
+    const uploadId = /<UploadId>([^<]+)<\/UploadId>/.exec(initXml)?.[1];
+    expect(uploadId).toBeTruthy();
+
+    // 2. Upload part
+    const partRes = await SELF.fetch(
+      `http://localhost/api/storage/s3proxy/r2-bound/${key}?partNumber=1&uploadId=${uploadId}`,
+      {
+        method: "PUT",
+        headers: { Authorization: fakeS3Auth(accessKeyId) },
+        body: content,
+      },
+    );
+    expect(partRes.status).toBe(200);
+    const partEtag = partRes.headers.get("ETag");
+    expect(partEtag).toBeTruthy();
+
+    // 3. Complete
+    const completeBody = `<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>${partEtag}</ETag></Part></CompleteMultipartUpload>`;
+    const completeRes = await SELF.fetch(
+      `http://localhost/api/storage/s3proxy/r2-bound/${key}?uploadId=${uploadId}`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: fakeS3Auth(accessKeyId),
+          "Content-Type": "application/xml",
+        },
+        body: completeBody,
+      },
+    );
+    expect(completeRes.status).toBe(200);
+    expect(await completeRes.text()).toContain("<CompleteMultipartUploadResult");
+
+    // Object should be readable via R2 binding
+    const stored = await env.R2.get(`users/usr_test/${key}`);
+    expect(stored).not.toBeNull();
+    expect(await stored!.text()).toBe(content);
+  });
+
+  it("aborts a multipart upload", async () => {
+    const { accessKeyId } = await vendR2Cred();
+    const key = "mp-abort.parquet";
+
+    const initRes = await SELF.fetch(
+      `http://localhost/api/storage/s3proxy/r2-bound/${key}?uploads=`,
+      { method: "POST", headers: { Authorization: fakeS3Auth(accessKeyId) } },
+    );
+    const uploadId = /<UploadId>([^<]+)<\/UploadId>/.exec(await initRes.text())?.[1];
+    expect(uploadId).toBeTruthy();
+
+    const abortRes = await SELF.fetch(
+      `http://localhost/api/storage/s3proxy/r2-bound/${key}?uploadId=${uploadId}`,
+      { method: "DELETE", headers: { Authorization: fakeS3Auth(accessKeyId) } },
+    );
+    expect(abortRes.status).toBe(204);
+    expect(abortRes.headers.get("Access-Control-Allow-Origin")).toBe("*");
+  });
+
+  it("enforces path prefix for multipart initiate", async () => {
+    const { accessKeyId } = await vendR2Cred("allowed/");
+    const res = await SELF.fetch(
+      "http://localhost/api/storage/s3proxy/r2-bound/blocked/file.parquet?uploads=",
+      { method: "POST", headers: { Authorization: fakeS3Auth(accessKeyId) } },
+    );
+    expect(res.status).toBe(403);
+  });
+});
+
+// ── r2-s3compat method signing ────────────────────────────────────────────
+
+// Sig V4 verifier — checks that the Authorization header was signed for the
+// given method. Used to catch regressions where signS3Request is called with
+// the wrong method (e.g. "GET" instead of the actual "PUT").
+async function sha256HexStr(data: string): Promise<string> {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(data));
+  return Array.from(new Uint8Array(buf))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+async function hmacSha256Buf(key: ArrayBuffer, data: string): Promise<ArrayBuffer> {
+  const ck = await crypto.subtle.importKey("raw", key, { name: "HMAC", hash: "SHA-256" }, false, [
+    "sign",
+  ]);
+  return crypto.subtle.sign("HMAC", ck, new TextEncoder().encode(data));
+}
+
+async function verifyUpstreamSig4(
+  capturedUrl: string,
+  capturedHeaders: Record<string, string>,
+  expectedMethod: string,
+  secretKey: string,
+): Promise<boolean> {
+  // Headers.forEach normalises keys to lowercase
+  const auth = capturedHeaders.authorization ?? "";
+  const amzDate = capturedHeaders["x-amz-date"] ?? "";
+  const payload = capturedHeaders["x-amz-content-sha256"] ?? "UNSIGNED-PAYLOAD";
+
+  const credMatch = auth.match(/Credential=[^/]+\/(\d{8})\/([^/,\s]+)\/s3\/aws4_request/);
+  const sigMatch = auth.match(/Signature=([0-9a-f]+)/);
+  if (!credMatch || !sigMatch) return false;
+
+  const [, dateStamp, region] = credMatch as [string, string, string];
+  const capturedSig = sigMatch[1]!;
+
+  const url = new URL(capturedUrl);
+  const canonicalQuery = [...url.searchParams.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+    .join("&");
+  const canonicalHeaders = `host:${url.host}\nx-amz-content-sha256:${payload}\nx-amz-date:${amzDate}\n`;
+
+  const canonicalRequest = [
+    expectedMethod.toUpperCase(),
+    url.pathname,
+    canonicalQuery,
+    canonicalHeaders,
+    "host;x-amz-content-sha256;x-amz-date",
+    payload,
+  ].join("\n");
+
+  const credentialScope = `${dateStamp}/${region}/s3/aws4_request`;
+  const stringToSign = [
+    "AWS4-HMAC-SHA256",
+    amzDate,
+    credentialScope,
+    await sha256HexStr(canonicalRequest),
+  ].join("\n");
+
+  let sigKey: ArrayBuffer = new TextEncoder().encode(`AWS4${secretKey}`).buffer as ArrayBuffer;
+  for (const part of [dateStamp, region, "s3", "aws4_request"]) {
+    sigKey = await hmacSha256Buf(sigKey, part);
+  }
+
+  const expectedSig = Array.from(new Uint8Array(await hmacSha256Buf(sigKey, stringToSign)))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+
+  return expectedSig === capturedSig;
+}
+
+describe("S3 proxy r2-s3compat method signing", () => {
+  const S3_COMPAT_BACKEND = "sig-test-backend";
+  const UPSTREAM_SECRET = "test-upstream-secret";
+
+  beforeAll(async () => {
+    await SELF.fetch("http://localhost/api/storage-backends", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({
+        name: S3_COMPAT_BACKEND,
+        type: "r2-s3compat",
+        config: {
+          endpoint: "https://test.r2compat.example",
+          accessKeyId: "test-upstream-key",
+          secretAccessKey: UPSTREAM_SECRET,
+          bucket: "test-bucket",
+          region: "us-east-1",
+        },
+      }),
+    });
+  });
+
+  async function vendCred() {
+    const res = await SELF.fetch("http://localhost/api/storage/proxy-credentials", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({ backend: S3_COMPAT_BACKEND, pathPrefix: "" }),
+    });
+    return (await res.json()) as { accessKeyId: string };
+  }
+
+  it("signs PUT requests with PUT (not GET) in the Sig V4 canonical request", async () => {
+    const { accessKeyId } = await vendCred();
+
+    let capturedUrl = "";
+    const capturedHeaders: Record<string, string> = {};
+    let capturedMethod = "";
+
+    const savedFetch = globalThis.fetch;
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const req = new Request(input, init);
+      capturedUrl = req.url;
+      capturedMethod = req.method;
+      req.headers.forEach((v, k) => {
+        capturedHeaders[k] = v;
+      });
+      return new Response(null, { status: 200, headers: { ETag: '"test-etag"' } });
+    };
+
+    try {
+      const res = await SELF.fetch(
+        `http://localhost/api/storage/s3proxy/${S3_COMPAT_BACKEND}/test/file.parquet`,
+        {
+          method: "PUT",
+          headers: {
+            Authorization: fakeS3Auth(accessKeyId),
+            "Content-Type": "application/octet-stream",
+          },
+          body: "test content",
+        },
+      );
+
+      // The proxy must have forwarded the request (not returned 401/403/502 internally)
+      expect(res.status).not.toBe(401);
+      expect(res.status).not.toBe(403);
+      expect(capturedMethod).toBe("PUT");
+
+      // Sig V4 signature must be computed for PUT — verifying this catches the regression
+      // where signS3Request was accidentally called with "GET" instead of `method`.
+      const signedForPut = await verifyUpstreamSig4(
+        capturedUrl,
+        capturedHeaders,
+        "PUT",
+        UPSTREAM_SECRET,
+      );
+      expect(signedForPut).toBe(true);
+
+      // Sanity check: the GET-signed header would NOT verify
+      const signedForGet = await verifyUpstreamSig4(
+        capturedUrl,
+        capturedHeaders,
+        "GET",
+        UPSTREAM_SECRET,
+      );
+      expect(signedForGet).toBe(false);
+    } finally {
+      globalThis.fetch = savedFetch;
+    }
+  });
+});
