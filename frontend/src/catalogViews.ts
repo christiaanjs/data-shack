@@ -42,6 +42,17 @@ export interface RegisterResult {
   failed: string[];
 }
 
+export async function fetchCatalogMetadata(
+  workerBase: string,
+  getAuthHeaders: () => Promise<Record<string, string>>,
+): Promise<CatalogTableWithSnapshot[]> {
+  const headers = await getAuthHeaders();
+  const res = await fetch(`${workerBase}/catalog/snapshots-latest`, { headers });
+  if (!res.ok) throw new Error(`Catalog fetch failed: ${res.status}`);
+  const { tables } = (await res.json()) as { tables: CatalogTableWithSnapshot[] };
+  return tables;
+}
+
 /**
  * Fetches all catalog tables with their latest snapshots in a single request,
  * then creates DuckDB views so SQL can reference tables by name.

@@ -85,9 +85,22 @@ function buildListXml(
   return `<?xml version="1.0" encoding="UTF-8"?><ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Name>${escXml(bucket)}</Name><Prefix>${escXml(prefix)}</Prefix><KeyCount>${objects.length}</KeyCount><MaxKeys>1000</MaxKeys><IsTruncated>false</IsTruncated>${contents}</ListBucketResult>`;
 }
 
+function parseCompleteMultipartXml(xml: string): Array<{ partNumber: number; etag: string }> {
+  const parts: Array<{ partNumber: number; etag: string }> = [];
+  const partRe = /<Part>([\s\S]*?)<\/Part>/gi;
+  for (const match of xml.matchAll(partRe)) {
+    const inner = match[1]!;
+    const pn = Number(/<PartNumber>(\d+)<\/PartNumber>/i.exec(inner)?.[1] ?? "0");
+    // ETag may or may not be quoted in the XML body
+    const rawEtag = /<ETag>"?([^"<]+)"?<\/ETag>/i.exec(inner)?.[1] ?? "";
+    if (pn > 0 && rawEtag) parts.push({ partNumber: pn, etag: rawEtag });
+  }
+  return parts;
+}
+
 function addCorsHeaders(headers: Headers): void {
   headers.set("Access-Control-Allow-Origin", "*");
-  headers.set("Access-Control-Allow-Methods", "GET, PUT, HEAD, OPTIONS");
+  headers.set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, HEAD, OPTIONS");
   headers.set(
     "Access-Control-Allow-Headers",
     "Authorization, Content-Type, Range, X-Amz-Date, X-Amz-Content-SHA256, X-Host-Override",
@@ -179,7 +192,7 @@ type S3ProxyRequest = {
   cred: ProxyCred;
   effectivePrefix: string;
   reqUrl: URL;
-  method: "GET" | "HEAD" | "PUT";
+  method: "GET" | "HEAD" | "PUT" | "POST" | "DELETE";
 };
 
 // Validates auth, resolves the KV credential, and enforces path-prefix scoping.
@@ -229,15 +242,15 @@ async function parseS3ProxyRequest(
     cred,
     effectivePrefix,
     reqUrl,
-    method: req.method as "GET" | "HEAD" | "PUT",
+    method: req.method as "GET" | "HEAD" | "PUT" | "POST" | "DELETE",
   };
 }
 
-storageRouter.on(["GET", "HEAD", "PUT", "OPTIONS"], "/s3proxy/*", async (c) => {
+storageRouter.on(["GET", "HEAD", "PUT", "POST", "DELETE", "OPTIONS"], "/s3proxy/*", async (c) => {
   if (c.req.method === "OPTIONS") {
     const headers = new Headers();
     addCorsHeaders(headers);
-    headers.set("Allow", "GET, PUT, HEAD, OPTIONS");
+    headers.set("Allow", "GET, POST, PUT, DELETE, HEAD, OPTIONS");
     return new Response(null, { status: 200, headers });
   }
 
@@ -264,6 +277,47 @@ storageRouter.on(["GET", "HEAD", "PUT", "OPTIONS"], "/s3proxy/*", async (c) => {
     }
 
     const r2Key = r2BoundKey(userId, key);
+    const uploadId = reqUrl.searchParams.get("uploadId");
+
+    // Multipart: initiate (POST ?uploads=)
+    if (method === "POST" && reqUrl.searchParams.has("uploads")) {
+      const upload = await c.env.R2.createMultipartUpload(r2Key);
+      const xml = `<?xml version="1.0" encoding="UTF-8"?><InitiateMultipartUploadResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Bucket>${escXml(bucket)}</Bucket><Key>${escXml(key)}</Key><UploadId>${escXml(upload.uploadId)}</UploadId></InitiateMultipartUploadResult>`;
+      const h = new Headers({ "Content-Type": "application/xml" });
+      addCorsHeaders(h);
+      return new Response(xml, { headers: h });
+    }
+
+    // Multipart: complete (POST ?uploadId=X)
+    if (method === "POST" && uploadId) {
+      const parts = parseCompleteMultipartXml(await c.req.text());
+      const mpu = c.env.R2.resumeMultipartUpload(r2Key, uploadId);
+      const result = await mpu.complete(parts);
+      const xml = `<?xml version="1.0" encoding="UTF-8"?><CompleteMultipartUploadResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Bucket>${escXml(bucket)}</Bucket><Key>${escXml(key)}</Key><ETag>"${escXml(result.httpEtag ?? "")}"</ETag></CompleteMultipartUploadResult>`;
+      const h = new Headers({ "Content-Type": "application/xml" });
+      addCorsHeaders(h);
+      return new Response(xml, { headers: h });
+    }
+
+    // Multipart: abort (DELETE ?uploadId=X)
+    if (method === "DELETE" && uploadId) {
+      const mpu = c.env.R2.resumeMultipartUpload(r2Key, uploadId);
+      await mpu.abort();
+      const h = new Headers();
+      addCorsHeaders(h);
+      return new Response(null, { status: 204, headers: h });
+    }
+
+    // Multipart: upload part (PUT ?partNumber=N&uploadId=X)
+    if (method === "PUT" && uploadId && reqUrl.searchParams.has("partNumber")) {
+      const partNumber = Number(reqUrl.searchParams.get("partNumber"));
+      const mpu = c.env.R2.resumeMultipartUpload(r2Key, uploadId);
+      const part = await mpu.uploadPart(partNumber, c.req.raw.body!);
+      const h = new Headers();
+      h.set("ETag", `"${part.etag}"`);
+      addCorsHeaders(h);
+      return new Response(null, { status: 200, headers: h });
+    }
 
     if (method === "PUT") {
       const body = c.req.raw.body;
@@ -499,6 +553,116 @@ storageRouter.on(["GET", "HEAD", "PUT", "OPTIONS"], "/s3proxy/*", async (c) => {
     const listHeaders = new Headers({ "Content-Type": "application/xml" });
     addCorsHeaders(listHeaders);
     return new Response(upstream.body, { status: upstream.status, headers: listHeaders });
+  }
+
+  // Multipart: initiate (POST ?uploads=)
+  if (method === "POST" && reqUrl.searchParams.has("uploads")) {
+    const { url: signedUrl, headers: signedHeaders } = await signS3Request({
+      method: "POST",
+      endpoint: config.endpoint,
+      bucket: config.bucket,
+      key,
+      region: config.region,
+      accessKeyId: config.accessKeyId,
+      secretAccessKey: config.secretAccessKey,
+      queryParams: { uploads: "" },
+    });
+    let upstream: Response;
+    try {
+      upstream = await fetch(signedUrl, { method: "POST", headers: signedHeaders });
+    } catch {
+      return corsError(502, "Bad Gateway");
+    }
+    const h = new Headers({ "Content-Type": "application/xml" });
+    addCorsHeaders(h);
+    return new Response(upstream.body, { status: upstream.status, headers: h });
+  }
+
+  // Multipart: complete (POST ?uploadId=X)
+  if (method === "POST" && reqUrl.searchParams.has("uploadId")) {
+    const mpUploadId = reqUrl.searchParams.get("uploadId")!;
+    const { url: signedUrl, headers: signedHeaders } = await signS3Request({
+      method: "POST",
+      endpoint: config.endpoint,
+      bucket: config.bucket,
+      key,
+      region: config.region,
+      accessKeyId: config.accessKeyId,
+      secretAccessKey: config.secretAccessKey,
+      queryParams: { uploadId: mpUploadId },
+    });
+    let upstream: Response;
+    try {
+      upstream = await fetch(signedUrl, {
+        method: "POST",
+        headers: { ...signedHeaders, "Content-Type": "application/xml" },
+        body: c.req.raw.body,
+      });
+    } catch {
+      return corsError(502, "Bad Gateway");
+    }
+    const h = new Headers({ "Content-Type": "application/xml" });
+    addCorsHeaders(h);
+    return new Response(upstream.body, { status: upstream.status, headers: h });
+  }
+
+  // Multipart: abort (DELETE ?uploadId=X)
+  if (method === "DELETE" && reqUrl.searchParams.has("uploadId")) {
+    const mpUploadId = reqUrl.searchParams.get("uploadId")!;
+    const { url: signedUrl, headers: signedHeaders } = await signS3Request({
+      method: "DELETE",
+      endpoint: config.endpoint,
+      bucket: config.bucket,
+      key,
+      region: config.region,
+      accessKeyId: config.accessKeyId,
+      secretAccessKey: config.secretAccessKey,
+      queryParams: { uploadId: mpUploadId },
+    });
+    let upstream: Response;
+    try {
+      upstream = await fetch(signedUrl, { method: "DELETE", headers: signedHeaders });
+    } catch {
+      return corsError(502, "Bad Gateway");
+    }
+    const h = new Headers();
+    addCorsHeaders(h);
+    return new Response(null, { status: upstream.status, headers: h });
+  }
+
+  // Multipart: upload part (PUT ?partNumber=N&uploadId=X)
+  if (
+    method === "PUT" &&
+    reqUrl.searchParams.has("partNumber") &&
+    reqUrl.searchParams.has("uploadId")
+  ) {
+    const partNumber = reqUrl.searchParams.get("partNumber")!;
+    const mpUploadId = reqUrl.searchParams.get("uploadId")!;
+    const { url: signedUrl, headers: signedHeaders } = await signS3Request({
+      method: "PUT",
+      endpoint: config.endpoint,
+      bucket: config.bucket,
+      key,
+      region: config.region,
+      accessKeyId: config.accessKeyId,
+      secretAccessKey: config.secretAccessKey,
+      queryParams: { partNumber, uploadId: mpUploadId },
+    });
+    let upstream: Response;
+    try {
+      upstream = await fetch(signedUrl, {
+        method: "PUT",
+        headers: signedHeaders,
+        body: c.req.raw.body,
+      });
+    } catch {
+      return corsError(502, "Bad Gateway");
+    }
+    const h = new Headers();
+    const partEtag = upstream.headers.get("ETag");
+    if (partEtag) h.set("ETag", partEtag);
+    addCorsHeaders(h);
+    return new Response(null, { status: upstream.status, headers: h });
   }
 
   const isHead = method === "HEAD";

@@ -85,7 +85,7 @@ describe("POST /mcp - MCP server", () => {
     expect(res.status).toBe(202);
   });
 
-  it("tools/list returns four tools", async () => {
+  it("tools/list returns five tools", async () => {
     const res = await SELF.fetch("http://localhost/mcp", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...DEV_HEADERS },
@@ -93,12 +93,13 @@ describe("POST /mcp - MCP server", () => {
     });
     expect(res.status).toBe(200);
     const data = (await res.json()) as { result: { tools: Array<{ name: string }> } };
-    expect(data.result.tools).toHaveLength(4);
+    expect(data.result.tools).toHaveLength(8);
     const names = data.result.tools.map((t) => t.name);
     expect(names).toContain("get_warehouse_schema");
     expect(names).toContain("run_query");
     expect(names).toContain("read_data");
     expect(names).toContain("list_data_sources");
+    expect(names).toContain("submit_dashboard");
   });
 
   it("get_warehouse_schema returns empty schema when no tables exist", async () => {

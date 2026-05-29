@@ -10,6 +10,15 @@ import { SessionDO } from "./session/do.ts";
 export { SessionDO };
 import { decryptConfig, encryptConfig } from "./crypto.ts";
 import {
+  deleteDashboard,
+  getDashboardByIdOrSlug,
+  listDashboards,
+  resolveUniqueSlug,
+  slugify,
+  snapshotDashboard,
+  updateDashboard,
+} from "./db/dashboards.ts";
+import {
   advanceNextRunAt,
   deleteLoadJob,
   getLoadJob,
@@ -37,6 +46,13 @@ import { validateDateRangeConfig, validatePaginationConfig } from "./loaders/con
 import { refreshGoogleAccessToken, runGoogleSheetsLoadJob } from "./loaders/google-sheets.ts";
 import { runHttpLoadJob } from "./loaders/http.ts";
 import { mcpHandler } from "./mcp/server.ts";
+import {
+  fetchStorageUri,
+  inferSnapshotFormat,
+  isProxyReadableFormat,
+  isProxyReadableUri,
+  resolveTableSnapshot,
+} from "./storage/catalog-fetch.ts";
 import { parseHttpDsUri, signDataSourceToken, verifyDataSourceToken } from "./storage/resolve.ts";
 import { storageRouter } from "./storage/router.ts";
 import type { Env } from "./types.ts";
@@ -900,6 +916,146 @@ app.delete("/api/triggers/:id", requireAuth, async (c) => {
     { method: "DELETE" },
   );
   return new Response(res.body, { status: res.status });
+});
+
+// ── Dashboard endpoints ───────────────────────────────────────────────────
+
+app.get("/api/dashboards", requireAuth, async (c) => {
+  const dashboards = await listDashboards(c.env.DB, c.get("userId"));
+  return c.json({ dashboards });
+});
+
+app.get("/api/dashboards/:id", requireAuth, async (c) => {
+  const row = await getDashboardByIdOrSlug(c.env.DB, c.req.param("id"), c.get("userId"));
+  if (!row) return c.json({ error: "not found" }, 404);
+  return c.json({
+    id: row.id,
+    title: row.title,
+    slug: row.slug,
+    artifact_source: row.artifact_source,
+    queries: JSON.parse(row.queries) as string[],
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  });
+});
+
+app.patch("/api/dashboards/:id", requireAuth, async (c) => {
+  const userId = c.get("userId");
+  const row = await getDashboardByIdOrSlug(c.env.DB, c.req.param("id"), userId);
+  if (!row) return c.json({ error: "not found" }, 404);
+
+  let body: { title?: unknown; artifact_source?: unknown; queries?: unknown; slug?: unknown };
+  try {
+    body = (await c.req.json()) as typeof body;
+  } catch {
+    return c.json({ error: "invalid JSON" }, 400);
+  }
+
+  const updates: {
+    title?: string;
+    artifactSource?: string;
+    queries?: string[];
+    slug?: string | null;
+  } = {};
+
+  if (body.title !== undefined) {
+    if (typeof body.title !== "string" || !body.title.trim()) {
+      return c.json({ error: "title must be a non-empty string" }, 400);
+    }
+    updates.title = body.title.trim();
+  }
+
+  if (body.artifact_source !== undefined) {
+    if (typeof body.artifact_source !== "string" || !body.artifact_source.trim()) {
+      return c.json({ error: "artifact_source must be a non-empty string" }, 400);
+    }
+    if (new TextEncoder().encode(body.artifact_source).length > 50_000) {
+      return c.json({ error: "artifact_source exceeds 50 KB limit" }, 400);
+    }
+    updates.artifactSource = body.artifact_source;
+  }
+
+  if (body.queries !== undefined) {
+    if (
+      !Array.isArray(body.queries) ||
+      (body.queries as unknown[]).some((q) => typeof q !== "string")
+    ) {
+      return c.json({ error: "queries must be an array of strings" }, 400);
+    }
+    updates.queries = body.queries as string[];
+  }
+
+  if (body.slug !== undefined) {
+    if (body.slug === null) {
+      updates.slug = null;
+    } else if (typeof body.slug === "string") {
+      const base = body.slug.trim() ? slugify(body.slug) : slugify(updates.title ?? row.title);
+      updates.slug = await resolveUniqueSlug(c.env.DB, userId, base, row.id);
+    } else {
+      return c.json({ error: "slug must be a string or null" }, 400);
+    }
+  }
+
+  if (Object.keys(updates).length === 0) {
+    return c.json({ error: "at least one field is required" }, 400);
+  }
+
+  await snapshotDashboard(c.env.DB, row, userId, "update");
+  await updateDashboard(c.env.DB, row.id, userId, updates);
+
+  const updated = await getDashboardByIdOrSlug(c.env.DB, row.id, userId);
+  if (!updated) return c.json({ error: "not found" }, 404);
+
+  return c.json({
+    id: updated.id,
+    title: updated.title,
+    slug: updated.slug,
+    artifact_source: updated.artifact_source,
+    queries: JSON.parse(updated.queries) as string[],
+    created_at: updated.created_at,
+    updated_at: updated.updated_at,
+  });
+});
+
+app.delete("/api/dashboards/:id", requireAuth, async (c) => {
+  const userId = c.get("userId");
+  const row = await getDashboardByIdOrSlug(c.env.DB, c.req.param("id"), userId);
+  if (!row) return new Response("Not Found", { status: 404 });
+  await snapshotDashboard(c.env.DB, row, userId, "delete");
+  await deleteDashboard(c.env.DB, row.id, userId);
+  return new Response(null, { status: 204 });
+});
+
+// ── Table data proxy (proxy mode for dashboards without DuckDB) ───────────
+// Streams raw JSON/NDJSON from storage; format validation and JSON parsing happen client-side.
+
+app.get("/api/table-data/:tableName", requireAuth, async (c) => {
+  const userId = c.get("userId");
+  const snap = await resolveTableSnapshot(c.req.param("tableName"), catalogStub(c.env, userId));
+  if (!snap) return c.json({ error: "Table not found or no snapshot" }, 404);
+
+  const effectiveFormat = inferSnapshotFormat(snap.format, snap.uri);
+  if (!isProxyReadableFormat(effectiveFormat)) {
+    return c.json(
+      {
+        error: `${effectiveFormat} format requires DuckDB. Enable DuckDB to query this table.`,
+      },
+      400,
+    );
+  }
+  if (!isProxyReadableUri(snap.uri)) {
+    return c.json({ error: "Storage backend not supported in proxy mode" }, 400);
+  }
+
+  const dataRes = await fetchStorageUri(snap.uri, userId, c.env);
+  if (!dataRes.ok) {
+    return c.json(
+      { error: `Storage fetch failed (${dataRes.status})` },
+      dataRes.status as 400 | 404 | 502,
+    );
+  }
+  const contentType = effectiveFormat === "ndjson" ? "application/x-ndjson" : "application/json";
+  return new Response(dataRes.body, { headers: { "Content-Type": contentType } });
 });
 
 // ── Root ─────────────────────────────────────────────────────────────────
