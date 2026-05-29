@@ -337,7 +337,7 @@ describe("S3 proxy r2-bound OPTIONS", () => {
     expect(res.headers.get("Access-Control-Allow-Headers")).toContain("Content-Type");
     expect(res.headers.get("Access-Control-Allow-Headers")).toContain("X-Host-Override");
     expect(res.headers.get("Access-Control-Max-Age")).toBe("86400");
-    expect(res.headers.get("Allow")).toBe("GET, PUT, HEAD, OPTIONS");
+    expect(res.headers.get("Allow")).toBe("GET, POST, PUT, DELETE, HEAD, OPTIONS");
     expect(await res.text()).toBe(""); // No body
   });
 
