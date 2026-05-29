@@ -330,7 +330,9 @@ describe("S3 proxy r2-bound OPTIONS", () => {
 
     expect(res.status).toBe(200);
     expect(res.headers.get("Access-Control-Allow-Origin")).toBe("*");
-    expect(res.headers.get("Access-Control-Allow-Methods")).toBe("GET, PUT, HEAD, OPTIONS");
+    expect(res.headers.get("Access-Control-Allow-Methods")).toBe(
+      "GET, POST, PUT, DELETE, HEAD, OPTIONS",
+    );
     expect(res.headers.get("Access-Control-Allow-Headers")).toContain("Authorization");
     expect(res.headers.get("Access-Control-Allow-Headers")).toContain("Content-Type");
     expect(res.headers.get("Access-Control-Allow-Headers")).toContain("X-Host-Override");

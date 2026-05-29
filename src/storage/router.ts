@@ -87,7 +87,7 @@ function buildListXml(
 
 function addCorsHeaders(headers: Headers): void {
   headers.set("Access-Control-Allow-Origin", "*");
-  headers.set("Access-Control-Allow-Methods", "GET, PUT, HEAD, OPTIONS");
+  headers.set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, HEAD, OPTIONS");
   headers.set(
     "Access-Control-Allow-Headers",
     "Authorization, Content-Type, Range, X-Amz-Date, X-Amz-Content-SHA256, X-Host-Override",
