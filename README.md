@@ -36,7 +36,12 @@ A personal data integration platform built on Cloudflare that brings your data t
 | Live view sync: `catalogWs.ts` + `refreshSingleView`; amber navbar flash; Promise-chained catalog readiness for transform jobs | ✅ Done |
 | Batch catalog init: single LEFT JOIN replaces N+1 fetch; `http-ds://` URIs batch-resolved before view creation | ✅ Done |
 | Catalog state lifted to App: persists across tab switches; `QueryPanel` receives state as props | ✅ Done |
-| Dashboarding platform | Not started |
+| Dashboard platform: `submit_dashboard` MCP tool (50 KB limit, sandbox iframe security model); REST list/get/delete | ✅ Done |
+| Dashboard viewer: sandboxed iframe (React 18 + Babel standalone + Recharts, pinned versions); re-runs on catalog commit | ✅ Done |
+| Proxy mode: `GET /api/table-data/:tableName` streams raw JSON/NDJSON from catalog without DuckDB | ✅ Done |
+| URL routing with preact-iso; direct links to dashboards (`/dashboards/dash_xxx`) | ✅ Done |
+| DuckDB session toggle: default off on coarse-pointer/mobile; persisted in localStorage | ✅ Done |
+| `catalog://tableName` URI in `read_data` MCP tool; `get_warehouse_schema` direct-access indicator per table | ✅ Done |
 
 See [`build-plan.md`](./build-plan.md) for the full sequenced plan.
 
@@ -224,26 +229,34 @@ Supported data sources:
 An MCP server exposes the warehouse to AI clients like Claude. Because the catalog DO holds all schema and snapshot metadata, many operations do not require an active browser session:
 
 Currently implemented:
-- `get_warehouse_schema` — table list, schemas, snapshot metadata (no browser session required)
+- `get_warehouse_schema` — table list, schemas, snapshot metadata; includes a direct-access indicator per table (no browser session required)
 - `list_data_sources` — lists HTTP credentials with their names and base URLs (no browser session required)
 - `run_query` — execute SQL in the browser DuckDB session; requires an active browser tab
-- `read_data` — read JSON/NDJSON directly from an `http-ds://` or `r2://` URI (no browser session required, 1 MB limit)
+- `read_data` — read JSON/NDJSON from an `http-ds://`, `r2://`, or `catalog://tableName` URI (no browser session required, 1 MB limit)
+- `submit_dashboard` — persist a React + Recharts artifact (up to 50 KB) with bound SQL queries; renders in a sandboxed iframe in the Dashboards tab (no browser session required)
 
 Planned (not yet implemented):
 - `list_etl_jobs` — active job definitions and schedules
 - `create_load_job` — define a new source connector and cron schedule
 - `create_transform_job` — define a derived table with its SQL and input dependencies
 - `pause_etl_job` — disable a job without deleting it
-- `submit_dashboard` — persist a Claude-authored dashboard artifact
 
 ### Dashboarding Platform
 
-Dashboards are React artifacts with props bound to SQL queries. The authoring workflow:
+Dashboards are React artifacts with props bound to SQL queries, persisted to D1 and rendered in a sandboxed iframe.
 
+**Authoring workflow:**
 1. The user iterates on visualisations and calculations with Claude inside Claude.ai, with live warehouse data via the MCP server and browser session.
-2. Once satisfied, Claude calls `submit_dashboard` via MCP.
-3. The Worker proxy validates the artifact for XSS risks before persisting it to D1.
-4. The dashboard viewer in the Pages frontend loads persisted dashboards, subscribes to the catalog DO WebSocket for the tables their queries touch, and re-runs bound queries automatically on commit.
+2. Once satisfied, Claude calls `submit_dashboard` via MCP — the Worker validates the artifact size (50 KB limit) and persists it to D1 alongside the bound SQL queries.
+3. Navigate to the **Dashboards** tab to see the list of saved dashboards.
+4. Click **Open** to load a dashboard: the Worker fetches the detail, runs the bound queries (in DuckDB if the session toggle is on, or via the proxy endpoint if it's off), and renders the artifact in a `sandbox="allow-scripts"` iframe. The `allow-same-origin` flag is intentionally absent — the iframe cannot access parent-origin cookies, localStorage, or sessionStorage.
+5. The dashboard subscribes to the catalog WebSocket and re-runs its queries automatically whenever a relevant table commits.
+
+**Dashboard URL routing:** Each dashboard has a direct URL (`/dashboards/dash_xxx`). Sharing the link opens the viewer directly.
+
+**Proxy mode:** When the DuckDB session toggle is off (default on mobile), dashboards fall back to `GET /api/table-data/:tableName`, which streams raw JSON/NDJSON from storage through the Worker. Single-table queries only — JOINs require DuckDB.
+
+**Iframe runtime:** React 18.3.1, Babel standalone 7.26.4, Recharts 2.13.3 — all pinned to exact versions to prevent silent breakage.
 
 ## Storage Access Pattern
 
@@ -280,7 +293,6 @@ Writable URLs are only resolved for URIs matching the user's namespace and expec
 
 ## Open Questions
 
-- Validation model for user-submitted dashboard artifacts (CSP, sandboxing approach, allowed React APIs)
 - Whether to surface pending transform jobs in the UI with progress indicators or run them silently in the background
 - Compaction granularity — per-sync, per-day, or per-month Parquet files as the default partition scheme
 - Whether to expose time-travel queries (querying a table at a past commit ID) via the MCP server or only in the browser UI

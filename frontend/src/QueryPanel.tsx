@@ -15,6 +15,7 @@ interface QueryPanelProps {
   // DuckDB state — managed by App.
   dbReady: boolean;
   dbError: string | null;
+  sessionEnabled: boolean;
 }
 
 interface QueryResult {
@@ -40,6 +41,7 @@ export function QueryPanel({
   onRefreshCatalog,
   dbReady,
   dbError,
+  sessionEnabled,
 }: QueryPanelProps) {
   const [sql, setSql] = useState("");
   const [queryResult, setQueryResult] = useState<QueryResult | null>(null);
@@ -122,10 +124,15 @@ export function QueryPanel({
           <span>DuckDB error: {dbError}</span>
         </div>
       )}
-      {!dbReady && !dbError && (
+      {sessionEnabled && !dbReady && !dbError && (
         <div class="flex items-center gap-3 text-base-content/60 py-2">
           <span class="loading loading-spinner loading-sm" />
           <span>Initialising DuckDB…</span>
+        </div>
+      )}
+      {!sessionEnabled && (
+        <div class="alert alert-info py-2 text-sm">
+          <span>DuckDB is disabled — enable the toggle in the navbar to run queries.</span>
         </div>
       )}
 
@@ -138,7 +145,7 @@ export function QueryPanel({
               type="button"
               class="btn btn-xs btn-ghost"
               onClick={() => onRefreshCatalog()}
-              disabled={catalogLoading || !dbReady}
+              disabled={catalogLoading || (sessionEnabled && !dbReady)}
               title="Reload catalog and re-register views"
             >
               {catalogLoading ? <span class="loading loading-spinner loading-xs" /> : "↺"}
@@ -282,7 +289,7 @@ export function QueryPanel({
               type="button"
               class="btn btn-primary btn-sm"
               onClick={handleRunQuery}
-              disabled={querying || !dbReady}
+              disabled={querying || !sessionEnabled || !dbReady}
             >
               {querying && <span class="loading loading-spinner loading-xs" />}
               {querying ? "Running…" : "Run Query"}

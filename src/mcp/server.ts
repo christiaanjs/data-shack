@@ -1,12 +1,25 @@
-import { decryptConfig } from "../crypto.ts";
+import {
+  getDashboardByIdOrSlug,
+  insertDashboard,
+  listDashboards,
+  resolveUniqueSlug,
+  slugify,
+  snapshotDashboard,
+  updateDashboard,
+} from "../db/dashboards.ts";
 import {
   getCredentialByNameOrId,
   getCredentialConfig,
-  getStorageBackendByNameOrId,
   listHttpCredentials,
 } from "../db/settings.ts";
 import { decryptHttpConfig, resolveHeaderTemplates } from "../http-config.ts";
-import { signS3Request } from "../storage/resolve.ts";
+import {
+  fetchStorageUri,
+  inferSnapshotFormat,
+  isProxyReadableFormat,
+  isProxyReadableUri,
+  resolveTableSnapshot,
+} from "../storage/catalog-fetch.ts";
 import type { Env } from "../types.ts";
 
 const PROTOCOL_VERSION = "2025-03-26";
@@ -60,17 +73,99 @@ const TOOLS: Tool[] = [
   {
     name: "read_data",
     description:
-      "Read JSON or NDJSON data directly from a URI without requiring a browser session. Supports http-ds://credentialId/path for HTTP data sources and r2://backendName/key for R2 storage (both r2-bound and r2-s3compat backends). Size limit: 1 MB.",
+      "Read JSON or NDJSON data directly from a URI without requiring a browser session. Supports http-ds://credentialId/path for HTTP data sources, r2://backendName/key for R2 storage (both r2-bound and r2-s3compat backends), and catalog://tableName to read the latest snapshot of a catalog table from its storage backend. Size limit: 1 MB.",
     inputSchema: {
       type: "object",
       properties: {
         uri: {
           type: "string",
           description:
-            "URI to read from. Examples: http-ds://cred_abc/accounts, r2://data-shack/reference/config.json",
+            "URI to read from. Examples: http-ds://cred_abc/accounts, r2://data-shack/reference/config.json, catalog://transactions",
         },
       },
       required: ["uri"],
+    },
+  },
+  {
+    name: "submit_dashboard",
+    description:
+      "Persist a React dashboard artifact with bound SQL queries so it survives beyond this conversation. Call this once you and the user have finalised a visualisation. The component named `Dashboard` receives `props.data`: an array where `data[i]` is an array of row objects (plain key/value pairs) for `queries[i]`. Can use React hooks and Recharts (BarChart, LineChart, PieChart, AreaChart, etc.) which are pre-loaded in the rendering environment.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        title: {
+          type: "string",
+          description: "Dashboard title shown in the UI",
+        },
+        artifact_source: {
+          type: "string",
+          description:
+            "JSX source for a React component. Must be the default export: `export default function Dashboard({ data }) { ... }`. `data[i]` is an array of row objects for `queries[i]`. Use standard ES module imports — `import { useState } from 'react'`, `import { BarChart, RadarChart } from 'recharts'`, etc. Any named export from `react`, `react-dom`, or `recharts` is importable.",
+        },
+        queries: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "SQL queries executed against the warehouse. Results are passed as `data[0]`, `data[1]`, etc.",
+        },
+        slug: {
+          type: "string",
+          description:
+            "URL-friendly slug for referencing the dashboard (e.g. spending-breakdown). Auto-generated from the title if omitted.",
+        },
+      },
+      required: ["title", "artifact_source", "queries"],
+    },
+  },
+  {
+    name: "list_dashboards",
+    description: "List all saved dashboards. Returns id, slug, title, and creation date for each.",
+    inputSchema: { type: "object", properties: {}, required: [] },
+  },
+  {
+    name: "get_dashboard",
+    description:
+      "Retrieve the full source code and queries of a saved dashboard by its id or slug. Use this before updating a dashboard.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id_or_slug: {
+          type: "string",
+          description: "Dashboard id (dash_...) or URL slug (e.g. spending-breakdown)",
+        },
+      },
+      required: ["id_or_slug"],
+    },
+  },
+  {
+    name: "update_dashboard",
+    description:
+      "Update an existing dashboard's title, artifact source, queries, or slug. The previous version is automatically snapshotted. At least one field must be provided.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id_or_slug: {
+          type: "string",
+          description: "Dashboard id (dash_...) or slug to update",
+        },
+        title: { type: "string", description: "New title" },
+        artifact_source: {
+          type: "string",
+          description:
+            "New JSX source for the Dashboard component. Same ES module import rules as submit_dashboard.",
+        },
+        queries: {
+          type: "array",
+          items: { type: "string" },
+          description: "New SQL queries. Replaces the existing queries array.",
+        },
+        slug: {
+          type: "string",
+          description:
+            "New URL slug. Will be slugified and made unique. Pass empty string to clear the slug.",
+        },
+      },
+      required: ["id_or_slug"],
     },
   },
 ];
@@ -170,7 +265,27 @@ export async function mcpHandler(
       if (typeof uri !== "string" || !uri.trim()) {
         return respondError(-32602, "uri is required");
       }
-      return handleReadData(respond, respondError, uri, userId, env);
+      return handleReadData(respond, respondError, uri, userId, env, catalogStub);
+    }
+
+    if (toolName === "submit_dashboard") {
+      return handleSubmitDashboard(respond, respondError, args, userId, env);
+    }
+
+    if (toolName === "list_dashboards") {
+      return handleListDashboards(respond, userId, env);
+    }
+
+    if (toolName === "get_dashboard") {
+      const idOrSlug = args.id_or_slug;
+      if (typeof idOrSlug !== "string" || !idOrSlug.trim()) {
+        return respondError(-32602, "id_or_slug is required");
+      }
+      return handleGetDashboard(respond, respondError, idOrSlug.trim(), userId, env);
+    }
+
+    if (toolName === "update_dashboard") {
+      return handleUpdateDashboard(respond, respondError, args, userId, env);
     }
 
     return respondError(-32601, `Unknown tool: ${toolName}`);
@@ -222,9 +337,14 @@ async function handleGetSchema(
       continue;
     }
     const latest = snapshots[0]!;
+    const effectiveFormat = inferSnapshotFormat(latest.format, latest.uri);
+    const directAccess = isProxyReadableFormat(effectiveFormat) && isProxyReadableUri(latest.uri);
     lines.push(`  Latest snapshot: ${latest.uri}`);
     if (latest.format) lines.push(`  Format: ${latest.format}`);
     lines.push(`  Backend: ${latest.storage_backend}`);
+    lines.push(
+      `  Direct access (no browser session): ${directAccess ? `yes — use read_data with uri catalog://${table.name}` : "no — requires run_query with active browser session"}`,
+    );
     lines.push(`  Snapshots: ${snapshots.length} total\n`);
   }
 
@@ -333,16 +453,28 @@ async function handleReadData(
   uri: string,
   userId: string,
   env: Env,
+  catalogStub: ReturnType<DurableObjectNamespace["get"]>,
 ): Promise<Response> {
   if (uri.startsWith("http-ds://")) {
     return handleReadHttpDs(respond, respondError, uri, userId, env);
   }
 
   if (uri.startsWith("r2://") || uri.startsWith("r2-s3compat://")) {
-    return handleReadR2(respond, respondError, uri, userId, env);
+    return readStorageUri(respond, respondError, uri, userId, env);
   }
 
-  return respondError(-32602, "Unsupported URI scheme. Supported: http-ds://, r2://");
+  if (uri.startsWith("catalog://")) {
+    const tableName = uri.slice("catalog://".length).trim();
+    if (!tableName) return respondError(-32602, "catalog:// URI must include a table name");
+    const snap = await resolveTableSnapshot(tableName, catalogStub);
+    if (!snap) return respondError(-32602, `Table not found in catalog: ${tableName}`);
+    if (!isProxyReadableUri(snap.uri)) {
+      return respondError(-32602, `Storage scheme not supported for direct read: ${snap.uri}`);
+    }
+    return readStorageUri(respond, respondError, snap.uri, userId, env);
+  }
+
+  return respondError(-32602, "Unsupported URI scheme. Supported: http-ds://, r2://, catalog://");
 }
 
 async function handleReadHttpDs(
@@ -383,85 +515,19 @@ async function handleReadHttpDs(
   return readAndReturnJson(respond, respondError, upstream);
 }
 
-async function handleReadR2(
+async function readStorageUri(
   respond: (r: unknown) => Response,
   respondError: (code: number, msg: string) => Response,
   uri: string,
   userId: string,
   env: Env,
 ): Promise<Response> {
-  const scheme = uri.startsWith("r2://") ? "r2://" : "r2-s3compat://";
-  const rest = uri.slice(scheme.length);
-  const slash = rest.indexOf("/");
-  if (slash === -1) return respondError(-32602, "Invalid URI: missing key after backend name");
-
-  const backendName = rest.slice(0, slash);
-  const key = rest.slice(slash + 1);
-
-  // Built-in R2 binding.
-  if (backendName === "r2-bound" || backendName === "data-shack") {
-    const obj = await env.R2.get(`users/${userId}/${key}`);
-    if (!obj) return respondError(-32602, `Object not found: ${uri}`);
-    if (obj.size > MAX_READ_BYTES) {
-      return respondError(-32602, `Object too large (${obj.size} bytes, limit 1 MB)`);
-    }
-    const text = await obj.text();
-    return parseAndRespond(respond, respondError, text, obj.httpMetadata?.contentType);
+  const dataRes = await fetchStorageUri(uri, userId, env);
+  if (!dataRes.ok) {
+    if (dataRes.status === 404) return respondError(-32602, `Object not found: ${uri}`);
+    return respondError(-32603, `Storage fetch failed (${dataRes.status})`);
   }
-
-  // Named backend via D1 lookup.
-  const backend = await getStorageBackendByNameOrId(env.DB, backendName, userId);
-  if (!backend) return respondError(-32602, `Storage backend not found: ${backendName}`);
-
-  if (backend.type !== "r2-s3compat") {
-    return respondError(-32602, `Direct read not supported for backend type: ${backend.type}`);
-  }
-
-  let s3Config: {
-    bucket: string;
-    region: string;
-    endpoint: string;
-    accessKeyId: string;
-    secretAccessKey: string;
-  };
-  try {
-    s3Config = JSON.parse(
-      await decryptConfig(backend.encrypted_config, env.JWT_SECRET),
-    ) as typeof s3Config;
-  } catch {
-    return respondError(-32603, "Failed to decrypt backend config");
-  }
-
-  let signedUrl: string;
-  let signedHeaders: Record<string, string>;
-  try {
-    const signed = await signS3Request({
-      method: "GET",
-      endpoint: s3Config.endpoint,
-      bucket: s3Config.bucket,
-      key,
-      region: s3Config.region,
-      accessKeyId: s3Config.accessKeyId,
-      secretAccessKey: s3Config.secretAccessKey,
-    });
-    signedUrl = signed.url;
-    signedHeaders = signed.headers;
-  } catch {
-    return respondError(-32603, "Failed to sign S3 request");
-  }
-
-  let upstream: Response;
-  try {
-    upstream = await fetch(signedUrl, { method: "GET", headers: signedHeaders });
-  } catch {
-    return respondError(-32603, "Failed to fetch from S3-compatible backend");
-  }
-
-  if (!upstream.ok) {
-    return respondError(-32603, `Backend returned ${upstream.status}`);
-  }
-
-  return readAndReturnJson(respond, respondError, upstream);
+  return readAndReturnJson(respond, respondError, dataRes);
 }
 
 async function readAndReturnJson(
@@ -476,6 +542,176 @@ async function readAndReturnJson(
   }
   const text = new TextDecoder().decode(buf);
   return parseAndRespond(respond, respondError, text, ct);
+}
+
+async function handleSubmitDashboard(
+  respond: (r: unknown) => Response,
+  respondError: (code: number, msg: string) => Response,
+  args: Record<string, unknown>,
+  userId: string,
+  env: Env,
+): Promise<Response> {
+  const title = args.title;
+  const artifactSource = args.artifact_source;
+  const queries = args.queries;
+
+  if (typeof title !== "string" || !title.trim()) {
+    return respondError(-32602, "title is required");
+  }
+  if (typeof artifactSource !== "string" || !artifactSource.trim()) {
+    return respondError(-32602, "artifact_source is required");
+  }
+  if (!Array.isArray(queries) || queries.some((q) => typeof q !== "string")) {
+    return respondError(-32602, "queries must be an array of strings");
+  }
+  if (new TextEncoder().encode(artifactSource).length > 50_000) {
+    return respondError(-32602, "artifact_source exceeds 50 KB limit");
+  }
+
+  // Resolve slug: use provided value or auto-generate from title.
+  let slug: string | undefined;
+  if (typeof args.slug === "string" && args.slug.trim()) {
+    slug = await resolveUniqueSlug(env.DB, userId, slugify(args.slug));
+  } else if (args.slug === undefined) {
+    slug = await resolveUniqueSlug(env.DB, userId, slugify(title.trim()));
+  }
+  // args.slug === null or empty string → no slug
+
+  const { id } = await insertDashboard(env.DB, {
+    userId,
+    title: title.trim(),
+    artifactSource,
+    queries: queries as string[],
+    slug,
+  });
+
+  return respond({
+    content: [
+      {
+        type: "text",
+        text: `Dashboard "${title.trim()}" saved (id: ${id}${slug ? `, slug: ${slug}` : ""}). Open the Dashboards tab in the browser to view it.`,
+      },
+    ],
+  });
+}
+
+async function handleListDashboards(
+  respond: (r: unknown) => Response,
+  userId: string,
+  env: Env,
+): Promise<Response> {
+  const dashboards = await listDashboards(env.DB, userId);
+  if (dashboards.length === 0) {
+    return respond({ content: [{ type: "text", text: "No dashboards saved yet." }] });
+  }
+  const lines = dashboards.map((d) => {
+    const date = new Date(d.created_at).toISOString().slice(0, 10);
+    return `- **${d.title}** — id: \`${d.id}\`${d.slug ? `, slug: \`${d.slug}\`` : ""} (${date})`;
+  });
+  return respond({ content: [{ type: "text", text: lines.join("\n") }] });
+}
+
+async function handleGetDashboard(
+  respond: (r: unknown) => Response,
+  respondError: (code: number, msg: string) => Response,
+  idOrSlug: string,
+  userId: string,
+  env: Env,
+): Promise<Response> {
+  const row = await getDashboardByIdOrSlug(env.DB, idOrSlug, userId);
+  if (!row) return respondError(-32602, `Dashboard not found: ${idOrSlug}`);
+  const queries = JSON.parse(row.queries) as string[];
+  const lines: string[] = [`# ${row.title}`, `**id:** ${row.id}`];
+  if (row.slug) lines.push(`**slug:** ${row.slug}`);
+  lines.push(`**updated:** ${new Date(row.updated_at).toISOString()}`);
+  if (queries.length > 0) {
+    lines.push("", "## Queries");
+    queries.forEach((q, i) => lines.push(`${i + 1}. \`${q}\``));
+  }
+  lines.push("", "## Artifact Source", "```jsx", row.artifact_source, "```");
+  return respond({ content: [{ type: "text", text: lines.join("\n") }] });
+}
+
+async function handleUpdateDashboard(
+  respond: (r: unknown) => Response,
+  respondError: (code: number, msg: string) => Response,
+  args: Record<string, unknown>,
+  userId: string,
+  env: Env,
+): Promise<Response> {
+  const idOrSlug = args.id_or_slug;
+  if (typeof idOrSlug !== "string" || !idOrSlug.trim()) {
+    return respondError(-32602, "id_or_slug is required");
+  }
+
+  const row = await getDashboardByIdOrSlug(env.DB, idOrSlug.trim(), userId);
+  if (!row) return respondError(-32602, `Dashboard not found: ${idOrSlug}`);
+
+  const updates: {
+    title?: string;
+    artifactSource?: string;
+    queries?: string[];
+    slug?: string | null;
+  } = {};
+
+  if (args.title !== undefined) {
+    if (typeof args.title !== "string" || !args.title.trim()) {
+      return respondError(-32602, "title must be a non-empty string");
+    }
+    updates.title = args.title.trim();
+  }
+
+  if (args.artifact_source !== undefined) {
+    if (typeof args.artifact_source !== "string" || !args.artifact_source.trim()) {
+      return respondError(-32602, "artifact_source must be a non-empty string");
+    }
+    if (new TextEncoder().encode(args.artifact_source).length > 50_000) {
+      return respondError(-32602, "artifact_source exceeds 50 KB limit");
+    }
+    updates.artifactSource = args.artifact_source;
+  }
+
+  if (args.queries !== undefined) {
+    if (
+      !Array.isArray(args.queries) ||
+      (args.queries as unknown[]).some((q) => typeof q !== "string")
+    ) {
+      return respondError(-32602, "queries must be an array of strings");
+    }
+    updates.queries = args.queries as string[];
+  }
+
+  if (args.slug !== undefined) {
+    if (typeof args.slug === "string" && args.slug.trim()) {
+      updates.slug = await resolveUniqueSlug(env.DB, userId, slugify(args.slug), row.id);
+    } else if (args.slug === "" || args.slug === null) {
+      updates.slug = null;
+    } else {
+      return respondError(-32602, "slug must be a string or empty string to clear");
+    }
+  }
+
+  if (Object.keys(updates).length === 0) {
+    return respondError(
+      -32602,
+      "at least one field (title, artifact_source, queries, slug) is required",
+    );
+  }
+
+  await snapshotDashboard(env.DB, row, userId, "update");
+  await updateDashboard(env.DB, row.id, userId, updates);
+
+  const newTitle = updates.title ?? row.title;
+  const newSlug = updates.slug !== undefined ? updates.slug : row.slug;
+  const ref = newSlug ?? row.id;
+  return respond({
+    content: [
+      {
+        type: "text",
+        text: `Dashboard "${newTitle}" updated (id: ${row.id}${newSlug ? `, slug: ${newSlug}` : ""}). View at /dashboards/${ref}.`,
+      },
+    ],
+  });
 }
 
 function parseAndRespond(
