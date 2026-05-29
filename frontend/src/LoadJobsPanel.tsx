@@ -36,6 +36,7 @@ interface LoadJob {
   pagination_config: string | null;
   source_type: string;
   source_config: string | null;
+  http_request_body: string | null;
 }
 
 function formatTs(ms: number | null): string {
@@ -60,6 +61,7 @@ export function LoadJobsPanel({ workerBase, getAuthHeaders }: LoadJobsPanelProps
   const [formTablePath, setFormTablePath] = useState("");
   const [formPath, setFormPath] = useState("/");
   const [formMethod, setFormMethod] = useState("GET");
+  const [formBody, setFormBody] = useState("");
   const [formFormat, setFormFormat] = useState("ndjson");
   const [formCron, setFormCron] = useState("0 * * * *");
   const [submitting, setSubmitting] = useState(false);
@@ -93,6 +95,7 @@ export function LoadJobsPanel({ workerBase, getAuthHeaders }: LoadJobsPanelProps
     setFormTablePath("");
     setFormPath("/");
     setFormMethod("GET");
+    setFormBody("");
     setFormFormat("ndjson");
     setFormCron("0 * * * *");
     setFormError(null);
@@ -120,6 +123,7 @@ export function LoadJobsPanel({ workerBase, getAuthHeaders }: LoadJobsPanelProps
     setFormTablePath(job.table_path);
     setFormPath(job.http_path);
     setFormMethod(job.http_method);
+    setFormBody(job.http_request_body ?? "");
     setFormFormat(job.format);
     setFormCron(job.cron_schedule);
     setFormError(null);
@@ -269,6 +273,7 @@ export function LoadJobsPanel({ workerBase, getAuthHeaders }: LoadJobsPanelProps
             : {
                 http_path: formPath,
                 http_method: formMethod,
+                http_request_body: formBody || null,
                 date_range_config: formDrEnabled
                   ? {
                       param_from: formDrParamFrom,
@@ -492,8 +497,31 @@ export function LoadJobsPanel({ workerBase, getAuthHeaders }: LoadJobsPanelProps
                       >
                         <option>GET</option>
                         <option>POST</option>
+                        <option>PUT</option>
+                        <option>PATCH</option>
+                        <option>DELETE</option>
                       </select>
                     </fieldset>
+                    {!["GET", "DELETE"].includes(formMethod) && (
+                      <fieldset class="fieldset sm:col-span-2">
+                        <legend class="fieldset-legend">
+                          Request body{" "}
+                          <span class="text-base-content/40 font-normal">(optional)</span>
+                        </legend>
+                        <textarea
+                          class="textarea textarea-bordered textarea-sm w-full font-mono text-xs"
+                          rows={4}
+                          value={formBody}
+                          onInput={(e) => setFormBody((e.target as HTMLTextAreaElement).value)}
+                          placeholder='{"key": "value"}'
+                        />
+                        <p class="text-xs text-base-content/50 mt-1">
+                          Raw request body sent with the HTTP request. Use{" "}
+                          <code class="font-mono">Content-Type</code> in the credential headers if
+                          needed (e.g. <code class="font-mono">application/json</code>).
+                        </p>
+                      </fieldset>
+                    )}
                   </>
                 )}
                 <fieldset class="fieldset">

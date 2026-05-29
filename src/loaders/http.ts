@@ -321,6 +321,7 @@ export async function runHttpLoadJob(
         const res = await fetch(pageUrl.toString(), {
           method: job.http_method,
           headers: resolvedHeaders,
+          ...(job.http_request_body != null ? { body: job.http_request_body } : {}),
         });
         if (!res.ok) {
           throw new Error(`Upstream HTTP error: ${res.status} ${res.statusText}`);
@@ -389,6 +390,7 @@ export async function runHttpLoadJob(
     const upstream = await fetch(urlObj.toString(), {
       method: job.http_method,
       headers: resolvedHeaders,
+      ...(job.http_request_body != null ? { body: job.http_request_body } : {}),
     });
     if (!upstream.ok) {
       throw new Error(`Upstream HTTP error: ${upstream.status} ${upstream.statusText}`);

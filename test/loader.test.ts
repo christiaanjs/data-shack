@@ -101,6 +101,7 @@ function makeJob(credId: string, backendId: string, tableName: string, tablePath
     pagination_config: null,
     source_type: "http",
     source_config: null,
+    http_request_body: null,
   };
 }
 
@@ -732,6 +733,7 @@ function makeGsJob(credId: string, backendId: string, sourceConfig: object): Loa
     pagination_config: null,
     source_type: "google-sheets",
     source_config: JSON.stringify(sourceConfig),
+    http_request_body: null,
   };
 }
 

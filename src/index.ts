@@ -596,7 +596,7 @@ app.post("/catalog/commit", requireAuth, async (c) => {
 // ── Load jobs endpoints ───────────────────────────────────────────────────
 
 const SAFE_TABLE_NAME = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
-const VALID_HTTP_METHODS = ["GET", "POST"] as const;
+const VALID_HTTP_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"] as const;
 const VALID_FORMATS = ["json", "ndjson", "csv", "parquet"] as const;
 
 app.get("/api/load-jobs", requireAuth, async (c) => {
@@ -622,7 +622,14 @@ app.post("/api/load-jobs", requireAuth, async (c) => {
     body.http_method !== undefined &&
     !VALID_HTTP_METHODS.includes(body.http_method as (typeof VALID_HTTP_METHODS)[number])
   ) {
-    return c.json({ error: "http_method must be GET or POST" }, 400);
+    return c.json({ error: "http_method must be GET, POST, PUT, PATCH, or DELETE" }, 400);
+  }
+  if (
+    body.http_request_body !== undefined &&
+    body.http_request_body !== null &&
+    typeof body.http_request_body !== "string"
+  ) {
+    return c.json({ error: "http_request_body must be a string" }, 400);
   }
   if (
     body.format !== undefined &&
@@ -666,6 +673,7 @@ app.post("/api/load-jobs", requireAuth, async (c) => {
         body.source_config !== undefined && body.source_config !== null
           ? JSON.stringify(body.source_config)
           : undefined,
+      http_request_body: typeof body.http_request_body === "string" ? body.http_request_body : null,
     });
   } catch (err) {
     if (err instanceof Error && err.message.startsWith("Invalid cron_schedule")) {
@@ -694,7 +702,14 @@ app.patch("/api/load-jobs/:id", requireAuth, async (c) => {
     body.http_method !== undefined &&
     !VALID_HTTP_METHODS.includes(body.http_method as (typeof VALID_HTTP_METHODS)[number])
   ) {
-    return c.json({ error: "http_method must be GET or POST" }, 400);
+    return c.json({ error: "http_method must be GET, POST, PUT, PATCH, or DELETE" }, 400);
+  }
+  if (
+    body.http_request_body !== undefined &&
+    body.http_request_body !== null &&
+    typeof body.http_request_body !== "string"
+  ) {
+    return c.json({ error: "http_request_body must be a string" }, 400);
   }
   if (
     body.format !== undefined &&
@@ -743,6 +758,12 @@ app.patch("/api/load-jobs/:id", requireAuth, async (c) => {
         body.source_config !== undefined && body.source_config !== null
           ? JSON.stringify(body.source_config)
           : existingJob.source_config,
+      http_request_body:
+        body.http_request_body !== undefined
+          ? typeof body.http_request_body === "string"
+            ? body.http_request_body
+            : null
+          : existingJob.http_request_body,
     });
   } catch (err) {
     if (err instanceof Error && err.message.startsWith("Invalid cron_schedule")) {
