@@ -667,7 +667,7 @@ storageRouter.on(["GET", "HEAD", "PUT", "POST", "DELETE", "OPTIONS"], "/s3proxy/
 
   const isHead = method === "HEAD";
   const { url, headers } = await signS3Request({
-    method: isHead ? "HEAD" : "GET",
+    method: isHead ? "HEAD" : method,
     endpoint: config.endpoint,
     bucket: config.bucket,
     key,
