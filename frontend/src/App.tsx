@@ -37,10 +37,16 @@ function tabFromPath(path: string): Tab {
   return "query";
 }
 
+const isStandalone =
+  window.matchMedia("(display-mode: standalone)").matches ||
+  ("standalone" in window.navigator &&
+    (window.navigator as { standalone?: boolean }).standalone === true);
+
 export function App() {
   const { path, route } = useLocation();
 
   const activeTab = tabFromPath(path);
+  const hideNavbar = isStandalone && /^\/dashboards\/.+/.test(path);
 
   const [authed, setAuthed] = useState<boolean | null>(null);
   const [callbackError, setCallbackError] = useState<string | null>(null);
@@ -314,74 +320,76 @@ export function App() {
 
   return (
     <div class="min-h-dvh flex flex-col">
-      <div class="navbar bg-base-200 border-b border-base-300 sticky top-0 z-10">
-        <div class="navbar-start">
-          <span class="text-lg font-bold px-2">Data Shack</span>
-        </div>
-        <div class="navbar-center">
-          <div role="tablist" class="tabs tabs-border">
-            {(
-              [
-                ["query", "/", "Query"],
-                ["catalog", "/catalog", "Catalog"],
-                ["jobs", "/jobs", "Jobs"],
-                ["transforms", "/transforms", "Transforms"],
-                ["settings", "/settings", "Settings"],
-                ["dashboards", "/dashboards", "Dashboards"],
-              ] as [Tab, string, string][]
-            ).map(([tab, href, label]) => (
+      {!hideNavbar && (
+        <div class="navbar bg-base-200 border-b border-base-300 sticky top-0 z-10">
+          <div class="navbar-start">
+            <span class="text-lg font-bold px-2">Data Shack</span>
+          </div>
+          <div class="navbar-center">
+            <div role="tablist" class="tabs tabs-border">
+              {(
+                [
+                  ["query", "/", "Query"],
+                  ["catalog", "/catalog", "Catalog"],
+                  ["jobs", "/jobs", "Jobs"],
+                  ["transforms", "/transforms", "Transforms"],
+                  ["settings", "/settings", "Settings"],
+                  ["dashboards", "/dashboards", "Dashboards"],
+                ] as [Tab, string, string][]
+              ).map(([tab, href, label]) => (
+                <button
+                  key={tab}
+                  type="button"
+                  role="tab"
+                  class={`tab${activeTab === tab ? " tab-active" : ""}`}
+                  onClick={() => route(href)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div class="navbar-end gap-3 pr-2">
+            <span
+              class={`w-2 h-2 rounded-full flex-shrink-0 transition-colors duration-300 ${hasNewData ? "bg-warning" : "bg-transparent"}`}
+              title={hasNewData ? "New data committed" : undefined}
+            />
+            <span
+              class={`w-2 h-2 rounded-full flex-shrink-0 ${sessionConnected ? "bg-success" : "bg-base-content/20"}`}
+              title={sessionConnected ? "Browser session active" : "No MCP session"}
+            />
+            <label class="flex items-center gap-1 cursor-pointer" title="Enable DuckDB + session">
+              <span class="text-xs text-base-content/50 hidden sm:block">DuckDB</span>
+              <input
+                type="checkbox"
+                class="toggle toggle-xs toggle-success"
+                checked={sessionEnabled}
+                onChange={(e) => {
+                  const checked = (e.target as HTMLInputElement).checked;
+                  localStorage.setItem("duckdb-session-enabled", String(checked));
+                  setSessionEnabled(checked);
+                }}
+              />
+            </label>
+            {userId && (
+              <span class="text-xs text-base-content/50 font-mono hidden sm:block">{userId}</span>
+            )}
+            {!DEV_TOKEN && (
               <button
-                key={tab}
                 type="button"
-                role="tab"
-                class={`tab${activeTab === tab ? " tab-active" : ""}`}
-                onClick={() => route(href)}
+                class="btn btn-ghost btn-sm"
+                onClick={() => {
+                  clearTokens();
+                  setAuthed(false);
+                  setUserId(null);
+                }}
               >
-                {label}
+                Sign out
               </button>
-            ))}
+            )}
           </div>
         </div>
-        <div class="navbar-end gap-3 pr-2">
-          <span
-            class={`w-2 h-2 rounded-full flex-shrink-0 transition-colors duration-300 ${hasNewData ? "bg-warning" : "bg-transparent"}`}
-            title={hasNewData ? "New data committed" : undefined}
-          />
-          <span
-            class={`w-2 h-2 rounded-full flex-shrink-0 ${sessionConnected ? "bg-success" : "bg-base-content/20"}`}
-            title={sessionConnected ? "Browser session active" : "No MCP session"}
-          />
-          <label class="flex items-center gap-1 cursor-pointer" title="Enable DuckDB + session">
-            <span class="text-xs text-base-content/50 hidden sm:block">DuckDB</span>
-            <input
-              type="checkbox"
-              class="toggle toggle-xs toggle-success"
-              checked={sessionEnabled}
-              onChange={(e) => {
-                const checked = (e.target as HTMLInputElement).checked;
-                localStorage.setItem("duckdb-session-enabled", String(checked));
-                setSessionEnabled(checked);
-              }}
-            />
-          </label>
-          {userId && (
-            <span class="text-xs text-base-content/50 font-mono hidden sm:block">{userId}</span>
-          )}
-          {!DEV_TOKEN && (
-            <button
-              type="button"
-              class="btn btn-ghost btn-sm"
-              onClick={() => {
-                clearTokens();
-                setAuthed(false);
-                setUserId(null);
-              }}
-            >
-              Sign out
-            </button>
-          )}
-        </div>
-      </div>
+      )}
 
       <main class="flex-1 flex flex-col min-h-0">
         {activeTab === "query" && (
@@ -422,6 +430,7 @@ export function App() {
             setCatalogCommitListener={setDashboardCommitListener}
             sessionEnabled={sessionEnabled}
             getCatalogReady={getCatalogReady}
+            isStandalone={isStandalone}
           />
         )}
       </main>

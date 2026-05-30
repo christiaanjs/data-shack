@@ -10,6 +10,7 @@ interface DashboardsPanelProps {
   setCatalogCommitListener: (listener: ((ev: CatalogCommitEvent) => void) | null) => void;
   sessionEnabled: boolean;
   getCatalogReady: () => Promise<void>;
+  isStandalone?: boolean;
 }
 
 interface DashboardListRow {
@@ -147,6 +148,7 @@ export function DashboardsPanel({
   setCatalogCommitListener,
   sessionEnabled,
   getCatalogReady,
+  isStandalone = false,
 }: DashboardsPanelProps) {
   const { path, route } = useLocation();
 
@@ -279,21 +281,22 @@ export function DashboardsPanel({
   if (dashboardId) {
     return (
       <div class="flex-1 flex flex-col min-h-0">
-        {/* Compact header bar */}
-        <div class="flex items-center gap-2 px-3 py-2 border-b border-base-300 flex-shrink-0">
-          <button type="button" class="btn btn-ghost btn-sm" onClick={() => route("/dashboards")}>
-            ← Back
-          </button>
-          {activeDashboard && (
-            <h2 class="text-base font-semibold flex-1 truncate">{activeDashboard.title}</h2>
-          )}
-          {running && <span class="loading loading-spinner loading-sm flex-shrink-0" />}
-          {!sessionEnabled && (
-            <span class="badge badge-outline badge-sm text-base-content/50 flex-shrink-0">
-              proxy
-            </span>
-          )}
-        </div>
+        {!isStandalone && (
+          <div class="flex items-center gap-2 px-3 py-2 border-b border-base-300 flex-shrink-0">
+            <button type="button" class="btn btn-ghost btn-sm" onClick={() => route("/dashboards")}>
+              ← Back
+            </button>
+            {activeDashboard && (
+              <h2 class="text-base font-semibold flex-1 truncate">{activeDashboard.title}</h2>
+            )}
+            {running && <span class="loading loading-spinner loading-sm flex-shrink-0" />}
+            {!sessionEnabled && (
+              <span class="badge badge-outline badge-sm text-base-content/50 flex-shrink-0">
+                proxy
+              </span>
+            )}
+          </div>
+        )}
 
         {runError && (
           <div class="alert alert-error flex-shrink-0 m-2">
