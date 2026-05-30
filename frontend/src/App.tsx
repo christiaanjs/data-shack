@@ -383,7 +383,7 @@ export function App() {
         </div>
       </div>
 
-      <main class="flex-1">
+      <main class="flex-1 flex flex-col min-h-0">
         {activeTab === "query" && (
           <QueryPanel
             workerBase={WORKER_BASE}
