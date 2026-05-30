@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { CommandPalette } from "./CommandPalette.tsx";
 import { ConsoleDock } from "./ConsoleDock.tsx";
-import { Explorer } from "./Explorer.tsx";
+import { Explorer, SettingsTree } from "./Explorer.tsx";
 import { TabContent } from "./TabViews.tsx";
 import { clearTokens, getAccessToken, getValidToken, handleCallback, startLogin } from "./auth.ts";
 import {
@@ -122,6 +122,7 @@ export function WorkbenchShell() {
   const getCatalogReady = useCallback(() => catalogReadyRef.current, []);
 
   // ── Workbench state ────────────────────────────────────────────────────────
+  const [activity, setActivity] = useState<"explorer" | "settings">("explorer");
   const [tabs, setTabs] = useState<WbTab[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [log, setLog] = useState<LogEntry[]>([]);
@@ -428,6 +429,8 @@ export function WorkbenchShell() {
   // ── Tab management ────────────────────────────────────────────────────────
 
   const openTab = useCallback((kind: string, item?: unknown) => {
+    if (kind === "cred" || kind === "backend") setActivity("settings");
+    else if (kind !== "commit") setActivity("explorer");
     setTabs((prev) => {
       let key: string;
       let title: string;
@@ -779,7 +782,12 @@ export function WorkbenchShell() {
       <div class="wb-body">
         {/* Activity rail */}
         <div class="wb-activity">
-          <button type="button" class="wb-act-btn active" title="Explorer">
+          <button
+            type="button"
+            class={`wb-act-btn${activity === "explorer" ? " active" : ""}`}
+            title="Explorer"
+            onClick={() => setActivity("explorer")}
+          >
             <FilesIcon size={20} />
           </button>
           <button type="button" class="wb-act-btn" title="Search (⌘K)" onClick={openPalette}>
@@ -788,13 +796,10 @@ export function WorkbenchShell() {
           <span class="wb-act-spacer" />
           <button
             type="button"
-            class="wb-act-btn"
-            title="Commit snapshot"
-            onClick={() => openTab("commit")}
+            class={`wb-act-btn${activity === "settings" ? " active" : ""}`}
+            title="Settings"
+            onClick={() => setActivity("settings")}
           >
-            <DatabaseIcon size={20} />
-          </button>
-          <button type="button" class="wb-act-btn" title="Settings" onClick={() => {}}>
             <SettingsIcon size={20} />
           </button>
         </div>
@@ -802,18 +807,20 @@ export function WorkbenchShell() {
         {/* Explorer sidebar */}
         <div class="wb-sidebar" style={{ width: sidebarW }}>
           <div class="wb-side-head">
-            <span>Explorer</span>
-            <button
-              type="button"
-              class="wb-iconbtn"
-              style={{ width: 22, height: 22 }}
-              title="New query"
-              onClick={() => openTab("sql", { title: "Untitled", sql: "" })}
-            >
-              <PlusIcon size={14} />
-            </button>
+            <span>{activity === "settings" ? "Settings" : "Explorer"}</span>
+            {activity === "explorer" && (
+              <button
+                type="button"
+                class="wb-iconbtn"
+                style={{ width: 22, height: 22 }}
+                title="New query"
+                onClick={() => openTab("sql", { title: "Untitled", sql: "" })}
+              >
+                <PlusIcon size={14} />
+              </button>
+            )}
           </div>
-          {catalogLoading && (
+          {activity === "explorer" && catalogLoading && (
             <div
               style={{
                 padding: "8px 14px",
@@ -824,17 +831,21 @@ export function WorkbenchShell() {
               Loading catalog…
             </div>
           )}
-          {catalogError && (
+          {activity === "explorer" && catalogError && (
             <div style={{ padding: "8px 14px", fontSize: 11.5, color: "var(--color-error)" }}>
               {catalogError}
             </div>
           )}
-          <Explorer
-            data={data}
-            activeKey={activeKey}
-            onOpen={openTab}
-            onNewQuery={() => openTab("sql", { title: "Untitled", sql: "" })}
-          />
+          {activity === "settings" ? (
+            <SettingsTree data={data} activeKey={activeKey} onOpen={openTab} />
+          ) : (
+            <Explorer
+              data={data}
+              activeKey={activeKey}
+              onOpen={openTab}
+              onNewQuery={() => openTab("sql", { title: "Untitled", sql: "" })}
+            />
+          )}
         </div>
         <div class="wb-resizer" onMouseDown={startSidebarResize} />
 

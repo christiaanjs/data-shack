@@ -137,7 +137,7 @@ interface ExplorerProps {
 }
 
 export function Explorer({ data, activeKey, onOpen, onNewQuery }: ExplorerProps) {
-  const { tables, transforms, jobs, dashboards, savedQueries, credentials, backends } = data;
+  const { tables, transforms, jobs, dashboards, savedQueries } = data;
   return (
     <div class="wb-side-scroll wb-scrollbar-thin">
       <TreeGroup
@@ -223,8 +223,26 @@ export function Explorer({ data, activeKey, onOpen, onNewQuery }: ExplorerProps)
           />
         ))}
       </TreeGroup>
+    </div>
+  );
+}
 
-      <TreeGroup icon={<KeyIcon size={13} />} label="Credentials" count={credentials.length}>
+interface SettingsTreeProps {
+  data: WbData;
+  activeKey: string | null;
+  onOpen: (kind: string, item?: unknown) => void;
+}
+
+export function SettingsTree({ data, activeKey, onOpen }: SettingsTreeProps) {
+  const { credentials, backends } = data;
+  return (
+    <div class="wb-side-scroll wb-scrollbar-thin">
+      <TreeGroup
+        icon={<KeyIcon size={13} />}
+        label="Credentials"
+        count={credentials.length}
+        defaultOpen
+      >
         {credentials.map((c) => (
           <SimpleNode
             key={c.id}
@@ -237,7 +255,12 @@ export function Explorer({ data, activeKey, onOpen, onNewQuery }: ExplorerProps)
         ))}
       </TreeGroup>
 
-      <TreeGroup icon={<DriveIcon size={13} />} label="Storage Backends" count={backends.length}>
+      <TreeGroup
+        icon={<DriveIcon size={13} />}
+        label="Storage Backends"
+        count={backends.length}
+        defaultOpen
+      >
         {backends.map((b) => (
           <SimpleNode
             key={b.id}

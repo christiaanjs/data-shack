@@ -23,7 +23,7 @@ import {
   RotateCcw,
   Save,
   Search,
-  Settings,
+  Settings2,
   Sun,
   Table2,
   Terminal,
@@ -57,7 +57,7 @@ export function DatabaseIcon({ size }: { size: number }) {
   return <Database size={size} strokeWidth={SW} />;
 }
 export function SettingsIcon({ size }: { size: number }) {
-  return <Settings size={size} strokeWidth={SW} />;
+  return <Settings2 size={size} strokeWidth={SW} />;
 }
 export function PanelIcon({ size }: { size: number }) {
   return <PanelBottom size={size} strokeWidth={SW} />;
