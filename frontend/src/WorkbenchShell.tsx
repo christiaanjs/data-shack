@@ -13,6 +13,22 @@ import { type CatalogCommitEvent, type CatalogConnection, connectCatalogWs } fro
 import { initDuckDB, runQuery } from "./duckdb.ts";
 import { resolveStorageUris } from "./resolveQuery.ts";
 import { type JobEvent, type SessionConnection, connectSession } from "./sessionWs.ts";
+import {
+  ChartIcon,
+  DatabaseIcon,
+  FilesIcon,
+  LogOutIcon,
+  MoonIcon,
+  PanelIcon,
+  PlusIcon,
+  SearchIcon,
+  SettingsIcon,
+  SunIcon,
+  TableIcon,
+  TerminalIcon,
+  TransformIcon,
+  XIcon,
+} from "./wbIcons.tsx";
 import type {
   HistoryEntry,
   LogEntry,
@@ -753,7 +769,7 @@ export function WorkbenchShell() {
                 setUserId(null);
               }}
             >
-              <SignOutIcon size={16} />
+              <LogOutIcon size={16} />
             </button>
           )}
         </div>
@@ -931,188 +947,18 @@ export function WorkbenchShell() {
 // ── Tab icon helper ────────────────────────────────────────────────────────────
 
 function TabIcon({ kind, size }: { kind: string; size: number }) {
-  const s = size;
-  const Svg = ({ children }: { children: preact.ComponentChildren }) => (
-    <svg
-      width={s}
-      height={s}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      stroke-width="1.6"
-      stroke-linecap="round"
-      stroke-linejoin="round"
-      aria-hidden="true"
-    >
-      {children}
-    </svg>
-  );
   switch (kind) {
     case "sql":
-      return (
-        <Svg>
-          <polyline points="4 17 10 11 4 5" />
-          <line x1="12" x2="20" y1="19" y2="19" />
-        </Svg>
-      );
+      return <TerminalIcon size={size} />;
     case "table":
-      return (
-        <Svg>
-          <path d="M12 3v18" />
-          <rect width="18" height="18" x="3" y="3" rx="2" />
-          <path d="M3 9h18" />
-          <path d="M3 15h18" />
-        </Svg>
-      );
+      return <TableIcon size={size} />;
     case "dashboard":
-      return (
-        <Svg>
-          <path d="M3 3v18h18" />
-          <path d="M18 17V9" />
-          <path d="M13 17V5" />
-          <path d="M8 17v-3" />
-        </Svg>
-      );
+      return <ChartIcon size={size} />;
     case "transform":
-      return (
-        <Svg>
-          <line x1="6" x2="6" y1="3" y2="15" />
-          <circle cx="18" cy="6" r="3" />
-          <circle cx="6" cy="18" r="3" />
-          <path d="M18 9a9 9 0 0 1-9 9" />
-        </Svg>
-      );
+      return <TransformIcon size={size} />;
     case "commit":
-    case "database":
-      return (
-        <Svg>
-          <ellipse cx="12" cy="5" rx="9" ry="3" />
-          <path d="M3 5V19A9 3 0 0 0 21 19V5" />
-          <path d="M3 12A9 3 0 0 0 21 12" />
-        </Svg>
-      );
+      return <DatabaseIcon size={size} />;
     default:
-      return (
-        <Svg>
-          <path d="M20 7h-3a2 2 0 0 1-2-2V2" />
-          <path d="M9 18a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h7l4 4v10a2 2 0 0 1-2 2Z" />
-        </Svg>
-      );
+      return <FilesIcon size={size} />;
   }
-}
-
-// ── Icons ─────────────────────────────────────────────────────────────────────
-
-function SvgI({ size, children }: { size: number; children: preact.ComponentChildren }) {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      stroke-width="1.6"
-      stroke-linecap="round"
-      stroke-linejoin="round"
-      aria-hidden="true"
-    >
-      {children}
-    </svg>
-  );
-}
-function SearchIcon({ size }: { size: number }) {
-  return (
-    <SvgI size={size}>
-      <circle cx="11" cy="11" r="8" />
-      <path d="m21 21-4.3-4.3" />
-    </SvgI>
-  );
-}
-function SunIcon({ size }: { size: number }) {
-  return (
-    <SvgI size={size}>
-      <circle cx="12" cy="12" r="4" />
-      <path d="M12 2v2" />
-      <path d="M12 20v2" />
-      <path d="m4.93 4.93 1.41 1.41" />
-      <path d="m17.66 17.66 1.41 1.41" />
-      <path d="M2 12h2" />
-      <path d="M20 12h2" />
-      <path d="m6.34 17.66-1.41 1.41" />
-      <path d="m19.07 4.93-1.41 1.41" />
-    </SvgI>
-  );
-}
-function MoonIcon({ size }: { size: number }) {
-  return (
-    <SvgI size={size}>
-      <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" />
-    </SvgI>
-  );
-}
-function SignOutIcon({ size }: { size: number }) {
-  return (
-    <SvgI size={size}>
-      <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
-      <polyline points="16 17 21 12 16 7" />
-      <line x1="21" x2="9" y1="12" y2="12" />
-    </SvgI>
-  );
-}
-function FilesIcon({ size }: { size: number }) {
-  return (
-    <SvgI size={size}>
-      <path d="M20 7h-3a2 2 0 0 1-2-2V2" />
-      <path d="M9 18a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h7l4 4v10a2 2 0 0 1-2 2Z" />
-      <path d="M3 7.6v12.8A1.6 1.6 0 0 0 4.6 22h9.8" />
-    </SvgI>
-  );
-}
-function PlusIcon({ size }: { size: number }) {
-  return (
-    <SvgI size={size}>
-      <path d="M5 12h14" />
-      <path d="M12 5v14" />
-    </SvgI>
-  );
-}
-function XIcon({ size }: { size: number }) {
-  return (
-    <SvgI size={size}>
-      <path d="M18 6 6 18" />
-      <path d="m6 6 12 12" />
-    </SvgI>
-  );
-}
-function DatabaseIcon({ size }: { size: number }) {
-  return (
-    <SvgI size={size}>
-      <ellipse cx="12" cy="5" rx="9" ry="3" />
-      <path d="M3 5V19A9 3 0 0 0 21 19V5" />
-      <path d="M3 12A9 3 0 0 0 21 12" />
-    </SvgI>
-  );
-}
-function SettingsIcon({ size }: { size: number }) {
-  return (
-    <SvgI size={size}>
-      <circle cx="12" cy="12" r="3" />
-      <path d="M12 2v2" />
-      <path d="M12 20v2" />
-      <path d="m4.93 4.93 1.41 1.41" />
-      <path d="m17.66 17.66 1.41 1.41" />
-      <path d="M2 12h2" />
-      <path d="M20 12h2" />
-      <path d="m6.34 17.66-1.41 1.41" />
-      <path d="m19.07 4.93-1.41 1.41" />
-    </SvgI>
-  );
-}
-function PanelIcon({ size }: { size: number }) {
-  return (
-    <SvgI size={size}>
-      <rect width="18" height="18" x="3" y="3" rx="2" />
-      <path d="M3 15h18" />
-    </SvgI>
-  );
 }

@@ -2,7 +2,18 @@ import { useRef, useState } from "preact/hooks";
 import type { SqlEditorHandle } from "./SqlEditor.tsx";
 import { SqlEditor } from "./SqlEditor.tsx";
 import type { CatalogTableWithSnapshot } from "./catalogViews.ts";
-import type { QueryResult, WbCtx, WbTab } from "./workbench-types.ts";
+import {
+  BookmarkIcon,
+  DatabaseIcon,
+  PlayIcon,
+  RefreshIcon,
+  SaveIcon,
+  SearchIcon,
+  TableIcon,
+  TerminalIcon,
+  TransformIcon,
+} from "./wbIcons.tsx";
+import type { QueryResult, WbCtx, WbTab, WbTransform } from "./workbench-types.ts";
 
 // ── Result grid ────────────────────────────────────────────────────────────────
 
@@ -389,6 +400,230 @@ export function CommitView({ ctx }: { ctx: WbCtx }) {
   );
 }
 
+// ── Transform editor ───────────────────────────────────────────────────────────
+
+const WORKER_BASE_TV = import.meta.env.VITE_WORKER_URL ?? "";
+const DEV_TOKEN_TV = import.meta.env.VITE_DEV_TOKEN as string | undefined;
+
+async function tvAuthHeaders(): Promise<Record<string, string>> {
+  if (DEV_TOKEN_TV) return { "X-Dev-Token": DEV_TOKEN_TV };
+  const { getValidToken } = await import("./auth.ts");
+  const token = await getValidToken();
+  if (!token) return {};
+  return { Authorization: `Bearer ${token}` };
+}
+
+function statusColor(status: string): string {
+  switch (status) {
+    case "done":
+      return "var(--color-success)";
+    case "running":
+      return "var(--color-info)";
+    case "pending":
+      return "var(--color-warning)";
+    case "failed":
+      return "var(--color-error)";
+    default:
+      return "color-mix(in oklch, var(--color-base-content) 50%, transparent)";
+  }
+}
+
+export function TransformView({ tab, ctx }: { tab: WbTab; ctx: WbCtx }) {
+  const tr = tab.item as WbTransform | null;
+  const isNew = !tr;
+
+  const edRef = useRef<SqlEditorHandle>(null);
+  const [result, setResult] = useState<QueryResult | null>(null);
+  const [running, setRunning] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [saveOk, setSaveOk] = useState(false);
+
+  // Editable fields
+  const [name, setName] = useState(tr?.name ?? "");
+  const [outputTable, setOutputTable] = useState(tr?.output_table ?? "");
+  const [outputUri, setOutputUri] = useState(tr?.output_uri ?? "");
+  const [outputBackend, setOutputBackend] = useState(tr?.output_backend ?? "");
+
+  async function dryRun() {
+    const sql = edRef.current?.getDoc() ?? tr?.sql ?? "";
+    if (!sql.trim()) return;
+    setRunning(true);
+    setResult(null);
+    const res = await ctx.execute(sql, { source: name || tr?.name || "transform" });
+    setResult(res);
+    setRunning(false);
+  }
+
+  async function save() {
+    const sql = edRef.current?.getDoc() ?? tr?.sql ?? "";
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const headers = { ...(await tvAuthHeaders()), "Content-Type": "application/json" };
+      if (isNew) {
+        const res = await fetch(`${WORKER_BASE_TV}/api/transform-jobs`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            name: name || null,
+            sql,
+            output_table: outputTable,
+            output_uri: outputUri,
+            output_backend: outputBackend,
+          }),
+        });
+        if (!res.ok) {
+          const txt = await res.text();
+          setSaveError(txt || "Failed to create transform");
+          return;
+        }
+      } else {
+        const res = await fetch(`${WORKER_BASE_TV}/api/transform-jobs/${tr.id}`, {
+          method: "PATCH",
+          headers,
+          body: JSON.stringify({ name: name || null, sql }),
+        });
+        if (!res.ok) {
+          const txt = await res.text();
+          setSaveError(txt || "Failed to save transform");
+          return;
+        }
+      }
+      setSaveOk(true);
+      setTimeout(() => setSaveOk(false), 2500);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const defaultSql =
+    tr?.sql ??
+    "-- New transform\nCREATE OR REPLACE TABLE my_table AS\nSELECT *\nFROM transactions;";
+
+  return (
+    <div class="wb-sql">
+      <div class="wb-sql-toolbar" style={{ gap: 10 }}>
+        <span class="wb-doc-kicker" style={{ textTransform: "none", letterSpacing: 0 }}>
+          <TransformIcon size={13} />
+        </span>
+        {isNew ? (
+          <input
+            class="input input-sm font-mono"
+            style={{ width: 220 }}
+            placeholder="transform name"
+            value={name}
+            onChange={(e) => setName((e.target as HTMLInputElement).value)}
+          />
+        ) : (
+          <span class="wb-sql-name" style={{ fontWeight: 600, color: "var(--color-base-content)" }}>
+            {tr.name ?? tr.output_table}
+          </span>
+        )}
+        <span class="wb-con-hint">→ output</span>
+        {isNew ? (
+          <input
+            class="input input-sm font-mono"
+            style={{ width: 160 }}
+            placeholder="output_table"
+            value={outputTable}
+            onChange={(e) => setOutputTable((e.target as HTMLInputElement).value)}
+          />
+        ) : (
+          <span class="wb-tag wb-tag-type">{tr.output_table}</span>
+        )}
+        <span style={{ flex: 1 }} />
+        <button
+          type="button"
+          class="btn btn-ghost btn-sm"
+          onClick={dryRun}
+          disabled={!ctx.session.enabled || running}
+        >
+          {running ? <span class="loading loading-xs" /> : <PlayIcon size={13} />}
+          Dry run
+        </button>
+        <button type="button" class="btn btn-primary btn-sm" onClick={save} disabled={saving}>
+          {saving ? <span class="loading loading-xs" /> : <SaveIcon size={13} />}
+          {isNew ? "Create" : "Save"}
+        </button>
+      </div>
+
+      {/* Config strip — only for existing transforms */}
+      {!isNew && (
+        <div class="wb-transform-config">
+          <span class="wb-con-hint">
+            status:{" "}
+            <span style={{ color: statusColor(tr.status), fontWeight: 600 }}>{tr.status}</span>
+          </span>
+          {tr.last_run_at && (
+            <span class="wb-con-hint">last run: {new Date(tr.last_run_at).toLocaleString()}</span>
+          )}
+          {tr.last_error && (
+            <span style={{ fontSize: 11.5, color: "var(--color-error)" }}>{tr.last_error}</span>
+          )}
+        </div>
+      )}
+
+      {/* Extra fields for new transform */}
+      {isNew && (
+        <div class="wb-transform-config" style={{ flexWrap: "wrap", gap: 10 }}>
+          <fieldset class="fieldset" style={{ margin: 0, flex: "1 1 200px" }}>
+            <legend class="fieldset-legend">Output URI</legend>
+            <input
+              class="input input-sm font-mono w-full"
+              placeholder="r2://bucket/path/table.parquet"
+              value={outputUri}
+              onChange={(e) => setOutputUri((e.target as HTMLInputElement).value)}
+            />
+          </fieldset>
+          <fieldset class="fieldset" style={{ margin: 0, flex: "1 1 160px" }}>
+            <legend class="fieldset-legend">Output backend</legend>
+            <input
+              class="input input-sm font-mono w-full"
+              placeholder="primary-r2"
+              value={outputBackend}
+              onChange={(e) => setOutputBackend((e.target as HTMLInputElement).value)}
+            />
+          </fieldset>
+        </div>
+      )}
+
+      {saveError && (
+        <div
+          class="alert alert-error"
+          style={{ margin: "0 14px", borderRadius: "var(--radius-field)" }}
+        >
+          <span>{saveError}</span>
+        </div>
+      )}
+      {saveOk && (
+        <div
+          class="alert alert-success"
+          style={{ margin: "0 14px", borderRadius: "var(--radius-field)" }}
+        >
+          <span>{isNew ? "Transform created." : "Saved."}</span>
+        </div>
+      )}
+
+      <div class="wb-sql-split">
+        <div class="wb-sql-editor">
+          <SqlEditor
+            ref={edRef}
+            value={defaultSql}
+            schema={ctx.schema}
+            autoFocus
+            onChange={() => {}}
+            onRun={dryRun}
+          />
+        </div>
+        <div class="wb-result wb-scrollbar-thin">
+          <ResultGrid result={result} running={running} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Generic tab content router ─────────────────────────────────────────────────
 
 export function TabContent({ tab, ctx }: { tab: WbTab | null; ctx: WbCtx }) {
@@ -398,6 +633,8 @@ export function TabContent({ tab, ctx }: { tab: WbTab | null; ctx: WbCtx }) {
       return <SqlTabView tab={tab} ctx={ctx} />;
     case "table":
       return <TableDetailView item={tab.item as CatalogTableWithSnapshot} ctx={ctx} />;
+    case "transform":
+      return <TransformView tab={tab} ctx={ctx} />;
     case "commit":
       return <CommitView ctx={ctx} />;
     default:
@@ -407,7 +644,6 @@ export function TabContent({ tab, ctx }: { tab: WbTab | null; ctx: WbCtx }) {
 
 function GenericView({ tab }: { tab: WbTab; ctx: WbCtx }) {
   const kindLabel: Record<string, string> = {
-    transform: "Transform",
     dashboard: "Dashboard",
     job: "Load job",
     cred: "Credential",
@@ -429,85 +665,8 @@ function GenericView({ tab }: { tab: WbTab; ctx: WbCtx }) {
           fontSize: 13,
         }}
       >
-        Detail view — open the full {kindLabel[tab.kind] ?? tab.kind} panel for editing.
+        Detail view coming soon.
       </div>
     </div>
-  );
-}
-
-// ── Icons ─────────────────────────────────────────────────────────────────────
-
-function Svg({ size, children }: { size: number; children: preact.ComponentChildren }) {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      stroke-width="1.6"
-      stroke-linecap="round"
-      stroke-linejoin="round"
-      aria-hidden="true"
-    >
-      {children}
-    </svg>
-  );
-}
-function PlayIcon({ size }: { size: number }) {
-  return (
-    <Svg size={size}>
-      <polygon points="6 3 20 12 6 21 6 3" />
-    </Svg>
-  );
-}
-function BookmarkIcon({ size }: { size: number }) {
-  return (
-    <Svg size={size}>
-      <path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z" />
-    </Svg>
-  );
-}
-function TableIcon({ size }: { size: number }) {
-  return (
-    <Svg size={size}>
-      <path d="M12 3v18" />
-      <rect width="18" height="18" x="3" y="3" rx="2" />
-      <path d="M3 9h18" />
-      <path d="M3 15h18" />
-    </Svg>
-  );
-}
-function DatabaseIcon({ size }: { size: number }) {
-  return (
-    <Svg size={size}>
-      <ellipse cx="12" cy="5" rx="9" ry="3" />
-      <path d="M3 5V19A9 3 0 0 0 21 19V5" />
-      <path d="M3 12A9 3 0 0 0 21 12" />
-    </Svg>
-  );
-}
-function RefreshIcon({ size }: { size: number }) {
-  return (
-    <Svg size={size}>
-      <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8" />
-      <path d="M21 3v5h-5" />
-    </Svg>
-  );
-}
-function TerminalIcon({ size }: { size: number }) {
-  return (
-    <Svg size={size}>
-      <polyline points="4 17 10 11 4 5" />
-      <line x1="12" x2="20" y1="19" y2="19" />
-    </Svg>
-  );
-}
-function SearchIcon({ size }: { size: number }) {
-  return (
-    <Svg size={size}>
-      <circle cx="11" cy="11" r="8" />
-      <path d="m21 21-4.3-4.3" />
-    </Svg>
   );
 }

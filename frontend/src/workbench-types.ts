@@ -56,8 +56,12 @@ export interface WbTransform {
   name: string | null;
   sql: string;
   output_table: string;
+  output_uri: string;
+  output_backend: string;
+  format: string | null;
   status: string;
   last_run_at?: number | null;
+  last_completed_at?: number | null;
   last_error?: string | null;
 }
 

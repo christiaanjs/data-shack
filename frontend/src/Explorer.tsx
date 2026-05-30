@@ -1,5 +1,17 @@
 import { useState } from "preact/hooks";
 import type { CatalogTableWithSnapshot } from "./catalogViews.ts";
+import {
+  BookmarkIcon,
+  ChartIcon,
+  ChevronIcon,
+  DatabaseIcon,
+  DriveIcon,
+  JobIcon,
+  KeyIcon,
+  PlusIcon,
+  TableIcon,
+  TransformIcon,
+} from "./wbIcons.tsx";
 import type { WbData } from "./workbench-types.ts";
 
 interface TreeGroupProps {
@@ -237,120 +249,5 @@ export function Explorer({ data, activeKey, onOpen, onNewQuery }: ExplorerProps)
         ))}
       </TreeGroup>
     </div>
-  );
-}
-
-// ── Inline SVG icons (Lucide paths) ──────────────────────────────────────────
-
-function Svg({
-  size,
-  children,
-  class: cls,
-}: { size: number; children: preact.ComponentChildren; class?: string }) {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      stroke-width="1.6"
-      stroke-linecap="round"
-      stroke-linejoin="round"
-      class={cls}
-      aria-hidden="true"
-    >
-      {children}
-    </svg>
-  );
-}
-
-function ChevronIcon({ size, class: cls }: { size: number; class?: string }) {
-  return (
-    <Svg size={size} class={cls}>
-      <path d="m9 18 6-6-6-6" />
-    </Svg>
-  );
-}
-function TableIcon({ size }: { size: number }) {
-  return (
-    <Svg size={size}>
-      <path d="M12 3v18" />
-      <rect width="18" height="18" x="3" y="3" rx="2" />
-      <path d="M3 9h18" />
-      <path d="M3 15h18" />
-    </Svg>
-  );
-}
-function DatabaseIcon({ size }: { size: number }) {
-  return (
-    <Svg size={size}>
-      <ellipse cx="12" cy="5" rx="9" ry="3" />
-      <path d="M3 5V19A9 3 0 0 0 21 19V5" />
-      <path d="M3 12A9 3 0 0 0 21 12" />
-    </Svg>
-  );
-}
-function TransformIcon({ size }: { size: number }) {
-  return (
-    <Svg size={size}>
-      <line x1="6" x2="6" y1="3" y2="15" />
-      <circle cx="18" cy="6" r="3" />
-      <circle cx="6" cy="18" r="3" />
-      <path d="M18 9a9 9 0 0 1-9 9" />
-    </Svg>
-  );
-}
-function BookmarkIcon({ size }: { size: number }) {
-  return (
-    <Svg size={size}>
-      <path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z" />
-    </Svg>
-  );
-}
-function JobIcon({ size }: { size: number }) {
-  return (
-    <Svg size={size}>
-      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-      <polyline points="7 10 12 15 17 10" />
-      <line x1="12" x2="12" y1="15" y2="3" />
-    </Svg>
-  );
-}
-function ChartIcon({ size }: { size: number }) {
-  return (
-    <Svg size={size}>
-      <path d="M3 3v18h18" />
-      <path d="M18 17V9" />
-      <path d="M13 17V5" />
-      <path d="M8 17v-3" />
-    </Svg>
-  );
-}
-function KeyIcon({ size }: { size: number }) {
-  return (
-    <Svg size={size}>
-      <circle cx="7.5" cy="15.5" r="5.5" />
-      <path d="m21 2-9.6 9.6" />
-      <path d="m15.5 7.5 3 3L22 7l-3-3" />
-    </Svg>
-  );
-}
-function DriveIcon({ size }: { size: number }) {
-  return (
-    <Svg size={size}>
-      <line x1="22" x2="2" y1="12" y2="12" />
-      <path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" />
-      <line x1="6" x2="6.01" y1="16" y2="16" />
-      <line x1="10" x2="10.01" y1="16" y2="16" />
-    </Svg>
-  );
-}
-function PlusIcon({ size }: { size: number }) {
-  return (
-    <Svg size={size}>
-      <path d="M5 12h14" />
-      <path d="M12 5v14" />
-    </Svg>
   );
 }

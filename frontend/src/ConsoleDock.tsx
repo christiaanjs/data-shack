@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "preact/hooks";
+import { HistoryIcon, PlayIcon, RefreshIcon, TerminalIcon, XIcon } from "./wbIcons.tsx";
 import type { HistoryEntry, LogEntry, WbCtx } from "./workbench-types.ts";
 
 interface ConsoleDockProps {
@@ -191,61 +192,3 @@ function LogLine({ entry }: { entry: LogEntry }) {
 }
 
 // ── Icons ─────────────────────────────────────────────────────────────────────
-
-function Svg({ size, children }: { size: number; children: preact.ComponentChildren }) {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      stroke-width="1.6"
-      stroke-linecap="round"
-      stroke-linejoin="round"
-      aria-hidden="true"
-    >
-      {children}
-    </svg>
-  );
-}
-function TerminalIcon({ size }: { size: number }) {
-  return (
-    <Svg size={size}>
-      <polyline points="4 17 10 11 4 5" />
-      <line x1="12" x2="20" y1="19" y2="19" />
-    </Svg>
-  );
-}
-function HistoryIcon({ size }: { size: number }) {
-  return (
-    <Svg size={size}>
-      <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
-      <path d="M3 3v5h5" />
-      <path d="M12 7v5l4 2" />
-    </Svg>
-  );
-}
-function RefreshIcon({ size }: { size: number }) {
-  return (
-    <Svg size={size}>
-      <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8" />
-      <path d="M21 3v5h-5" />
-    </Svg>
-  );
-}
-function XIcon({ size }: { size: number }) {
-  return (
-    <Svg size={size}>
-      <path d="M18 6 6 18" />
-      <path d="m6 6 12 12" />
-    </Svg>
-  );
-}
-function PlayIcon({ size }: { size: number }) {
-  return (
-    <Svg size={size}>
-      <polygon points="6 3 20 12 6 21 6 3" />
-    </Svg>
-  );
-}
