@@ -13,6 +13,14 @@ function slugToTitle(slug: string): string {
     .join(" ");
 }
 
+function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
 export async function onRequest(context: PagesContext): Promise<Response> {
   const { slug } = context.params;
 
@@ -23,9 +31,10 @@ export async function onRequest(context: PagesContext): Promise<Response> {
   if (!asset.ok) return asset;
 
   const title = slugToTitle(slug);
+  const safeSlug = encodeURIComponent(slug);
   const html = (await asset.text())
-    .replace('href="/manifest.webmanifest"', `href="/dashboards/${slug}/manifest.webmanifest"`)
-    .replace("<title>Data Shack</title>", `<title>${title} — Data Shack</title>`);
+    .replace('href="/manifest.webmanifest"', `href="/dashboards/${safeSlug}/manifest.webmanifest"`)
+    .replace("<title>Data Shack</title>", `<title>${escapeHtml(title)} — Data Shack</title>`);
 
   return new Response(html, {
     status: 200,
