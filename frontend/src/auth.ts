@@ -3,8 +3,33 @@ const STORAGE_KEY_CLIENT = "oauth_client_id";
 const STORAGE_KEY_ACCESS = "oauth_access_token";
 const STORAGE_KEY_REFRESH = "oauth_refresh_token";
 const STORAGE_KEY_EXP = "oauth_exp";
-const SESSION_KEY_VERIFIER = "oauth_code_verifier";
-const SESSION_KEY_STATE = "oauth_state";
+
+// PKCE verifier and state are stored in cookies (not localStorage) so they
+// survive the cross-context hop on Android: standalone PWA initiates the flow
+// but Chrome Custom Tab handles the /callback redirect — cookies are shared
+// between both contexts for the same origin, while localStorage is partitioned.
+// On HTTPS we use the __Host- prefix so the browser enforces Secure + path=/ +
+// host-only scope (blocks subdomain cookie injection); plain names on http
+// localhost where the prefix isn't allowed.
+const HTTPS = location.protocol === "https:";
+const COOKIE_VERIFIER = HTTPS ? "__Host-oauth_pkce_v" : "oauth_pkce_v";
+const COOKIE_STATE = HTTPS ? "__Host-oauth_pkce_s" : "oauth_pkce_s";
+const OAUTH_COOKIE_TTL = 600; // seconds — enough for the round trip
+
+function setAuthCookie(name: string, value: string): void {
+  const secure = HTTPS ? "; Secure" : "";
+  document.cookie = `${name}=${encodeURIComponent(value)}; max-age=${OAUTH_COOKIE_TTL}; path=/; SameSite=Lax${secure}`;
+}
+
+function getAuthCookie(name: string): string | null {
+  const m = document.cookie.match(new RegExp(`(?:^|; )${name}=([^;]*)`));
+  return m ? decodeURIComponent(m[1]) : null;
+}
+
+function deleteAuthCookie(name: string): void {
+  const secure = HTTPS ? "; Secure" : "";
+  document.cookie = `${name}=; max-age=0; path=/; SameSite=Lax${secure}`;
+}
 
 // ── PKCE helpers ──────────────────────────────────────────────────────────
 
@@ -62,8 +87,8 @@ export function clearTokens() {
   localStorage.removeItem(STORAGE_KEY_ACCESS);
   localStorage.removeItem(STORAGE_KEY_REFRESH);
   localStorage.removeItem(STORAGE_KEY_EXP);
-  sessionStorage.removeItem(SESSION_KEY_VERIFIER);
-  sessionStorage.removeItem(SESSION_KEY_STATE);
+  deleteAuthCookie(COOKIE_VERIFIER);
+  deleteAuthCookie(COOKIE_STATE);
 }
 
 function isExpiringSoon(): boolean {
@@ -112,10 +137,10 @@ export async function startLogin() {
   const clientId = await ensureClientId();
   const verifier = await generateCodeVerifier();
   const challenge = await codeChallenge(verifier);
-  sessionStorage.setItem(SESSION_KEY_VERIFIER, verifier);
+  setAuthCookie(COOKIE_VERIFIER, verifier);
 
   const state = crypto.randomUUID();
-  sessionStorage.setItem(SESSION_KEY_STATE, state);
+  setAuthCookie(COOKIE_STATE, state);
 
   const params = new URLSearchParams({
     response_type: "code",
@@ -131,8 +156,8 @@ export async function startLogin() {
 
 export async function handleCallback(searchParams: URLSearchParams): Promise<void> {
   const returnedState = searchParams.get("state");
-  const storedState = sessionStorage.getItem(SESSION_KEY_STATE);
-  sessionStorage.removeItem(SESSION_KEY_STATE);
+  const storedState = getAuthCookie(COOKIE_STATE);
+  deleteAuthCookie(COOKIE_STATE);
   if (!storedState || returnedState !== storedState) {
     throw new Error("State mismatch — possible CSRF");
   }
@@ -140,9 +165,9 @@ export async function handleCallback(searchParams: URLSearchParams): Promise<voi
   const code = searchParams.get("code");
   if (!code) throw new Error("No code in callback URL");
 
-  const verifier = sessionStorage.getItem(SESSION_KEY_VERIFIER);
+  const verifier = getAuthCookie(COOKIE_VERIFIER);
   if (!verifier)
-    throw new Error("No code_verifier in session — callback arrived without a prior login attempt");
+    throw new Error("No code_verifier found — callback arrived without a prior login attempt");
 
   const clientId = localStorage.getItem(STORAGE_KEY_CLIENT);
   if (!clientId) throw new Error("No client_id stored");
@@ -172,7 +197,7 @@ export async function handleCallback(searchParams: URLSearchParams): Promise<voi
     expires_in: number;
   };
   storeTokens(data.access_token, data.refresh_token, data.expires_in);
-  sessionStorage.removeItem(SESSION_KEY_VERIFIER);
+  deleteAuthCookie(COOKIE_VERIFIER);
 }
 
 // ── Token getter with auto-refresh ────────────────────────────────────────

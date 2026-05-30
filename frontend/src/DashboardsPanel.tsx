@@ -10,6 +10,7 @@ interface DashboardsPanelProps {
   setCatalogCommitListener: (listener: ((ev: CatalogCommitEvent) => void) | null) => void;
   sessionEnabled: boolean;
   getCatalogReady: () => Promise<void>;
+  isStandalone?: boolean;
 }
 
 interface DashboardListRow {
@@ -100,7 +101,7 @@ function buildIframeHtml(
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<style>* { box-sizing: border-box; } body { margin: 0; padding: 12px; font-family: system-ui, -apple-system, sans-serif; }</style>
+<style>* { box-sizing: border-box; } body { margin: 0; padding: 0; font-family: system-ui, -apple-system, sans-serif; }</style>
 <script type="importmap">
 {"imports":{"react":"https://esm.sh/react@18.3.1","react/jsx-runtime":"https://esm.sh/react@18.3.1/jsx-runtime","react-dom":"https://esm.sh/react-dom@18.3.1","react-dom/client":"https://esm.sh/react-dom@18.3.1/client","recharts":"https://esm.sh/recharts@2.13.3"}}
 <\/script>
@@ -147,6 +148,7 @@ export function DashboardsPanel({
   setCatalogCommitListener,
   sessionEnabled,
   getCatalogReady,
+  isStandalone = false,
 }: DashboardsPanelProps) {
   const { path, route } = useLocation();
 
@@ -278,20 +280,26 @@ export function DashboardsPanel({
 
   if (dashboardId) {
     return (
-      <div class="p-4 flex flex-col gap-3">
-        <div class="flex items-center gap-3">
-          <button type="button" class="btn btn-ghost btn-sm" onClick={() => route("/dashboards")}>
-            ← Back
-          </button>
-          {activeDashboard && <h2 class="text-lg font-semibold">{activeDashboard.title}</h2>}
-          {running && <span class="loading loading-spinner loading-sm" />}
-          {!sessionEnabled && (
-            <span class="badge badge-outline badge-sm text-base-content/50">proxy mode</span>
-          )}
-        </div>
+      <div class="flex-1 flex flex-col min-h-0">
+        {!isStandalone && (
+          <div class="flex items-center gap-2 px-3 py-2 border-b border-base-300 flex-shrink-0">
+            <button type="button" class="btn btn-ghost btn-sm" onClick={() => route("/dashboards")}>
+              ← Back
+            </button>
+            {activeDashboard && (
+              <h2 class="text-base font-semibold flex-1 truncate">{activeDashboard.title}</h2>
+            )}
+            {running && <span class="loading loading-spinner loading-sm flex-shrink-0" />}
+            {!sessionEnabled && (
+              <span class="badge badge-outline badge-sm text-base-content/50 flex-shrink-0">
+                proxy
+              </span>
+            )}
+          </div>
+        )}
 
         {runError && (
-          <div class="alert alert-error">
+          <div class="alert alert-error flex-shrink-0 m-2">
             <span>{runError}</span>
             {activeDashboard && (
               <button
@@ -306,7 +314,7 @@ export function DashboardsPanel({
         )}
 
         {sessionEnabled && !dbReady && !runError && (
-          <div class="alert alert-warning">
+          <div class="alert alert-warning flex-shrink-0 m-2">
             <span>DuckDB is still initialising…</span>
           </div>
         )}
@@ -316,7 +324,8 @@ export function DashboardsPanel({
             sandbox="allow-scripts"
             srcdoc={iframeHtml}
             title={activeDashboard?.title ?? "Dashboard"}
-            style="width:100%;height:600px;border:1px solid var(--fallback-b3,oklch(var(--b3)));border-radius:8px;background:white;"
+            class="flex-1 min-h-0 w-full"
+            style="border:none;background:white;"
           />
         )}
       </div>

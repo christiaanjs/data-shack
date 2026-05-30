@@ -20,6 +20,8 @@ Each stage produces something functional and testable independently. Stages 1–
 | Stage 9 | Multi-table trigger coordination (`policy: 'any'/'all'`) + Google Sheets data source | ✅ Done |
 | Stage 5 | Catalog DO WebSocket broadcast; live view sync; batch snapshot init; lifted catalog state | ✅ Done |
 | Stage 8 | Dashboard platform (DashboardsPanel, submit_dashboard MCP tool, proxy mode, URL routing, DuckDB toggle) | ✅ Done |
+| Stage 8 (extended) | Dashboard slugs, versioning (snapshot on update/delete), PATCH REST endpoint, list_dashboards/get_dashboard/update_dashboard MCP tools | ✅ Done |
+| Android PWA | PWA manifest + icons; per-dashboard home screen shortcuts via Pages Functions; `__Host-` cookie PKCE fix; standalone full-screen mode | ✅ Done |
 | Stage 10 | MCP tools for job management | Not started |
 | Stage 11 | IaC sync CLI — version-controlled warehouse config with plan/apply/destroy | Not started |
 | Stage 12 | Job history, audit log & error reporting — run log table, failure notifications, freshness SLAs | Not started |
@@ -195,17 +197,18 @@ Implemented as a standalone Cloudflare Worker with D1, ahead of Stage 1, to esta
 ### ✅ Implemented
 
 - `dashboards` D1 table (`migrations/0010_dashboards.sql`): `id`, `user_id`, `title`, `artifact_source` (JSX source up to 50 KB), `queries` (JSON array of SQL strings), `created_at`, `updated_at`
-- `src/db/dashboards.ts`: `insertDashboard`, `getDashboard`, `listDashboards`, `deleteDashboard`
-- MCP tool `submit_dashboard` (`src/mcp/server.ts`): validates title/artifact/queries, enforces 50 KB artifact limit, persists to D1; sandbox iframe (`allow-scripts` without `allow-same-origin`) is the security boundary
-- REST API (`src/index.ts`): `GET /api/dashboards` (list — no `artifact_source`), `GET /api/dashboards/:id` (full detail; `queries` returned as parsed array), `DELETE /api/dashboards/:id`; creation is MCP-only
+- `dashboards.slug` column and `dashboard_snapshots` table (`migrations/0011_dashboard_slugs_and_snapshots.sql`): nullable `slug` with `UNIQUE(user_id, slug)` partial index; `dashboard_snapshots` records versioned copies of source + queries with `snapshot_reason` (`'update'` or `'delete'`) before any destructive operation
+- `src/db/dashboards.ts`: `insertDashboard`, `getDashboard`, `listDashboards`, `deleteDashboard`, `updateDashboard`, `snapshotDashboard`, `slugify`, `resolveUniqueSlug`
+- MCP tools (`src/mcp/server.ts`): `submit_dashboard` (validates title/artifact/queries, optional `slug`, 50 KB limit), `list_dashboards`, `get_dashboard` (by id or slug), `update_dashboard` (auto-snapshots before patching); sandbox iframe (`allow-scripts` without `allow-same-origin`) is the security boundary
+- REST API (`src/index.ts`): `GET /api/dashboards` (list), `GET /api/dashboards/:id` (full detail), `PATCH /api/dashboards/:id` (update title/artifact/queries/slug with snapshot), `DELETE /api/dashboards/:id` (with snapshot); creation is MCP-only
 - `GET /api/table-data/:tableName`: resolves catalog table → latest snapshot → streams raw JSON/NDJSON from storage; returns JSON error envelopes on failure; sets `Content-Type: application/json` or `application/x-ndjson`
 - `src/storage/catalog-fetch.ts`: shared helpers (`resolveTableSnapshot`, `fetchStorageUri`, `inferSnapshotFormat`, `isProxyReadableFormat`, `isProxyReadableUri`) used by both the table-data endpoint and the MCP `read_data`/`get_warehouse_schema` tools
-- `frontend/src/DashboardsPanel.tsx`: list view + URL-driven viewer; sandboxed iframe with React 18 + Babel standalone + Recharts (pinned versions); re-runs queries on catalog commit; proxy mode (`runProxyQuery`) when DuckDB is disabled parses raw JSON/NDJSON client-side
-- `frontend/src/App.tsx`: Dashboards tab; URL routing via preact-iso (`LocationProvider` + `useLocation()`); DuckDB session toggle (default off on mobile, persisted in `localStorage`); three split effects for catalog WS / catalog metadata / DuckDB session; `setDashboardCommitListener` forwards commits to the active dashboard
+- `frontend/src/DashboardsPanel.tsx`: list view + URL-driven viewer; sandboxed iframe with React 18 + Babel standalone + Recharts (pinned versions); re-runs on catalog commit; proxy mode (`runProxyQuery`) when DuckDB is disabled parses raw JSON/NDJSON client-side; `isStandalone` prop hides back button/title so iframe fills the full viewport in standalone mode
+- `frontend/src/App.tsx`: Dashboards tab; URL routing via preact-iso (`LocationProvider` + `useLocation()`); DuckDB session toggle (default off on mobile, persisted in `localStorage`); three split effects for catalog WS / catalog metadata / DuckDB session; `setDashboardCommitListener` forwards commits to the active dashboard; `isStandalone` constant hides navbar on `/dashboards/:slug` paths in standalone mode
 - `frontend/src/catalogViews.ts`: `fetchCatalogMetadata` — lightweight catalog fetch without DuckDB (used when session is disabled)
 - `get_warehouse_schema` MCP tool: annotates each table with a direct-access indicator (`yes — use read_data with uri catalog://tableName` vs `no — requires run_query`)
 - `read_data` MCP tool: supports `catalog://tableName` URI for direct streaming from catalog storage without a browser session
-- 19 tests in `test/dashboard.test.ts`: MCP tool validation, REST CRUD, user isolation, `GET /api/table-data/:tableName` (auth, 404, parquet 400, R2 success)
+- 43 tests in `test/dashboard.test.ts`: MCP tool validation (submit, list, get, update), REST CRUD, slug auto-generation and lookup, versioning/snapshot on update and delete, user isolation, `GET /api/table-data/:tableName` (auth, 404, parquet 400, R2 success)
 
 **Test:** Have a conversation with Claude that produces a spending breakdown dashboard. Submit it via MCP. Navigate to the dashboard viewer — renders with live data. Trigger an Akahu sync — dashboard updates automatically.
 
@@ -253,6 +256,37 @@ Implemented as a standalone Cloudflare Worker with D1, ahead of Stage 1, to esta
 - Existing catalog and session tests extended for `policy`, `watches` array, `last_completed_at`
 
 **Test:** Edit a budget figure in Google Sheets. Wait for the next cron. Verify the derived table updates. Verify the `monthly_spending` transform does not fire until both `transactions` and `budget` have committed.
+
+---
+
+## Android PWA & per-dashboard home screen shortcuts ✅ Done
+
+**Goal:** Each dashboard is installable as a standalone home screen app on Android/iOS.
+
+### ✅ Implemented
+
+**PWA manifest and icons:**
+- `frontend/public/manifest.webmanifest` — main app manifest (`start_url: /`, `scope: /`, `display: standalone`); enables "Add to Home Screen" for the full app
+- `frontend/public/icon-192.png` and `icon-512.png` — solid #1d4ed8 blue squares (raw PNG, no dependencies)
+- `frontend/index.html` — `<link rel="manifest">` and `<meta name="theme-color">` in `<head>`
+
+**Per-dashboard Pages Functions:**
+- `frontend/wrangler.toml` — `pages_build_output_dir = "dist"` enables `wrangler pages deploy` to discover `frontend/functions/` when run from the `frontend/` directory
+- `frontend/functions/dashboards/[slug]/index.ts` — intercepts all `/dashboards/:slug` requests; fetches `/` from `ASSETS` (not `/index.html` to avoid an internal Pages redirect), replaces the `<title>` with a slug-derived title, and rewrites the manifest `href` to point to the per-slug manifest
+- `frontend/functions/dashboards/[slug]/manifest.webmanifest.ts` — returns a per-dashboard Web App Manifest: `name`/`short_name` from the slug, `start_url: /dashboards/:slug`, `scope: /`. The broad scope keeps auth cookies and localStorage shared across the main PWA and all dashboard shortcuts
+- Deploy workflow (`deploy.yml`) updated to run `wrangler pages deploy` from `working-directory: frontend`
+
+**Android OAuth fix:**
+- PKCE verifier and state migrated from `sessionStorage` to HTTP cookies in `frontend/src/auth.ts`
+- Android Chrome 88+ partitions `sessionStorage` (and `localStorage`) between standalone PWA and Chrome Custom Tab — cookies are shared for the same origin
+- On HTTPS: `__Host-` prefix (`__Host-oauth_pkce_v`, `__Host-oauth_pkce_s`) enforces `Secure + path=/ + host-only` scope at the browser level; plain names on `http://localhost`
+- `max-age=600s` TTL; `SameSite=Lax` for CSRF protection; `max-age=0` deletion on callback
+
+**Standalone full-screen mode:**
+- `isStandalone` (module-level constant in `App.tsx`) detects `display-mode: standalone` or iOS `navigator.standalone`
+- Navbar hidden when `isStandalone && path matches /dashboards/:slug` — the full viewport is available for the dashboard
+- Back button and title bar hidden in `DashboardsPanel.tsx` when `isStandalone` and viewing a specific dashboard
+- Dashboard iframe boilerplate `<style>` sets `body { padding: 0 }` — no margin or padding from the harness
 
 ---
 

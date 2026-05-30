@@ -42,6 +42,13 @@ A personal data integration platform built on Cloudflare that brings your data t
 | URL routing with preact-iso; direct links to dashboards (`/dashboards/dash_xxx`) | ✅ Done |
 | DuckDB session toggle: default off on coarse-pointer/mobile; persisted in localStorage | ✅ Done |
 | `catalog://tableName` URI in `read_data` MCP tool; `get_warehouse_schema` direct-access indicator per table | ✅ Done |
+| Dashboard slugs: auto-generated from title, `PATCH /api/dashboards/:id` REST endpoint, lookup by slug or id | ✅ Done |
+| Dashboard versioning: `dashboard_snapshots` table auto-snapshots on every update and delete | ✅ Done |
+| MCP `list_dashboards`, `get_dashboard`, `update_dashboard` tools — full dashboard lifecycle without leaving Claude | ✅ Done |
+| PWA manifest + icons: `manifest.webmanifest`, 192px/512px icons, `theme-color` meta; main app is installable | ✅ Done |
+| Per-dashboard home screen shortcuts: Cloudflare Pages Functions serve per-slug HTML with dashboard title and dedicated manifest | ✅ Done |
+| Android PWA OAuth fix: PKCE verifier/state stored in `__Host-` cookies (shared across PWA + Custom Tab contexts) | ✅ Done |
+| Standalone mode: navbar hidden on dashboard viewer pages; back button/title hidden when opened as PWA shortcut | ✅ Done |
 
 See [`build-plan.md`](./build-plan.md) for the full sequenced plan.
 
@@ -233,7 +240,10 @@ Currently implemented:
 - `list_data_sources` — lists HTTP credentials with their names and base URLs (no browser session required)
 - `run_query` — execute SQL in the browser DuckDB session; requires an active browser tab
 - `read_data` — read JSON/NDJSON from an `http-ds://`, `r2://`, or `catalog://tableName` URI (no browser session required, 1 MB limit)
-- `submit_dashboard` — persist a React + Recharts artifact (up to 50 KB) with bound SQL queries; renders in a sandboxed iframe in the Dashboards tab (no browser session required)
+- `submit_dashboard` — persist a React + Recharts artifact (up to 50 KB) with bound SQL queries; accepts optional `slug` for URL-friendly names; renders in a sandboxed iframe in the Dashboards tab (no browser session required)
+- `list_dashboards` — list all saved dashboards with id, slug, title, and creation date (no browser session required)
+- `get_dashboard` — retrieve full source and queries for a dashboard by id or slug (no browser session required)
+- `update_dashboard` — update title, artifact, queries, and/or slug; auto-snapshots the previous version (no browser session required)
 
 Planned (not yet implemented):
 - `list_etl_jobs` — active job definitions and schedules
