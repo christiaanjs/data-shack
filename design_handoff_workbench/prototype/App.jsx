@@ -112,6 +112,8 @@ function App() {
   const focusTab = useAC((id) => setActiveId(id), []);
 
   const openTab = useAC((kind, payload) => {
+    if (kind === "cred" || kind === "backend") setActivity("settings");
+    else if (kind !== "commit") setActivity("explorer");
     setTabs((prev) => {
       let key, title, tab;
       if (kind === "sql") {
@@ -254,15 +256,16 @@ function App() {
           <button className={cls("wb-act-btn", activity === "explorer" && "active")} title="Explorer" onClick={() => setActivity("explorer")}><Icon name="files" size={20} /></button>
           <button className="wb-act-btn" title="Search (⌘K)" onClick={() => setPaletteOpen(true)}><Icon name="search" size={20} /></button>
           <span className="wb-act-spacer" />
-          <button className="wb-act-btn" title="Commit snapshot" onClick={() => openTab("commit")}><Icon name="database" size={20} /></button>
-          <button className="wb-act-btn" title="Settings" onClick={() => openTab("backend", WB_BACKENDS[0])}><Icon name="settings" size={20} /></button>
+          <button className={cls("wb-act-btn", activity === "settings" && "active")} title="Settings — credentials & backends" onClick={() => setActivity("settings")}><Icon name="settings" size={20} /></button>
         </div>
 
         <div className="wb-sidebar" style={{ width: sidebarW }}>
-          <div className="wb-side-head"><span>Explorer</span>
-            <button className="wb-iconbtn" style={{ width: 22, height: 22 }} title="New query" onClick={() => openTab("sql", { title: "Untitled", sql: "" })}><Icon name="plus" size={15} /></button>
+          <div className="wb-side-head"><span>{activity === "settings" ? "Settings" : "Explorer"}</span>
+            {activity === "explorer" && <button className="wb-iconbtn" style={{ width: 22, height: 22 }} title="New query" onClick={() => openTab("sql", { title: "Untitled", sql: "" })}><Icon name="plus" size={15} /></button>}
           </div>
-          <Explorer data={data} activeKey={activeKey} onOpen={openTab} onNewQuery={() => openTab("sql", { title: "Untitled", sql: "" })} />
+          {activity === "settings"
+            ? <SettingsTree data={data} activeKey={activeKey} onOpen={openTab} />
+            : <Explorer data={data} activeKey={activeKey} onOpen={openTab} onNewQuery={() => openTab("sql", { title: "Untitled", sql: "" })} />}
         </div>
         <div className="wb-resizer" onPointerDown={startResizeX} />
 

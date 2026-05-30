@@ -62,7 +62,7 @@ function SimpleNode({ icon, label, meta, active, onOpen, dotState }) {
 }
 
 function Explorer({ data, activeKey, onOpen, onNewQuery }) {
-  const { tables, transforms, jobs, dashboards, savedQueries, credentials, backends } = data;
+  const { tables, transforms, jobs, dashboards, savedQueries } = data;
   return (
     <div className="wb-side-scroll wb-scrollbar-thin">
       <TreeGroup icon="database" label="Catalog" count={tables.length} defaultOpen onAdd={() => onOpen("new-table")}>
@@ -100,15 +100,23 @@ function Explorer({ data, activeKey, onOpen, onNewQuery }) {
             active={activeKey === `dashboard:${d.id}`} onOpen={() => onOpen("dashboard", d)} />
         ))}
       </TreeGroup>
+    </div>
+  );
+}
 
-      <TreeGroup icon="key" label="Credentials" count={credentials.length}>
+/* Settings view — configuration objects, opened from the gear in the rail. */
+function SettingsTree({ data, activeKey, onOpen }) {
+  const { credentials, backends } = data;
+  return (
+    <div className="wb-side-scroll wb-scrollbar-thin">
+      <TreeGroup icon="key" label="Credentials" count={credentials.length} defaultOpen>
         {credentials.map((c) => (
           <SimpleNode key={c.id} icon="key" label={c.name} meta={c.type === "http" ? "http" : null}
             active={activeKey === `cred:${c.id}`} onOpen={() => onOpen("cred", c)} />
         ))}
       </TreeGroup>
 
-      <TreeGroup icon="drive" label="Storage Backends" count={backends.length}>
+      <TreeGroup icon="drive" label="Storage Backends" count={backends.length} defaultOpen>
         {backends.map((b) => (
           <SimpleNode key={b.id} icon="drive" label={b.name}
             active={activeKey === `backend:${b.id}`} onOpen={() => onOpen("backend", b)} />
@@ -118,4 +126,4 @@ function Explorer({ data, activeKey, onOpen, onNewQuery }) {
   );
 }
 
-window.Explorer = Explorer;
+Object.assign(window, { Explorer, SettingsTree });
