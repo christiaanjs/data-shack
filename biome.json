@@ -30,6 +30,13 @@
     }
   },
   "files": {
-    "ignore": ["node_modules", ".wrangler", "dist", "*.lock", "frontend/src/style.css"]
+    "ignore": [
+      "node_modules",
+      ".wrangler",
+      "dist",
+      "*.lock",
+      "frontend/src/style.css",
+      "design_handoff_workbench"
+    ]
   }
 }

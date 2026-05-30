@@ -29,6 +29,7 @@ import {
   updateLoadJob,
   updateLoadJobOutcome,
 } from "./db/load-jobs.ts";
+import { deleteSavedQuery, insertSavedQuery, listSavedQueries } from "./db/saved-queries.ts";
 import {
   deleteCredential,
   deleteStorageBackend,
@@ -1056,6 +1057,30 @@ app.get("/api/table-data/:tableName", requireAuth, async (c) => {
   }
   const contentType = effectiveFormat === "ndjson" ? "application/x-ndjson" : "application/json";
   return new Response(dataRes.body, { headers: { "Content-Type": contentType } });
+});
+
+// ── Saved Queries ─────────────────────────────────────────────────────────
+
+app.get("/api/saved-queries", requireAuth, async (c) => {
+  const userId = c.get("userId");
+  const queries = await listSavedQueries(c.env.DB, userId);
+  return c.json({ queries });
+});
+
+app.post("/api/saved-queries", requireAuth, async (c) => {
+  const userId = c.get("userId");
+  const body = (await c.req.json()) as { name?: string; sql?: string };
+  if (!body.name || !body.sql) return c.json({ error: "name and sql required" }, 400);
+  const query = await insertSavedQuery(c.env.DB, { userId, name: body.name, sql: body.sql });
+  return c.json({ query }, 201);
+});
+
+app.delete("/api/saved-queries/:id", requireAuth, async (c) => {
+  const userId = c.get("userId");
+  const id = c.req.param("id");
+  const deleted = await deleteSavedQuery(c.env.DB, id, userId);
+  if (!deleted) return c.json({ error: "not found" }, 404);
+  return c.json({ ok: true });
 });
 
 // ── Root ─────────────────────────────────────────────────────────────────
