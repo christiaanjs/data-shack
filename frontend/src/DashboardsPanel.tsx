@@ -101,7 +101,7 @@ function buildIframeHtml(
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<style>* { box-sizing: border-box; } body { margin: 0; padding: 12px; font-family: system-ui, -apple-system, sans-serif; }</style>
+<style>* { box-sizing: border-box; } body { margin: 0; padding: 0; font-family: system-ui, -apple-system, sans-serif; }</style>
 <script type="importmap">
 {"imports":{"react":"https://esm.sh/react@18.3.1","react/jsx-runtime":"https://esm.sh/react@18.3.1/jsx-runtime","react-dom":"https://esm.sh/react-dom@18.3.1","react-dom/client":"https://esm.sh/react-dom@18.3.1/client","recharts":"https://esm.sh/recharts@2.13.3"}}
 <\/script>
