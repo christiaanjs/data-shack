@@ -67,6 +67,7 @@ export interface WbTransform {
 
 export interface WbJob {
   id: string;
+  name: string | null;
   output_table: string | null;
   last_run_at?: number | null;
   last_error?: string | null;

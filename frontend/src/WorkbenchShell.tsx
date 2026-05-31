@@ -464,7 +464,7 @@ export function WorkbenchShell() {
           table: (item as CatalogTableWithSnapshot)?.name,
           transform: itm?.name ?? itm?.output_table,
           dashboard: itm?.title,
-          job: itm?.output_table ?? itm?.id,
+          job: itm?.name ?? itm?.output_table ?? itm?.id,
           cred: itm?.name,
           backend: itm?.name,
         };

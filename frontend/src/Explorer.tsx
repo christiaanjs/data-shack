@@ -202,7 +202,7 @@ export function Explorer({ data, activeKey, onOpen, onNewQuery }: ExplorerProps)
           <SimpleNode
             key={j.id}
             icon={<JobIcon size={14} />}
-            label={j.output_table ?? j.id}
+            label={j.name ?? j.output_table ?? j.id}
             dotState={j.last_error ? "idle" : j.last_run_at ? "success" : "idle"}
             active={activeKey === `job:${j.id}`}
             onOpen={() => onOpen("job", j)}
