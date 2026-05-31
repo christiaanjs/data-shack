@@ -125,11 +125,8 @@ export async function runGoogleSheetsLoadJob(
   let uri: string;
 
   if (backendRow.type === "r2-bound") {
-    const raw = JSON.parse(await decryptConfig(backendRow.encrypted_config, env.JWT_SECRET)) as {
-      bucket: string;
-    };
     await env.R2.put(r2BoundKey(job.user_id, relPath), ndjsonBody);
-    uri = `r2://${raw.bucket}/${relPath}`;
+    uri = `r2://${backendRow.name}/${relPath}`;
   } else if (backendRow.type === "r2-s3compat") {
     const raw = JSON.parse(await decryptConfig(backendRow.encrypted_config, env.JWT_SECRET)) as {
       endpoint: string;

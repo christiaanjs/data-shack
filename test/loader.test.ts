@@ -34,8 +34,9 @@ async function insertCredential(): Promise<string> {
   return id;
 }
 
-async function insertR2BoundBackend(): Promise<string> {
+async function insertR2BoundBackend(): Promise<{ id: string; name: string }> {
   const id = `sb_${crypto.randomUUID().replace(/-/g, "")}`;
+  const name = `Test R2 ${id}`;
   const config = { bucket: "data-shack-storage" };
   await env.DB.prepare(
     "INSERT INTO storage_backends (id, user_id, name, type, encrypted_config, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -43,14 +44,14 @@ async function insertR2BoundBackend(): Promise<string> {
     .bind(
       id,
       USER_ID,
-      `Test R2 ${id}`,
+      name,
       "r2-bound",
       await encryptConfig(JSON.stringify(config), env.JWT_SECRET),
       Date.now(),
       Date.now(),
     )
     .run();
-  return id;
+  return { id, name };
 }
 
 async function insertR2S3CompatBackend(): Promise<string> {
@@ -147,10 +148,11 @@ function withMockedFetch(
 describe("runHttpLoadJob r2-bound", () => {
   let credId: string;
   let backendId: string;
+  let backendName: string;
 
   beforeAll(async () => {
     credId = await insertCredential();
-    backendId = await insertR2BoundBackend();
+    ({ id: backendId, name: backendName } = await insertR2BoundBackend());
   });
 
   it(
@@ -159,10 +161,10 @@ describe("runHttpLoadJob r2-bound", () => {
       const job = makeJob(credId, backendId, "r2_cl_tbl");
       const { uri } = await runHttpLoadJob(job, env);
 
-      expect(uri).toMatch(/^r2:\/\/data-shack-storage\//);
+      expect(uri).toMatch(new RegExp(`^r2://${backendName}/`));
       expect(uri).not.toContain(USER_ID);
       // resolveUri will prepend users/${userId}/ — verify the actual R2 key
-      const relPath = uri.replace("r2://data-shack-storage/", "");
+      const relPath = uri.slice(`r2://${backendName}/`.length);
       const key = `users/${USER_ID}/${relPath}`;
       const obj = await env.R2.get(key);
       expect(obj).not.toBeNull();
@@ -176,10 +178,10 @@ describe("runHttpLoadJob r2-bound", () => {
       const job = makeJob(credId, backendId, "r2_nocl_tbl");
       const { uri } = await runHttpLoadJob(job, env);
 
-      expect(uri).toMatch(/^r2:\/\/data-shack-storage\//);
+      expect(uri).toMatch(new RegExp(`^r2://${backendName}/`));
       expect(uri).not.toContain(USER_ID);
       // resolveUri will prepend users/${userId}/ — verify the actual R2 key
-      const relPath = uri.replace("r2://data-shack-storage/", "");
+      const relPath = uri.slice(`r2://${backendName}/`.length);
       const key = `users/${USER_ID}/${relPath}`;
       const obj = await env.R2.get(key);
       expect(obj).not.toBeNull();
@@ -257,7 +259,7 @@ describe("runHttpLoadJob date_range_config", () => {
 
   beforeAll(async () => {
     credId = await insertCredential();
-    backendId = await insertR2BoundBackend();
+    ({ id: backendId } = await insertR2BoundBackend());
   });
 
   it("adds date params to upstream URL in iso_date format", async () => {
@@ -337,10 +339,11 @@ describe("runHttpLoadJob date_range_config", () => {
 describe("runHttpLoadJob cursor pagination r2-bound", () => {
   let credId: string;
   let backendId: string;
+  let backendName: string;
 
   beforeAll(async () => {
     credId = await insertCredential();
-    backendId = await insertR2BoundBackend();
+    ({ id: backendId, name: backendName } = await insertR2BoundBackend());
   });
 
   it("fetches a single page when no cursor returned and writes all items as ndjson", async () => {
@@ -359,7 +362,7 @@ describe("runHttpLoadJob cursor pagination r2-bound", () => {
         }),
       };
       const { uri } = await runHttpLoadJob(job, env);
-      const relPath = uri.replace("r2://data-shack-storage/", "");
+      const relPath = uri.slice(`r2://${backendName}/`.length);
       const obj = await env.R2.get(`users/${USER_ID}/${relPath}`);
       expect(obj).not.toBeNull();
       const text = await obj!.text();
@@ -412,7 +415,7 @@ describe("runHttpLoadJob cursor pagination r2-bound", () => {
       expect(capturedUrls[1]).toContain("cursor=tok2");
       expect(capturedUrls[2]).toContain("cursor=tok3");
 
-      const relPath = uri.replace("r2://data-shack-storage/", "");
+      const relPath = uri.slice(`r2://${backendName}/`.length);
       const obj = await env.R2.get(`users/${USER_ID}/${relPath}`);
       const text = await obj!.text();
       expect(text).toContain('{"id":1}');
@@ -443,7 +446,7 @@ describe("runHttpLoadJob cursor pagination r2-bound", () => {
         }),
       };
       const { uri } = await runHttpLoadJob(job, env);
-      const relPath = uri.replace("r2://data-shack-storage/", "");
+      const relPath = uri.slice(`r2://${backendName}/`.length);
       const obj = await env.R2.get(`users/${USER_ID}/${relPath}`);
       const parsed = JSON.parse(await obj!.text()) as unknown[];
       expect(Array.isArray(parsed)).toBe(true);
@@ -690,8 +693,9 @@ async function insertGsCredential(): Promise<string> {
   return id;
 }
 
-async function insertGsR2BoundBackend(): Promise<string> {
+async function insertGsR2BoundBackend(): Promise<{ id: string; name: string }> {
   const id = `sb_gs_${crypto.randomUUID().replace(/-/g, "")}`;
+  const name = `Test GS R2 ${id}`;
   const config = { bucket: "data-shack-storage" };
   await env.DB.prepare(
     "INSERT INTO storage_backends (id, user_id, name, type, encrypted_config, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -699,14 +703,14 @@ async function insertGsR2BoundBackend(): Promise<string> {
     .bind(
       id,
       GS_USER_ID,
-      `Test GS R2 ${id}`,
+      name,
       "r2-bound",
       await encryptConfig(JSON.stringify(config), env.JWT_SECRET),
       Date.now(),
       Date.now(),
     )
     .run();
-  return id;
+  return { id, name };
 }
 
 function makeGsJob(credId: string, backendId: string, sourceConfig: object): LoadJob {
@@ -738,13 +742,14 @@ function makeGsJob(credId: string, backendId: string, sourceConfig: object): Loa
 describe("runGoogleSheetsLoadJob", () => {
   let credId: string;
   let backendId: string;
+  let backendName: string;
 
   beforeAll(async () => {
     await env.DB.prepare("INSERT OR IGNORE INTO users (id, email, created_at) VALUES (?, ?, ?)")
       .bind(GS_USER_ID, "gs-loader@example.com", Date.now())
       .run();
     credId = await insertGsCredential();
-    backendId = await insertGsR2BoundBackend();
+    ({ id: backendId, name: backendName } = await insertGsR2BoundBackend());
   });
 
   // env proxy with Google OAuth vars set (they exist in vitest config but are stubs).
@@ -804,8 +809,8 @@ describe("runGoogleSheetsLoadJob", () => {
         sheetName: "Sheet1",
       });
       const { uri } = await runGoogleSheetsLoadJob(job, gsEnv());
-      expect(uri).toMatch(/^r2:\/\/data-shack-storage\//);
-      const relPath = uri.replace("r2://data-shack-storage/", "");
+      expect(uri).toMatch(new RegExp(`^r2://${backendName}/`));
+      const relPath = uri.slice(`r2://${backendName}/`.length);
       const obj = await env.R2.get(`users/${GS_USER_ID}/${relPath}`);
       expect(obj).not.toBeNull();
       const text = await obj!.text();

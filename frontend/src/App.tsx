@@ -6,6 +6,7 @@ import { LoadJobsPanel } from "./LoadJobsPanel.tsx";
 import { QueryPanel } from "./QueryPanel.tsx";
 import { SettingsPanel } from "./SettingsPanel.tsx";
 import { TransformJobsPanel } from "./TransformJobsPanel.tsx";
+import { WorkbenchShell } from "./WorkbenchShell.tsx";
 import { clearTokens, getAccessToken, getValidToken, handleCallback, startLogin } from "./auth.ts";
 import {
   type CatalogTableWithSnapshot,
@@ -43,6 +44,17 @@ const isStandalone =
     (window.navigator as { standalone?: boolean }).standalone === true);
 
 export function App() {
+  const { path } = useLocation();
+
+  // Delegate to WorkbenchShell for /workbench paths — it is fully self-contained.
+  if (path.startsWith("/workbench")) {
+    return <WorkbenchShell />;
+  }
+
+  return <LegacyApp />;
+}
+
+function LegacyApp() {
   const { path, route } = useLocation();
 
   const activeTab = tabFromPath(path);
@@ -53,7 +65,6 @@ export function App() {
   const [userId, setUserId] = useState<string | null>(null);
   const [sessionConnected, setSessionConnected] = useState(false);
 
-  // DuckDB toggle — persisted in localStorage; default off on coarse-pointer (touch) devices.
   const [sessionEnabled, setSessionEnabled] = useState(() => {
     if (typeof window === "undefined") return true;
     const stored = localStorage.getItem("duckdb-session-enabled");
@@ -63,7 +74,6 @@ export function App() {
   const sessionEnabledRef = useRef(sessionEnabled);
   sessionEnabledRef.current = sessionEnabled;
 
-  // ── Catalog state (lifted from QueryPanel) ───────────────────────────────
   const [catalogTables, setCatalogTables] = useState<CatalogTableWithSnapshot[]>([]);
   const [catalogLoading, setCatalogLoading] = useState(false);
   const [catalogError, setCatalogError] = useState<string | null>(null);
@@ -92,13 +102,12 @@ export function App() {
 
   const getCatalogReady = useCallback(() => catalogReadyRef.current, []);
 
-  // getDb that refuses to start DuckDB when the session toggle is off.
   const getDb = useCallback(async () => {
     if (!sessionEnabledRef.current) throw new Error("DuckDB session is disabled");
     return initDuckDB();
   }, []);
 
-  // ── Auth state machine ────────────────────────────────────────────────────
+  // ── Auth ──────────────────────────────────────────────────────────────────
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: mount-only — path/route are stable on first render
   useEffect(() => {
@@ -148,7 +157,7 @@ export function App() {
     fetchUserId().catch(() => {});
   }, [authed]);
 
-  // ── Catalog initialization ────────────────────────────────────────────────
+  // ── Catalog ───────────────────────────────────────────────────────────────
 
   const runCatalogInit = useCallback(async () => {
     setCatalogLoading(true);
@@ -215,7 +224,7 @@ export function App() {
     dashboardCommitListenerRef.current?.(event);
   }, []);
 
-  // ── Effect A: Catalog WebSocket (always when authed) ─────────────────────
+  // ── Effect A: Catalog WebSocket ───────────────────────────────────────────
 
   useEffect(() => {
     if (!authed) {
@@ -236,7 +245,7 @@ export function App() {
     };
   }, [authed, handleCommit, getDb]);
 
-  // ── Effect B: Catalog metadata (depends on sessionEnabled) ───────────────
+  // ── Effect B: Catalog metadata ────────────────────────────────────────────
 
   useEffect(() => {
     if (!authed) return;
@@ -256,7 +265,7 @@ export function App() {
     }
   }, [authed, sessionEnabled, runCatalogInit]);
 
-  // ── Effect C: DuckDB + session WebSocket (only when sessionEnabled) ───────
+  // ── Effect C: DuckDB + session WebSocket ──────────────────────────────────
 
   useEffect(() => {
     if (!authed || !sessionEnabled) {
@@ -289,7 +298,7 @@ export function App() {
     };
   }, [authed, sessionEnabled, getCatalogReady]);
 
-  // ── Loading screen ────────────────────────────────────────────────────────
+  // ── Loading / login ───────────────────────────────────────────────────────
 
   if (authed === null) {
     return (
@@ -374,6 +383,9 @@ export function App() {
             {userId && (
               <span class="text-xs text-base-content/50 font-mono hidden sm:block">{userId}</span>
             )}
+            <a href="/workbench" class="btn btn-ghost btn-xs" title="Open workbench IDE">
+              Workbench
+            </a>
             {!DEV_TOKEN && (
               <button
                 type="button"

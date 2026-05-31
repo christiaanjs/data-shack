@@ -144,9 +144,14 @@ storageRouter.post("/proxy-credentials", requireAuth, async (c) => {
   } else {
     const row = await getStorageBackendByNameOrId(c.env.DB, rawBackend, userId);
     if (!row) return c.json({ error: "storage backend not found" }, 404);
-    // If resolved by name, backendName = the name. If resolved by id, backendName = id (backwards compat).
-    backendId = row.id;
-    backendName = rawBackend === row.id ? row.id : row.name;
+    if (row.type === "r2-bound") {
+      backendId = "r2-bound";
+      backendName = row.name;
+    } else {
+      // If resolved by name, backendName = the name. If resolved by id, backendName = id (backwards compat).
+      backendId = row.id;
+      backendName = rawBackend === row.id ? row.id : row.name;
+    }
   }
 
   const accessKeyId = `pxy_${crypto.randomUUID().replace(/-/g, "")}`;

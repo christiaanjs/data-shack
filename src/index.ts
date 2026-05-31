@@ -29,6 +29,7 @@ import {
   updateLoadJob,
   updateLoadJobOutcome,
 } from "./db/load-jobs.ts";
+import { deleteSavedQuery, insertSavedQuery, listSavedQueries } from "./db/saved-queries.ts";
 import {
   deleteCredential,
   deleteStorageBackend,
@@ -401,8 +402,11 @@ app.post("/api/storage-backends", requireAuth, async (c) => {
     type?: unknown;
     config?: unknown;
   }>();
-  if (typeof body.name !== "string" || typeof body.type !== "string" || !body.config) {
-    return c.json({ error: "name, type, and config are required" }, 400);
+  if (typeof body.name !== "string" || typeof body.type !== "string") {
+    return c.json({ error: "name and type are required" }, 400);
+  }
+  if (body.type !== "r2-bound" && !body.config) {
+    return c.json({ error: "config is required" }, 400);
   }
   const name = body.name.trim();
   if (!name || name.length > 64 || name.includes("/")) {
@@ -411,7 +415,10 @@ app.post("/api/storage-backends", requireAuth, async (c) => {
   if (name === "r2-bound" || name === "data-shack") {
     return c.json({ error: `'${name}' is a reserved backend name` }, 400);
   }
-  const encryptedConfig = await encryptConfig(JSON.stringify(body.config), c.env.JWT_SECRET);
+  const encryptedConfig = await encryptConfig(
+    JSON.stringify(body.type === "r2-bound" ? {} : body.config),
+    c.env.JWT_SECRET,
+  );
   try {
     const result = await insertStorageBackend(c.env.DB, {
       userId: c.get("userId"),
@@ -1056,6 +1063,30 @@ app.get("/api/table-data/:tableName", requireAuth, async (c) => {
   }
   const contentType = effectiveFormat === "ndjson" ? "application/x-ndjson" : "application/json";
   return new Response(dataRes.body, { headers: { "Content-Type": contentType } });
+});
+
+// ── Saved Queries ─────────────────────────────────────────────────────────
+
+app.get("/api/saved-queries", requireAuth, async (c) => {
+  const userId = c.get("userId");
+  const queries = await listSavedQueries(c.env.DB, userId);
+  return c.json({ queries });
+});
+
+app.post("/api/saved-queries", requireAuth, async (c) => {
+  const userId = c.get("userId");
+  const body = (await c.req.json()) as { name?: string; sql?: string };
+  if (!body.name || !body.sql) return c.json({ error: "name and sql required" }, 400);
+  const query = await insertSavedQuery(c.env.DB, { userId, name: body.name, sql: body.sql });
+  return c.json({ query }, 201);
+});
+
+app.delete("/api/saved-queries/:id", requireAuth, async (c) => {
+  const userId = c.get("userId");
+  const id = c.req.param("id");
+  const deleted = await deleteSavedQuery(c.env.DB, id, userId);
+  if (!deleted) return c.json({ error: "not found" }, 404);
+  return c.json({ ok: true });
 });
 
 // ── Root ─────────────────────────────────────────────────────────────────
