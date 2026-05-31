@@ -402,8 +402,11 @@ app.post("/api/storage-backends", requireAuth, async (c) => {
     type?: unknown;
     config?: unknown;
   }>();
-  if (typeof body.name !== "string" || typeof body.type !== "string" || !body.config) {
-    return c.json({ error: "name, type, and config are required" }, 400);
+  if (typeof body.name !== "string" || typeof body.type !== "string") {
+    return c.json({ error: "name and type are required" }, 400);
+  }
+  if (body.type !== "r2-bound" && !body.config) {
+    return c.json({ error: "config is required" }, 400);
   }
   const name = body.name.trim();
   if (!name || name.length > 64 || name.includes("/")) {
@@ -412,7 +415,10 @@ app.post("/api/storage-backends", requireAuth, async (c) => {
   if (name === "r2-bound" || name === "data-shack") {
     return c.json({ error: `'${name}' is a reserved backend name` }, 400);
   }
-  const encryptedConfig = await encryptConfig(JSON.stringify(body.config), c.env.JWT_SECRET);
+  const encryptedConfig = await encryptConfig(
+    JSON.stringify(body.type === "r2-bound" ? {} : body.config),
+    c.env.JWT_SECRET,
+  );
   try {
     const result = await insertStorageBackend(c.env.DB, {
       userId: c.get("userId"),
