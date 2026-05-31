@@ -449,6 +449,14 @@ export function WorkbenchShell() {
         key = "commit";
         title = "Commit snapshot";
         tab = { id: uid(), kind: "commit", key, title };
+      } else if (kind === "new-transform") {
+        key = `transform:new:${uid()}`;
+        title = "New transform";
+        tab = { id: uid(), kind: "transform", key, title, item: null };
+      } else if (kind === "new-job") {
+        key = `job:new:${uid()}`;
+        title = "New load job";
+        tab = { id: uid(), kind: "job", key, title, item: null };
       } else {
         const itm = item as { id?: string; name?: string; title?: string; output_table?: string };
         const idVal = itm?.id ?? uid();

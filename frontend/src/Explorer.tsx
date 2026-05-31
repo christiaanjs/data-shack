@@ -44,8 +44,7 @@ function TreeGroup({ icon, label, count, defaultOpen = false, onAdd, children }:
         <span>{label}</span>
         <span class="wb-group-count">{count}</span>
         {onAdd && (
-          <button
-            type="button"
+          <span
             class="wb-group-add wb-iconbtn"
             style={{ width: 18, height: 18 }}
             title={`New ${label.toLowerCase()}`}
@@ -55,7 +54,7 @@ function TreeGroup({ icon, label, count, defaultOpen = false, onAdd, children }:
             }}
           >
             <PlusIcon size={13} />
-          </button>
+          </span>
         )}
       </button>
       {open && <div>{children}</div>}
@@ -75,8 +74,7 @@ function TableNode({ table, active, onOpen }: TableNodeProps) {
   return (
     <div>
       <button type="button" class={`wb-node${active ? " active" : ""}`} onClick={onOpen}>
-        <button
-          type="button"
+        <span
           class={`wb-node-expand${expanded ? " open" : ""}`}
           onClick={(e) => {
             e.stopPropagation();
@@ -84,7 +82,7 @@ function TableNode({ table, active, onOpen }: TableNodeProps) {
           }}
         >
           {!failed && <ChevronIcon class="wb-chev" size={11} />}
-        </button>
+        </span>
         <span class="wb-node-ico">
           <TableIcon size={14} />
         </span>
