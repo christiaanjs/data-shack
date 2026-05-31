@@ -1243,3 +1243,75 @@ body {
 .wb-cm-host {
   height: 100%;
 }
+
+/* ── Dashboard editor ───────────────────────────────────────────────────── */
+.wb-dash-split {
+  display: flex;
+  flex-direction: row;
+  flex: 1;
+  min-height: 0;
+}
+.wb-dash-left {
+  display: flex;
+  flex-direction: column;
+  flex: none;
+  width: 55%;
+  min-width: 0;
+  border-right: 1px solid var(--color-base-300);
+}
+.wb-dash-queries {
+  flex: none;
+  max-height: 35%;
+  overflow-y: auto;
+  border-bottom: 1px solid var(--color-base-300);
+}
+.wb-dash-query-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px 4px;
+  font-size: 11px;
+  font-weight: 600;
+  font-family: var(--font-mono, monospace);
+  color: color-mix(in oklch, var(--color-base-content) 50%, transparent);
+}
+.wb-dash-query-editor {
+  height: 100px;
+  border-top: 1px solid var(--color-base-300);
+}
+.wb-dash-queries-add {
+  padding: 8px 14px;
+  border-top: 1px solid var(--color-base-300);
+}
+.wb-dash-artifact {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.wb-dash-artifact-head {
+  flex: none;
+  padding: 6px 14px;
+  font-size: 11px;
+  color: color-mix(in oklch, var(--color-base-content) 45%, transparent);
+  border-bottom: 1px solid var(--color-base-300);
+  font-family: var(--font-mono, monospace);
+}
+.wb-dash-preview {
+  flex: 1;
+  min-width: 0;
+  position: relative;
+  overflow: hidden;
+  background: #fff;
+}
+.wb-dash-preview-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  color: color-mix(in oklch, var(--color-base-content) 40%, transparent);
+  background: var(--color-base-100);
+}
