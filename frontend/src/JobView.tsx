@@ -1,5 +1,5 @@
 import { useEffect, useState } from "preact/hooks";
-import { WORKER_BASE, authHeaders } from "./wb-api.ts";
+import { WORKER_BASE, authHeaders, fmtAgo } from "./wb-api.ts";
 import { JobIcon, SaveIcon, SettingsIcon } from "./wbIcons.tsx";
 import type { WbCtx, WbTab } from "./workbench-types.ts";
 
@@ -25,15 +25,6 @@ interface JvLookup {
   id: string;
   name: string;
   type: string;
-}
-
-function fmtAgo(ms: number | null | undefined): string {
-  if (!ms) return "—";
-  const s = (Date.now() - ms) / 1000;
-  if (s < 60) return "just now";
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
-  return `${Math.floor(s / 86400)}d ago`;
 }
 
 export function JobView({ tab }: { tab: WbTab; ctx: WbCtx }) {
