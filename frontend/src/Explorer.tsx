@@ -52,6 +52,12 @@ function TreeGroup({ icon, label, count, defaultOpen = false, onAdd, children }:
               e.stopPropagation();
               onAdd();
             }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.stopPropagation();
+                onAdd();
+              }
+            }}
           >
             <PlusIcon size={13} />
           </span>
@@ -79,6 +85,12 @@ function TableNode({ table, active, onOpen }: TableNodeProps) {
           onClick={(e) => {
             e.stopPropagation();
             if (!failed) setExpanded((v) => !v);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.stopPropagation();
+              if (!failed) setExpanded((v) => !v);
+            }
           }}
         >
           {!failed && <ChevronIcon class="wb-chev" size={11} />}
@@ -210,7 +222,12 @@ export function Explorer({ data, activeKey, onOpen, onNewQuery }: ExplorerProps)
         ))}
       </TreeGroup>
 
-      <TreeGroup icon={<ChartIcon size={13} />} label="Dashboards" count={dashboards.length} onAdd={() => onOpen("new-dashboard")}>
+      <TreeGroup
+        icon={<ChartIcon size={13} />}
+        label="Dashboards"
+        count={dashboards.length}
+        onAdd={() => onOpen("new-dashboard")}
+      >
         {dashboards.map((d) => (
           <SimpleNode
             key={d.id}
