@@ -457,6 +457,10 @@ export function WorkbenchShell() {
         key = `job:new:${uid()}`;
         title = "New load job";
         tab = { id: uid(), kind: "job", key, title, item: null };
+      } else if (kind === "new-dashboard") {
+        key = `dashboard:new:${uid()}`;
+        title = "New dashboard";
+        tab = { id: uid(), kind: "dashboard", key, title, item: null };
       } else {
         const itm = item as { id?: string; name?: string; title?: string; output_table?: string };
         const idVal = itm?.id ?? uid();

@@ -210,7 +210,7 @@ export function Explorer({ data, activeKey, onOpen, onNewQuery }: ExplorerProps)
         ))}
       </TreeGroup>
 
-      <TreeGroup icon={<ChartIcon size={13} />} label="Dashboards" count={dashboards.length}>
+      <TreeGroup icon={<ChartIcon size={13} />} label="Dashboards" count={dashboards.length} onAdd={() => onOpen("new-dashboard")}>
         {dashboards.map((d) => (
           <SimpleNode
             key={d.id}
