@@ -257,13 +257,14 @@ export function SettingsTree({ data, activeKey, onOpen }: SettingsTreeProps) {
         label="Credentials"
         count={credentials.length}
         defaultOpen
+        onAdd={() => onOpen("new-cred")}
       >
         {credentials.map((c) => (
           <SimpleNode
             key={c.id}
             icon={<KeyIcon size={14} />}
             label={c.name}
-            meta={c.type === "http" ? "http" : null}
+            meta={c.type}
             active={activeKey === `cred:${c.id}`}
             onOpen={() => onOpen("cred", c)}
           />
@@ -275,12 +276,14 @@ export function SettingsTree({ data, activeKey, onOpen }: SettingsTreeProps) {
         label="Storage Backends"
         count={backends.length}
         defaultOpen
+        onAdd={() => onOpen("new-backend")}
       >
         {backends.map((b) => (
           <SimpleNode
             key={b.id}
             icon={<DriveIcon size={14} />}
             label={b.name}
+            meta={b.type}
             active={activeKey === `backend:${b.id}`}
             onOpen={() => onOpen("backend", b)}
           />

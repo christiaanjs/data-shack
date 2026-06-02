@@ -1,4 +1,6 @@
 import { useRef, useState } from "preact/hooks";
+import { BackendView } from "./BackendView.tsx";
+import { CredView } from "./CredView.tsx";
 import { DashboardEditView } from "./DashboardEditView.tsx";
 import { JobView } from "./JobView.tsx";
 import { ResultGrid } from "./ResultGrid.tsx";
@@ -333,6 +335,10 @@ export function TabContent({ tab, ctx }: { tab: WbTab | null; ctx: WbCtx }) {
       return <JobView tab={tab} ctx={ctx} />;
     case "dashboard":
       return <DashboardEditView tab={tab} ctx={ctx} />;
+    case "cred":
+      return <CredView tab={tab} ctx={ctx} />;
+    case "backend":
+      return <BackendView tab={tab} ctx={ctx} />;
     case "commit":
       return <CommitView ctx={ctx} />;
     default:

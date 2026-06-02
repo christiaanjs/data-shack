@@ -20,7 +20,7 @@ import {
   linkIdentity,
   updateUserEmail,
 } from "../db/queries.ts";
-import { insertCredential } from "../db/settings.ts";
+import { insertCredential, updateCredential } from "../db/settings.ts";
 import type { Env } from "../types.ts";
 import {
   ACCESS_TOKEN_TTL,
@@ -238,6 +238,7 @@ function buildProviderRedirect(
 export async function handleConnectGoogleSheets(request: Request, env: Env): Promise<Response> {
   const params = new URL(request.url).searchParams;
   const credentialName = params.get("name") ?? "Google Sheets";
+  const credentialId = params.get("credId") ?? null;
   const issuer = issuerFromRequest(request);
 
   const providerUrl = buildProviderRedirect("google-sheets", env, issuer);
@@ -256,6 +257,7 @@ export async function handleConnectGoogleSheets(request: Request, env: Env): Pro
     redirect_uri: "",
     original_state: null,
     credential_name: credentialName,
+    credential_id: credentialId,
     expires_at: Date.now() + 10 * 60 * 1000,
   });
 
@@ -354,12 +356,18 @@ export async function handleCallback(request: Request, env: Env): Promise<Respon
       JSON.stringify({ refreshToken: result.refreshToken }),
       env.JWT_SECRET,
     );
-    await insertCredential(env.DB, {
-      userId,
-      name: pending.credential_name ?? "Google Sheets",
-      type: "google-sheets",
-      encryptedConfig: encryptedCfg,
-    });
+    if (pending.credential_id) {
+      await updateCredential(env.DB, pending.credential_id, userId, {
+        encryptedConfig: encryptedCfg,
+      });
+    } else {
+      await insertCredential(env.DB, {
+        userId,
+        name: pending.credential_name ?? "Google Sheets",
+        type: "google-sheets",
+        encryptedConfig: encryptedCfg,
+      });
+    }
     return popupResultHtml("success", frontendOrigin, {
       credentialName: pending.credential_name ?? undefined,
     });

@@ -429,7 +429,8 @@ export function WorkbenchShell() {
   // ── Tab management ────────────────────────────────────────────────────────
 
   const openTab = useCallback((kind: string, item?: unknown) => {
-    if (kind === "cred" || kind === "backend") setActivity("settings");
+    if (kind === "cred" || kind === "backend" || kind === "new-cred" || kind === "new-backend")
+      setActivity("settings");
     else if (kind !== "commit") setActivity("explorer");
     setTabs((prev) => {
       let key: string;
@@ -461,6 +462,14 @@ export function WorkbenchShell() {
         key = `dashboard:new:${uid()}`;
         title = "New dashboard";
         tab = { id: uid(), kind: "dashboard", key, title, item: null };
+      } else if (kind === "new-cred") {
+        key = `cred:new:${uid()}`;
+        title = "New credential";
+        tab = { id: uid(), kind: "cred", key, title, item: null };
+      } else if (kind === "new-backend") {
+        key = `backend:new:${uid()}`;
+        title = "New backend";
+        tab = { id: uid(), kind: "backend", key, title, item: null };
       } else {
         const itm = item as { id?: string; name?: string; title?: string; output_table?: string };
         const idVal = itm?.id ?? uid();

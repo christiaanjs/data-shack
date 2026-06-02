@@ -15,6 +15,7 @@ import {
   HardDrive,
   History,
   Key,
+  Link,
   LogOut,
   Moon,
   PanelBottom,
@@ -27,6 +28,7 @@ import {
   Sun,
   Table2,
   Terminal,
+  Trash2,
   X,
 } from "lucide-preact";
 
@@ -101,4 +103,10 @@ export function RefreshIcon({ size }: { size: number }) {
 }
 export function HistoryIcon({ size }: { size: number }) {
   return <History size={size} strokeWidth={SW} />;
+}
+export function TrashIcon({ size }: { size: number }) {
+  return <Trash2 size={size} strokeWidth={SW} />;
+}
+export function LinkIcon({ size }: { size: number }) {
+  return <Link size={size} strokeWidth={SW} />;
 }

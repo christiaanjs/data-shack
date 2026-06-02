@@ -40,6 +40,7 @@ import {
   insertStorageBackend,
   listCredentials,
   listStorageBackends,
+  updateCredential,
   updateStorageBackend,
 } from "./db/settings.ts";
 import { decryptHttpConfig, resolveHeaderTemplates } from "./http-config.ts";
@@ -358,6 +359,38 @@ app.delete("/api/credentials/:id", requireAuth, async (c) => {
   const deleted = await deleteCredential(c.env.DB, c.req.param("id"), c.get("userId"));
   if (!deleted) return new Response("Not Found", { status: 404 });
   return new Response(null, { status: 204 });
+});
+
+app.patch("/api/credentials/:id", requireAuth, async (c) => {
+  const body = await c.req.json<Record<string, unknown>>();
+  const opts: { name?: string; encryptedConfig?: string } = {};
+
+  if (body.name !== undefined) {
+    if (typeof body.name !== "string") return c.json({ error: "name must be a string" }, 400);
+    const name = body.name.trim();
+    if (!name || name.length > 64 || !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(name)) {
+      return c.json(
+        {
+          error:
+            "name must be 1–64 characters, start with a letter or digit, and contain only letters, digits, '.', '_', or '-'",
+        },
+        400,
+      );
+    }
+    opts.name = name;
+  }
+
+  if (body.config !== undefined) {
+    opts.encryptedConfig = await encryptConfig(JSON.stringify(body.config), c.env.JWT_SECRET);
+  }
+
+  if (!opts.name && !opts.encryptedConfig) {
+    return c.json({ error: "at least one of name or config must be provided" }, 400);
+  }
+
+  const updated = await updateCredential(c.env.DB, c.req.param("id"), c.get("userId"), opts);
+  if (!updated) return c.json({ error: "not found" }, 404);
+  return c.json({ id: c.req.param("id") });
 });
 
 app.post("/api/credentials/:id/test", requireAuth, async (c) => {
