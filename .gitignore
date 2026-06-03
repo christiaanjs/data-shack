@@ -7,3 +7,4 @@ dist/
 .claude/*
 !.claude/commands/
 worker-configuration.d.ts
+.DS_Store
