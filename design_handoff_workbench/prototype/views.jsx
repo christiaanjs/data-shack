@@ -210,6 +210,11 @@ function TransformView({ item, ctx }) {
   const [result, setResult] = useS(null);
   const [running, setRunning] = useS(false);
   const [name, setName] = useS(tr.name);
+  const [watches, setWatches] = useS(tr.watches);
+  const [policy, setPolicy] = useS(tr.policy);
+  const [addOpen, setAddOpen] = useS(false);
+
+  const watchable = ctx.data.tables.filter((t) => !t.failed && !watches.includes(t.name));
 
   async function run() {
     const sql = edRef.current ? edRef.current.getDoc() : tr.sql;
@@ -217,6 +222,9 @@ function TransformView({ item, ctx }) {
     const res = await ctx.execute(sql, { source: tr.name || "transform" });
     setResult(res); setRunning(false);
   }
+  function addWatch(n) { setWatches((w) => [...w, n]); setAddOpen(false); }
+  function removeWatch(n) { setWatches((w) => w.filter((x) => x !== n)); }
+
   return (
     <div className="wb-sql">
       <div className="wb-sql-toolbar" style={{ gap: 10 }}>
@@ -231,10 +239,54 @@ function TransformView({ item, ctx }) {
         <Btn variant="primary" size="sm"><Icon name="save" size={13} />{blank ? "Create" : "Save"}</Btn>
       </div>
       <div className="wb-sql-split">
-        <div style={{ display: "flex", gap: 18, padding: "10px 14px", flexWrap: "wrap", borderBottom: "1px solid var(--color-base-300)", fontSize: 12, color: "color-mix(in oklch,var(--color-base-content) 60%,transparent)" }}>
-          <span className="row" style={{ gap: 7 }}>watches:{tr.watches.length ? tr.watches.map((w) => <Badge key={w} variant="outline" size="sm" mono>{w}</Badge>) : <span className="wb-empty-inline">none</span>}</span>
-          <span className="row" style={{ gap: 6 }}>trigger policy: <Badge variant="ghost" size="sm">{tr.policy}</Badge></span>
-          <span className="row" style={{ gap: 6 }}>status: <span className={`ds-status ds-status-${tr.status === "draft" ? "idle" : tr.status}`}>{tr.status}</span> · {tr.ago || "—"}</span>
+        <div className="wb-tr-config">
+          <div className="wb-tr-field">
+            <span className="wb-tr-label">Watches</span>
+            <div className="wb-tr-chips">
+              {watches.length === 0 && <span className="wb-empty-inline" style={{ fontSize: 12 }}>none — runs only on manual trigger</span>}
+              {watches.map((w) => (
+                <span key={w} className="wb-chip" title="Upstream table — changes here can trigger this transform">
+                  <Icon name="table" size={11} />
+                  <span className="font-mono">{w}</span>
+                  <button className="wb-chip-x" onClick={() => removeWatch(w)} title="Remove watch"><Icon name="x" size={11} /></button>
+                </span>
+              ))}
+              <div className="wb-addwrap">
+                <button className="wb-chip wb-chip-add" onClick={() => setAddOpen((o) => !o)} disabled={watchable.length === 0}>
+                  <Icon name="plus" size={11} />add watch
+                </button>
+                {addOpen && watchable.length > 0 && (
+                  <div className="wb-addmenu wb-scrollbar-thin" onMouseLeave={() => setAddOpen(false)}>
+                    {watchable.map((t) => (
+                      <button key={t.name} className="wb-addmenu-item font-mono" onClick={() => addWatch(t.name)}>
+                        <Icon name="table" size={12} />{t.name}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+
+          <div className="wb-tr-field">
+            <span className="wb-tr-label">Trigger policy</span>
+            <div className={cls("wb-seg", watches.length < 2 && "wb-seg-muted")} role="radiogroup" aria-label="Trigger policy">
+              <button className={cls("wb-seg-btn", policy === "any" && "active")} role="radio" aria-checked={policy === "any"} onClick={() => setPolicy("any")}>any</button>
+              <button className={cls("wb-seg-btn", policy === "all" && "active")} role="radio" aria-checked={policy === "all"} onClick={() => setPolicy("all")}>all</button>
+            </div>
+            <span className="wb-tr-hint">
+              {watches.length < 2
+                ? "Applies once 2+ tables are watched."
+                : policy === "any"
+                  ? `Runs when any of the ${watches.length} watched tables commits a snapshot.`
+                  : `Runs only after all ${watches.length} watched tables have new snapshots.`}
+            </span>
+          </div>
+
+          <div className="wb-tr-field" style={{ marginLeft: "auto" }}>
+            <span className="wb-tr-label">Status</span>
+            <span className="row" style={{ gap: 6, fontSize: 12 }}><span className={`ds-status ds-status-${tr.status === "draft" ? "idle" : tr.status}`}>{tr.status}</span><span className="wb-tr-hint" style={{ margin: 0 }}>· {tr.ago || "—"}</span></span>
+          </div>
         </div>
         <div className="wb-sql-editor"><SqlEditor ref={edRef} value={tr.sql} schema={ctx.schema} autoFocus onChange={() => {}} onRun={run} /></div>
         <div className="wb-result wb-scrollbar-thin"><ResultGrid result={result} running={running} /></div>
@@ -274,50 +326,229 @@ function DashboardView({ item: d }) {
   );
 }
 
-/* ── Load job ──────────────────────────────────────────────────────────── */
-function JobView({ item, ctx }) {
-  const blank = !item;
-  const j = item || { table: "", cred: "", path: "", backend: "primary-r2", format: "ndjson", cron: "0 * * * *", last: "draft" };
+/* ── Load job (view + edit form) ───────────────────────────────────────── */
+function JobView({ tab, ctx }) {
+  const item = tab.item; const isNew = !item;
+  const [editing, setEditing] = useS(isNew);
   const [running, setRunning] = useS(false);
+  const [ok, setOk] = useS(false);
+  const j = item || { table: "", cred: "", path: "", backend: "primary-r2", format: "ndjson", cron: "0 * * * *", last: "draft" };
+  const [f, setF] = useS({ table: j.table, cred: j.cred, path: j.path, backend: j.backend, format: j.format, cron: j.cron });
+  const set = (k, v) => setF((p) => ({ ...p, [k]: v }));
+  const creds = ctx.data.credentials, backends = ctx.data.backends;
+
+  function save() {
+    if (!f.table.trim() || !f.cred) return;
+    ctx.saveJob({ id: item && item.id, ...f, table: f.table.trim(), last: (item && item.last) || "ok", ago: (item && item.ago) || "never run" }, tab.id);
+    setOk(true); setEditing(false); setTimeout(() => setOk(false), 2500);
+  }
+
+  if (editing) {
+    return (
+      <div className="wb-doc">
+        <DocHead kicker={isNew ? "New load job" : "Edit load job"} kickerIcon="job" title={isNew ? "New load job" : j.table}
+          sub="Cron-triggered HTTP / Google Sheets → storage ETL. Each run commits a snapshot of the output table."
+          actions={<>
+            {!isNew && <Btn variant="ghost" size="sm" onClick={() => { setF({ table: j.table, cred: j.cred, path: j.path, backend: j.backend, format: j.format, cron: j.cron }); setEditing(false); }}>Cancel</Btn>}
+            <Btn variant="primary" size="sm" onClick={save}><Icon name="save" size={13} />{isNew ? "Create job" : "Save"}</Btn>
+          </>} />
+        <div className="wb-form-grid">
+          <Field legend="Output table" hint="Snapshot committed here on each run."><input className="input input-sm font-mono" placeholder="transactions" value={f.table} onChange={(e) => set("table", e.target.value)} /></Field>
+          <Field legend="Format">
+            <select className="select select-sm" value={f.format} onChange={(e) => set("format", e.target.value)}>
+              <option value="ndjson">ndjson</option><option value="json">json</option><option value="csv">csv</option><option value="parquet">parquet</option>
+            </select>
+          </Field>
+          <Field legend="Credential" hint="Authenticates the source request.">
+            <select className="select select-sm" value={f.cred} onChange={(e) => set("cred", e.target.value)}>
+              <option value="">— select —</option>
+              {creds.map((c) => <option key={c.id} value={c.name}>{c.name} ({c.type})</option>)}
+            </select>
+          </Field>
+          <Field legend="Storage backend">
+            <select className="select select-sm" value={f.backend} onChange={(e) => set("backend", e.target.value)}>
+              {backends.map((b) => <option key={b.id} value={b.name}>{b.name}</option>)}
+            </select>
+          </Field>
+          <Field legend="Source path" full hint="Appended to the credential's base URL, or a Sheets range / tab."><input className="input input-sm font-mono" placeholder="/accounts/transactions" value={f.path} onChange={(e) => set("path", e.target.value)} /></Field>
+          <Field legend="Schedule (cron)" full hint="UTC. e.g. 0 * * * * = hourly · 0 6 * * * = 6am daily · 0 0 * * * = midnight daily.">
+            <input className="input input-sm font-mono" placeholder="0 * * * *" value={f.cron} onChange={(e) => set("cron", e.target.value)} />
+            <span className="wb-con-hint" style={{ marginTop: 4 }}>{cronHint(f.cron)}</span>
+          </Field>
+        </div>
+        {ok && <div className="alert alert-success"><span>{isNew ? "Load job created." : "Load job saved."}</span></div>}
+        {!isNew && <div><Btn variant="ghost" size="sm" className="ds-danger" onClick={() => { ctx.deleteJob(item.id); ctx.closeTab(tab.id); }}>Delete job</Btn></div>}
+      </div>
+    );
+  }
+
   return (
     <div className="wb-doc">
-      <DocHead kicker="Load job" kickerIcon="job" title={blank ? "New load job" : j.table}
-        sub={blank ? "Cron-triggered HTTP / Google Sheets → storage ETL." : `${j.cred}${j.path} → ${j.table}`}
-        actions={blank ? <Btn variant="primary" size="sm"><Icon name="save" size={13} />Create</Btn> : <>
-          <Btn variant="ghost" size="sm"><Icon name="settings" size={13} />Edit</Btn>
+      <DocHead kicker="Load job" kickerIcon="job" title={j.table}
+        sub={`${j.cred}${j.path} → ${j.table}`}
+        actions={<>
+          <Btn variant="ghost" size="sm" onClick={() => setEditing(true)}><Icon name="settings" size={13} />Edit</Btn>
           <Btn variant="outline" size="sm" loading={running} onClick={() => { setRunning(true); setTimeout(() => setRunning(false), 1100); }}>{running ? "Running…" : "Run now"}</Btn>
         </>} />
-      {!blank && j.last === "fail" && <div className="alert alert-error"><span>Last run failed — credential <code className="inline">{j.cred}</code> returned HTTP 401. Check the token in Settings.</span></div>}
+      {j.last === "fail" && <div className="alert alert-error"><span>Last run failed — credential <code className="inline">{j.cred}</code> returned HTTP 401. Check the token in Settings.</span></div>}
+      {ok && <div className="alert alert-success"><span>Load job saved.</span></div>}
       <div className="wb-panel"><table className="table table-sm"><tbody>
-        {[["Output table", j.table || "—"], ["Credential", j.cred || "—"], ["Source path", j.path || "—"], ["Backend", j.backend], ["Format", j.format], ["Schedule (cron)", j.cron]].map(([k, v]) => (
+        {[["Output table", j.table || "—"], ["Credential", j.cred || "—"], ["Source path", j.path || "—"], ["Backend", j.backend], ["Format", j.format], ["Schedule (cron)", `${j.cron}  ·  ${cronHint(j.cron)}`]].map(([k, v]) => (
           <tr key={k}><td style={{ width: 180, color: "color-mix(in oklch,var(--color-base-content) 55%,transparent)" }}>{k}</td><td className="font-mono">{v}</td></tr>
         ))}
       </tbody></table></div>
-      {!blank && <Section title="Recent runs">
+      <Section title="Recent runs">
         <div className="wb-panel"><table className="table table-sm"><tbody>
           {[["ok", j.ago], ["ok", "1h ago"], [j.last, "1d ago"]].map(([st, ago], i) => (
             <tr key={i}><td style={{ width: 30 }}><Dot state={st === "ok" ? "success" : "idle"} /></td><td className="font-mono">{st === "ok" ? "committed snapshot" : "failed — HTTP 401"}</td><td className="font-mono" style={{ textAlign: "right", color: "color-mix(in oklch,var(--color-base-content) 45%,transparent)" }}>{ago}</td></tr>
           ))}
         </tbody></table></div>
-      </Section>}
+      </Section>
     </div>
   );
 }
 
-/* ── Settings detail (credential / backend) ────────────────────────────── */
-function SettingsView({ item, kind }) {
-  const isCred = kind === "cred";
+// Tiny human-readable cron summariser for the common warehouse cases.
+function cronHint(cron) {
+  const map = {
+    "0 * * * *": "hourly, on the hour",
+    "0 6 * * *": "daily at 06:00 UTC",
+    "0 0 * * *": "daily at midnight UTC",
+    "*/15 * * * *": "every 15 minutes",
+    "0 9 * * 1": "Mondays at 09:00 UTC",
+  };
+  return map[(cron || "").trim()] || "custom schedule";
+}
+
+/* ── Settings: secret field + credential / backend forms ───────────────── */
+function SecretField({ legend, value, onChange, hint, placeholder, full }) {
+  const [show, setShow] = useS(false);
+  return (
+    <Field legend={legend} full={full}>
+      <div style={{ position: "relative" }}>
+        <input className="input input-sm font-mono" type={show ? "text" : "password"} placeholder={placeholder}
+          value={value} onChange={(e) => onChange(e.target.value)} style={{ paddingRight: 52 }} />
+        <button type="button" onClick={() => setShow((s) => !s)}
+          style={{ position: "absolute", right: 6, top: "50%", transform: "translateY(-50%)", border: 0, background: "transparent", cursor: "pointer", fontSize: 11, color: "color-mix(in oklch,var(--color-base-content) 55%,transparent)" }}>
+          {show ? "hide" : "show"}
+        </button>
+      </div>
+      {hint && <span className="ds-fieldhint" style={{ fontSize: 11, color: "color-mix(in oklch, var(--color-base-content) 50%, transparent)", marginTop: 2 }}>{hint}</span>}
+    </Field>
+  );
+}
+function MetaStrip({ id, created }) {
+  return (
+    <div style={{ display: "flex", gap: 18, fontSize: 11.5, color: "color-mix(in oklch,var(--color-base-content) 50%,transparent)", fontFamily: "var(--font-mono)" }}>
+      <span>id: {id}</span><span>created: {created}</span>
+    </div>
+  );
+}
+
+function CredentialView({ tab, ctx }) {
+  const item = tab.item; const isNew = !item;
+  const [name, setName] = useS(item ? item.name : "");
+  const [type, setType] = useS(item ? item.type : "http");
+  const [baseUrl, setBaseUrl] = useS(item && item.baseUrl ? item.baseUrl : "");
+  const [secret, setSecret] = useS("");
+  const [ok, setOk] = useS(false);
+  const [testing, setTesting] = useS(false);
+  const [tested, setTested] = useS(null);
+
+  function save() {
+    if (!name.trim()) return;
+    ctx.saveCredential({ id: item && item.id, name: name.trim(), type, baseUrl: type === "http" ? baseUrl : undefined, created: (item && item.created) || "May 30, 2026" }, tab.id);
+    setOk(true); setSecret(""); setTimeout(() => setOk(false), 2500);
+  }
+  function test() { setTested(null); setTesting(true); setTimeout(() => { setTesting(false); setTested(true); }, 1100); }
+
   return (
     <div className="wb-doc">
-      <DocHead kicker={isCred ? "Credential" : "Storage backend"} kickerIcon={isCred ? "key" : "drive"} title={item.name}
-        sub="AES-encrypted at rest in D1. Values are never returned by the API once stored."
-        actions={isCred ? <Btn variant="outline" size="sm">Test connection</Btn> : <Btn variant="ghost" size="sm"><Icon name="settings" size={13} />Edit</Btn>} />
-      <div className="wb-panel"><table className="table table-sm"><tbody>
-        {[["ID", item.id], ["Name", item.name], ["Type", item.type], ["Created", item.created]].map(([k, v]) => (
-          <tr key={k}><td style={{ width: 160, color: "color-mix(in oklch,var(--color-base-content) 55%,transparent)" }}>{k}</td><td className="font-mono">{v}</td></tr>
-        ))}
-        <tr><td style={{ color: "color-mix(in oklch,var(--color-base-content) 55%,transparent)" }}>Secret</td><td className="font-mono wb-empty-inline">•••••••••••• (write-only)</td></tr>
-      </tbody></table></div>
+      <DocHead kicker={isNew ? "New credential" : "Credential"} kickerIcon="key" title={isNew ? "New credential" : item.name}
+        sub="Stored AES-encrypted in D1. Secrets are write-only — never returned by the API once saved."
+        actions={<>
+          {!isNew && <Btn variant="outline" size="sm" loading={testing} onClick={test}>{testing ? "Testing…" : "Test connection"}</Btn>}
+          <Btn variant="primary" size="sm" onClick={save}><Icon name="save" size={13} />{isNew ? "Create" : "Save"}</Btn>
+        </>} />
+      {!isNew && <MetaStrip id={item.id} created={item.created} />}
+      {tested && <div className="alert alert-success"><span>Token refresh successful — credential is working.</span></div>}
+      <div className="wb-form-grid">
+        <Field legend="Name"><input className="input input-sm font-mono" placeholder="akahu" value={name} onChange={(e) => setName(e.target.value)} /></Field>
+        <Field legend="Type">
+          <select className="select select-sm" value={type} onChange={(e) => setType(e.target.value)}>
+            <option value="http">HTTP (bearer token)</option>
+            <option value="google-sheets">Google Sheets (OAuth)</option>
+          </select>
+        </Field>
+        {type === "http" ? <>
+          <Field legend="Base URL (optional)" full hint="Prepended to the source path on every request."><input className="input input-sm font-mono" placeholder="https://api.akahu.io/v1" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} /></Field>
+          <SecretField legend="Bearer token" full value={secret} onChange={setSecret}
+            placeholder={isNew ? "token_live_…" : "•••••••• (unchanged — type to replace)"}
+            hint="Sent as Authorization: Bearer …. Stored encrypted; leave blank to keep the current value." />
+        </> : (
+          <div style={{ gridColumn: "1 / -1", display: "flex", flexDirection: "column", gap: 10 }}>
+            <div className="wb-con-hint">Google Sheets uses OAuth — no secret is entered here. Authorise the connection and Data Shack stores the refresh token.</div>
+            <div><Btn variant="outline" size="sm"><Icon name="key" size={13} />Connect Google Sheets</Btn></div>
+          </div>
+        )}
+      </div>
+      {ok && <div className="alert alert-success"><span>{isNew ? "Credential created." : "Credential saved."}</span></div>}
+      {!isNew && <div><Btn variant="ghost" size="sm" className="ds-danger" onClick={() => { ctx.deleteCredential(item.id); ctx.closeTab(tab.id); }}>Delete credential</Btn></div>}
+    </div>
+  );
+}
+
+function BackendView({ tab, ctx }) {
+  const item = tab.item; const isNew = !item;
+  const [name, setName] = useS(item ? item.name : "");
+  const [type, setType] = useS(item ? item.type : "r2-bound");
+  const [cfg, setCfg] = useS(() => (item && item.cfg) || {});
+  const [secret, setSecret] = useS("");
+  const [ok, setOk] = useS(false);
+  const set = (k, v) => setCfg((c) => ({ ...c, [k]: v }));
+
+  function save() {
+    if (!name.trim()) return;
+    ctx.saveBackend({ id: item && item.id, name: name.trim(), type, cfg, created: (item && item.created) || "May 30, 2026" }, tab.id);
+    setOk(true); setSecret(""); setTimeout(() => setOk(false), 2500);
+  }
+
+  return (
+    <div className="wb-doc">
+      <DocHead kicker={isNew ? "New storage backend" : "Storage backend"} kickerIcon="drive" title={isNew ? "New backend" : item.name}
+        sub="Where snapshots are read from and written to. Secrets are stored AES-encrypted in D1."
+        actions={<Btn variant="primary" size="sm" onClick={save}><Icon name="save" size={13} />{isNew ? "Create" : "Save"}</Btn>} />
+      {!isNew && <MetaStrip id={item.id} created={item.created} />}
+      <div className="wb-form-grid">
+        <Field legend="Name"><input className="input input-sm font-mono" placeholder="primary-r2" value={name} onChange={(e) => setName(e.target.value)} /></Field>
+        <Field legend="Type">
+          <select className="select select-sm" value={type} onChange={(e) => setType(e.target.value)}>
+            <option value="r2-bound">R2 — Worker binding</option>
+            <option value="r2-s3compat">S3-compatible</option>
+            <option value="google-sheets">Google Sheets</option>
+          </select>
+        </Field>
+
+        {type === "r2-bound" && <>
+          <Field legend="R2 binding" hint="The binding name from wrangler.toml."><input className="input input-sm font-mono" placeholder="DATA_SHACK_STORAGE" value={cfg.binding || ""} onChange={(e) => set("binding", e.target.value)} /></Field>
+          <Field legend="Bucket"><input className="input input-sm font-mono" placeholder="data-shack-storage" value={cfg.bucket || ""} onChange={(e) => set("bucket", e.target.value)} /></Field>
+        </>}
+
+        {type === "r2-s3compat" && <>
+          <Field legend="Endpoint" full><input className="input input-sm font-mono" placeholder="https://<acct>.r2.cloudflarestorage.com" value={cfg.endpoint || ""} onChange={(e) => set("endpoint", e.target.value)} /></Field>
+          <Field legend="Region"><input className="input input-sm font-mono" placeholder="auto" value={cfg.region || ""} onChange={(e) => set("region", e.target.value)} /></Field>
+          <Field legend="Bucket"><input className="input input-sm font-mono" placeholder="archive" value={cfg.bucket || ""} onChange={(e) => set("bucket", e.target.value)} /></Field>
+          <Field legend="Access key ID"><input className="input input-sm font-mono" placeholder="AKIA…" value={cfg.accessKeyId || ""} onChange={(e) => set("accessKeyId", e.target.value)} /></Field>
+          <SecretField legend="Secret access key" value={secret} onChange={setSecret}
+            placeholder={isNew ? "wJalr…" : "•••••••• (unchanged)"} hint="Stored encrypted; leave blank to keep current." />
+        </>}
+
+        {type === "google-sheets" && (
+          <div style={{ gridColumn: "1 / -1" }} className="wb-con-hint">Uses the <code className="inline">google-sheets</code> credential for access — no separate keys needed here.</div>
+        )}
+      </div>
+      {ok && <div className="alert alert-success"><span>{isNew ? "Backend created." : "Backend saved."}</span></div>}
+      {!isNew && <div><Btn variant="ghost" size="sm" className="ds-danger" onClick={() => { ctx.deleteBackend(item.id); ctx.closeTab(tab.id); }}>Delete backend</Btn></div>}
     </div>
   );
 }
@@ -384,9 +615,9 @@ function TabContent({ tab, ctx }) {
     case "table": return <TableDetailView item={tab.item} ctx={ctx} />;
     case "transform": return <TransformView item={tab.item} ctx={ctx} />;
     case "dashboard": return <DashboardView item={tab.item} />;
-    case "job": return <JobView item={tab.item} ctx={ctx} />;
-    case "cred": return <SettingsView item={tab.item} kind="cred" />;
-    case "backend": return <SettingsView item={tab.item} kind="backend" />;
+    case "job": return <JobView tab={tab} ctx={ctx} />;
+    case "cred": return <CredentialView tab={tab} ctx={ctx} />;
+    case "backend": return <BackendView tab={tab} ctx={ctx} />;
     case "commit": return <CommitView ctx={ctx} />;
     default: return <WelcomeView ctx={ctx} />;
   }

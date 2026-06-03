@@ -109,14 +109,14 @@ function SettingsTree({ data, activeKey, onOpen }) {
   const { credentials, backends } = data;
   return (
     <div className="wb-side-scroll wb-scrollbar-thin">
-      <TreeGroup icon="key" label="Credentials" count={credentials.length} defaultOpen>
+      <TreeGroup icon="key" label="Credentials" count={credentials.length} defaultOpen onAdd={() => onOpen("new-cred")}>
         {credentials.map((c) => (
           <SimpleNode key={c.id} icon="key" label={c.name} meta={c.type === "http" ? "http" : null}
             active={activeKey === `cred:${c.id}`} onOpen={() => onOpen("cred", c)} />
         ))}
       </TreeGroup>
 
-      <TreeGroup icon="drive" label="Storage Backends" count={backends.length} defaultOpen>
+      <TreeGroup icon="drive" label="Storage Backends" count={backends.length} defaultOpen onAdd={() => onOpen("new-backend")}>
         {backends.map((b) => (
           <SimpleNode key={b.id} icon="drive" label={b.name}
             active={activeKey === `backend:${b.id}`} onOpen={() => onOpen("backend", b)} />

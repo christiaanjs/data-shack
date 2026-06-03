@@ -76,6 +76,9 @@ function App() {
 
   const [tables, setTables] = useA(WB_TABLES);
   const [savedQueries, setSavedQueries] = useLocalStorage("wb_saved", WB_SAVED_QUERIES);
+  const [credentials, setCredentials] = useA(WB_CREDENTIALS);
+  const [backends, setBackends] = useA(WB_BACKENDS);
+  const [jobs, setJobs] = useA(WB_LOAD_JOBS);
 
   const [tabs, setTabs] = useA([]);
   const [activeId, setActiveId] = useA(null);
@@ -104,15 +107,15 @@ function App() {
   }, [session.enabled]);
 
   const data = useAM(() => ({
-    tables, transforms: WB_TRANSFORMS, jobs: WB_LOAD_JOBS,
-    dashboards: WB_DASHBOARDS, savedQueries, credentials: WB_CREDENTIALS, backends: WB_BACKENDS,
-  }), [tables, savedQueries]);
+    tables, transforms: WB_TRANSFORMS, jobs,
+    dashboards: WB_DASHBOARDS, savedQueries, credentials, backends,
+  }), [tables, savedQueries, credentials, backends, jobs]);
   const schema = useAM(() => wbBuildSchema(tables), [tables]);
 
   const focusTab = useAC((id) => setActiveId(id), []);
 
   const openTab = useAC((kind, payload) => {
-    if (kind === "cred" || kind === "backend") setActivity("settings");
+    if (kind === "cred" || kind === "backend" || kind === "new-cred" || kind === "new-backend") setActivity("settings");
     else if (kind !== "commit") setActivity("explorer");
     setTabs((prev) => {
       let key, title, tab;
@@ -128,6 +131,10 @@ function App() {
         key = `transform:new:${uid()}`; title = "New transform"; tab = { id: uid(), kind: "transform", key, title, item: null };
       } else if (kind === "new-job") {
         key = `job:new:${uid()}`; title = "New job"; tab = { id: uid(), kind: "job", key, title, item: null };
+      } else if (kind === "new-cred") {
+        key = `cred:new:${uid()}`; title = "New credential"; tab = { id: uid(), kind: "cred", key, title, item: null };
+      } else if (kind === "new-backend") {
+        key = `backend:new:${uid()}`; title = "New backend"; tab = { id: uid(), kind: "backend", key, title, item: null };
       } else {
         const idmap = { table: payload.name, transform: payload.id, dashboard: payload.id, job: payload.id, cred: payload.id, backend: payload.id };
         key = `${kind}:${idmap[kind]}`;
@@ -202,9 +209,38 @@ function App() {
   const toggleTheme = useAC(() => setTheme((t) => t === "dark" ? "light" : "dark"), []);
   const toggleDock = useAC(() => setDockOpen((o) => !o), []);
 
+  const updateTab = useAC((id, patch) => setTabs((prev) => prev.map((t) => t.id === id ? { ...t, ...patch } : t)), []);
+
+  const saveCredential = useAC((item, tabId) => {
+    const id = item.id || ("cred_" + Math.random().toString(36).slice(2, 7));
+    const saved = { ...item, id };
+    setCredentials((prev) => prev.some((c) => c.id === id) ? prev.map((c) => c.id === id ? saved : c) : [...prev, saved]);
+    if (tabId) updateTab(tabId, { title: saved.name, key: `cred:${id}`, item: saved });
+    return saved;
+  }, [updateTab]);
+  const saveBackend = useAC((item, tabId) => {
+    const id = item.id || ("bk_" + Math.random().toString(36).slice(2, 7));
+    const saved = { ...item, id };
+    setBackends((prev) => prev.some((b) => b.id === id) ? prev.map((b) => b.id === id ? saved : b) : [...prev, saved]);
+    if (tabId) updateTab(tabId, { title: saved.name, key: `backend:${id}`, item: saved });
+    return saved;
+  }, [updateTab]);
+  const deleteCredential = useAC((id) => { setCredentials((prev) => prev.filter((c) => c.id !== id)); }, []);
+  const deleteBackend = useAC((id) => { setBackends((prev) => prev.filter((b) => b.id !== id)); }, []);
+
+  const saveJob = useAC((item, tabId) => {
+    const id = item.id || ("job_" + Math.random().toString(36).slice(2, 7));
+    const saved = { ...item, id };
+    setJobs((prev) => prev.some((j) => j.id === id) ? prev.map((j) => j.id === id ? saved : j) : [...prev, saved]);
+    if (tabId) updateTab(tabId, { title: saved.table || "load job", key: `job:${id}`, item: saved });
+    return saved;
+  }, [updateTab]);
+  const deleteJob = useAC((id) => { setJobs((prev) => prev.filter((j) => j.id !== id)); }, []);
+
   const ctx = {
     data, schema, session, theme,
-    execute, openTab, focusTab, setTabSql, setTabResult, saveQuery, commitTable,
+    execute, openTab, focusTab, closeTab, updateTab, setTabSql, setTabResult, saveQuery, commitTable,
+    saveCredential, saveBackend, deleteCredential, deleteBackend, saveJob, deleteJob,
     toggleSession, toggleTheme, toggleDock, openPalette: () => setPaletteOpen(true),
   };
 

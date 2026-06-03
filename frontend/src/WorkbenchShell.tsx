@@ -133,6 +133,7 @@ export function WorkbenchShell() {
   const [sidebarW, setSidebarW] = useLocalStorage("wb_sidebar_w", 264);
   const [dockH, setDockH] = useLocalStorage("wb_dock_h", 250);
   const [savedQueries, setSavedQueries] = useState<SavedQuery[]>([]);
+  const [clock, setClock] = useState(nowClock);
 
   // External data lists for the explorer
   const [transforms, setTransforms] = useState<WbTransform[]>([]);
@@ -145,6 +146,12 @@ export function WorkbenchShell() {
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
   }, [theme]);
+
+  // Live clock — update every 30 s
+  useEffect(() => {
+    const id = setInterval(() => setClock(nowClock()), 30_000);
+    return () => clearInterval(id);
+  }, []);
 
   // ── Sidebar resize ────────────────────────────────────────────────────────
   const sidebarResizing = useRef(false);
@@ -470,6 +477,11 @@ export function WorkbenchShell() {
         key = `backend:new:${uid()}`;
         title = "New backend";
         tab = { id: uid(), kind: "backend", key, title, item: null };
+      } else if (kind === "table") {
+        const t = item as CatalogTableWithSnapshot;
+        key = `table:${t.name}`;
+        title = t.name;
+        tab = { id: uid(), kind: "table", key, title, item: t };
       } else {
         const itm = item as { id?: string; name?: string; title?: string; output_table?: string };
         const idVal = itm?.id ?? uid();
@@ -948,8 +960,9 @@ export function WorkbenchShell() {
             <span class="wb-status-item mono">
               {catalogTables.length} table{catalogTables.length === 1 ? "" : "s"}
             </span>
-            <span class="wb-status-item mono">{log.length} queries</span>
+            <span class="wb-status-item mono">{history.length} queries run</span>
             <span class="wb-status-spacer" />
+            <span class="wb-status-item mono">{clock}</span>
             <button
               type="button"
               class="wb-status-btn"

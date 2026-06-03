@@ -178,6 +178,30 @@ body { overflow: hidden; }
 .wb-sql-editor { flex: 1; min-height: 120px; overflow: auto; }
 .cm-editor { height: 100%; }
 .wb-sql-split { display: flex; flex-direction: column; min-height: 0; flex: 1; }
+
+/* transform config strip */
+.wb-tr-config { display: flex; align-items: flex-start; gap: 26px; flex-wrap: wrap; padding: 12px 14px; flex: none; border-bottom: 1px solid var(--color-base-300); }
+.wb-tr-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.wb-tr-label { font-size: 10.5px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: color-mix(in oklch, var(--color-base-content) 50%, transparent); }
+.wb-tr-hint { font-size: 11px; color: color-mix(in oklch, var(--color-base-content) 48%, transparent); max-width: 320px; }
+.wb-tr-chips { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-height: 24px; }
+.wb-chip { display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 6px 0 8px; border-radius: var(--radius-field); border: 1px solid var(--color-base-300); background: var(--color-base-100); font-size: 12px; color: var(--color-base-content); }
+.wb-chip .wb-chip-x { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border: 0; border-radius: 4px; background: transparent; cursor: pointer; color: color-mix(in oklch, var(--color-base-content) 45%, transparent); }
+.wb-chip .wb-chip-x:hover { background: color-mix(in oklch, var(--color-error) 14%, transparent); color: var(--color-error); }
+.wb-chip-add { padding: 0 9px 0 7px; cursor: pointer; border-style: dashed; color: color-mix(in oklch, var(--color-base-content) 60%, transparent); }
+.wb-chip-add:hover:not(:disabled) { border-color: var(--color-primary); color: var(--color-primary); }
+.wb-chip-add:disabled { opacity: .45; cursor: not-allowed; }
+.wb-addwrap { position: relative; }
+.wb-addmenu { position: absolute; top: calc(100% + 4px); left: 0; z-index: 20; min-width: 180px; max-height: 220px; overflow-y: auto; padding: 4px; background: var(--color-base-100); border: 1px solid var(--color-base-300); border-radius: var(--radius-box); box-shadow: 0 10px 30px color-mix(in oklch, var(--color-base-content) 18%, transparent); }
+.wb-addmenu-item { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 8px; border: 0; border-radius: var(--radius-field); background: transparent; cursor: pointer; text-align: left; font-size: 12.5px; color: var(--color-base-content); }
+.wb-addmenu-item:hover { background: color-mix(in oklch, var(--color-primary) 12%, transparent); }
+.wb-addmenu-item .wb-node-ico, .wb-addmenu-item svg { color: color-mix(in oklch, var(--color-base-content) 50%, transparent); flex: none; }
+/* segmented control */
+.wb-seg { display: inline-flex; align-items: stretch; height: 26px; padding: 2px; gap: 2px; background: var(--color-base-200); border: 1px solid var(--color-base-300); border-radius: var(--radius-field); }
+.wb-seg-btn { display: inline-flex; align-items: center; padding: 0 12px; border: 0; border-radius: calc(var(--radius-field) - 2px); background: transparent; cursor: pointer; font-family: var(--font-mono); font-size: 12px; color: color-mix(in oklch, var(--color-base-content) 60%, transparent); }
+.wb-seg-btn:hover:not(.active) { color: var(--color-base-content); }
+.wb-seg-btn.active { background: var(--color-primary); color: var(--color-primary-content); font-weight: 600; }
+.wb-seg-muted .wb-seg-btn.active { background: color-mix(in oklch, var(--color-base-content) 28%, transparent); }
 .wb-result {
   flex: none; max-height: 48%; overflow: auto; border-top: 1px solid var(--color-base-300);
   background: var(--color-base-100);

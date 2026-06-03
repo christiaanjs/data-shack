@@ -1,4 +1,4 @@
-import { useRef, useState } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 import { BackendView } from "./BackendView.tsx";
 import { CredView } from "./CredView.tsx";
 import { DashboardEditView } from "./DashboardEditView.tsx";
@@ -8,6 +8,7 @@ import type { SqlEditorHandle } from "./SqlEditor.tsx";
 import { SqlEditor } from "./SqlEditor.tsx";
 import { TransformView } from "./TransformView.tsx";
 import type { CatalogTableWithSnapshot } from "./catalogViews.ts";
+import { WORKER_BASE, authHeaders, fmtAgo } from "./wb-api.ts";
 import {
   BookmarkIcon,
   DatabaseIcon,
@@ -118,11 +119,67 @@ export function SqlTabView({ tab, ctx }: { tab: WbTab; ctx: WbCtx }) {
 
 // ── Table detail ───────────────────────────────────────────────────────────────
 
+interface SnapshotEntry {
+  id: string;
+  uri: string;
+  format: string | null;
+  storage_backend: string | null;
+  access_mode: string | null;
+  created_at: number;
+}
+
 export function TableDetailView({ item: t, ctx }: { item: CatalogTableWithSnapshot; ctx: WbCtx }) {
+  const [schema, setSchema] = useState<Array<[string, string]> | null>(null);
+  const [snapshots, setSnapshots] = useState<SnapshotEntry[] | null>(null);
+  const [preview, setPreview] = useState<QueryResult | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+
   function queryTable() {
     ctx.openTab("sql", { title: t.name, sql: `SELECT *\nFROM ${t.name}\nLIMIT 100;` });
   }
+  function reload() {
+    setSchema(null);
+    setPreview(null);
+    setSnapshots(null);
+    setRefreshKey((k) => k + 1);
+  }
+
+  // Fetch full snapshot history from API
+  // biome-ignore lint/correctness/useExhaustiveDependencies: refreshKey is an intentional reload trigger
+  useEffect(() => {
+    authHeaders()
+      .then((h) =>
+        fetch(`${WORKER_BASE}/catalog/snapshots/${encodeURIComponent(t.name)}`, { headers: h }),
+      )
+      .then((r) => (r.ok ? (r.json() as Promise<{ snapshots: SnapshotEntry[] }>) : null))
+      .then((d) => {
+        if (d?.snapshots) setSnapshots(d.snapshots);
+      })
+      .catch(() => {});
+  }, [t.name, refreshKey]);
+
+  // Run DESCRIBE + SELECT preview when session is enabled
+  // biome-ignore lint/correctness/useExhaustiveDependencies: refreshKey is trigger; ctx.execute is a stable useCallback
+  useEffect(() => {
+    if (!ctx.session.enabled || !t.latestSnapshot) return;
+    ctx
+      .execute(`DESCRIBE "${t.name}";`, { source: `schema:${t.name}` })
+      .then((res) => {
+        if (!res.error && res.rows.length > 0) {
+          setSchema(res.rows.map((r) => [String(r[0]), String(r[1])]));
+        }
+      })
+      .catch(() => {});
+    ctx
+      .execute(`SELECT * FROM "${t.name}" LIMIT 10;`, { source: `preview:${t.name}` })
+      .then((res) => {
+        if (!res.error) setPreview(res);
+      })
+      .catch(() => {});
+  }, [t.name, ctx.session.enabled, t.latestSnapshot, refreshKey]);
+
   const snap = t.latestSnapshot;
+
   if (!snap) {
     return (
       <div class="wb-doc">
@@ -138,12 +195,33 @@ export function TableDetailView({ item: t, ctx }: { item: CatalogTableWithSnapsh
         </div>
         <div class="alert alert-warning">
           <span>
-            No snapshot committed for <code class="font-mono">{t.name}</code>.
+            No snapshot committed for <code class="font-mono">{t.name}</code>. Re-run its load job
+            or re-commit a snapshot.
           </span>
+        </div>
+        <div class="wb-stat-row">
+          <div class="wb-stat">
+            <span class="wb-stat-label">Status</span>
+            <span class="wb-stat-value sm" style={{ color: "var(--color-warning)" }}>
+              unavailable
+            </span>
+          </div>
         </div>
       </div>
     );
   }
+
+  const displaySnapshots: SnapshotEntry[] = snapshots ?? [
+    {
+      id: snap.id,
+      uri: snap.uri,
+      format: snap.format ?? null,
+      storage_backend: snap.storage_backend ?? null,
+      access_mode: snap.access_mode ?? null,
+      created_at: snap.created_at,
+    },
+  ];
+
   return (
     <div class="wb-doc">
       <div class="wb-doc-head">
@@ -156,7 +234,7 @@ export function TableDetailView({ item: t, ctx }: { item: CatalogTableWithSnapsh
           <p class="wb-doc-sub">{snap.uri}</p>
         </div>
         <div class="wb-doc-actions">
-          <button type="button" class="btn btn-ghost btn-sm" title="Reload">
+          <button type="button" class="btn btn-ghost btn-sm" title="Reload" onClick={reload}>
             <RefreshIcon size={13} />
           </button>
           <button type="button" class="btn btn-primary btn-sm" onClick={queryTable}>
@@ -165,12 +243,13 @@ export function TableDetailView({ item: t, ctx }: { item: CatalogTableWithSnapsh
           </button>
         </div>
       </div>
+
       <div class="wb-stat-row">
         {[
           { label: "Format", value: snap.format ?? "—" },
           { label: "Backend", value: snap.storage_backend ?? "—" },
           { label: "Access", value: snap.access_mode ?? "—" },
-          { label: "Snapshot ID", value: `${snap.id.slice(0, 8)}…` },
+          { label: "Snapshots", value: snapshots ? String(snapshots.length) : "…" },
         ].map((it, i) => (
           // biome-ignore lint/suspicious/noArrayIndexKey: static list, order is stable
           <div class="wb-stat" key={i}>
@@ -179,25 +258,138 @@ export function TableDetailView({ item: t, ctx }: { item: CatalogTableWithSnapsh
           </div>
         ))}
       </div>
+
+      {/* Schema section — requires active DuckDB session */}
+      {ctx.session.enabled && (
+        <div class="wb-section">
+          <div class="wb-section-title">
+            Schema
+            {schema && <span class="wb-count">{schema.length}</span>}
+          </div>
+          <div class="wb-panel">
+            {!schema ? (
+              <div class="wb-result-empty">
+                <span class="loading loading-xs" style={{ marginRight: 8 }} />
+                Loading schema…
+              </div>
+            ) : (
+              <table class="table table-sm">
+                <thead>
+                  <tr>
+                    <th style={{ width: 30 }}>#</th>
+                    <th>column</th>
+                    <th>type</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {schema.map(([col, type], i) => (
+                    <tr key={col}>
+                      <td
+                        class="font-mono"
+                        style={{
+                          color: "color-mix(in oklch, var(--color-base-content) 35%, transparent)",
+                          fontSize: 11,
+                        }}
+                      >
+                        {i + 1}
+                      </td>
+                      <td class="font-mono" style={{ fontWeight: 600 }}>
+                        {col}
+                      </td>
+                      <td>
+                        <span class="wb-tag wb-tag-type">{type}</span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Snapshot timeline */}
       <div class="wb-section">
-        <div class="wb-section-title">Latest snapshot</div>
+        <div class="wb-section-title">
+          Snapshots
+          {snapshots && <span class="wb-count">{snapshots.length}</span>}
+        </div>
         <div class="wb-panel">
           <div class="wb-timeline">
-            <div class="wb-tl-row">
-              <div class="wb-tl-rail">
-                <span class="wb-tl-dot" />
-              </div>
-              <div>
-                <div class="wb-tl-msg">
-                  committed <span class="wb-tl-current">current</span>
+            {displaySnapshots.map((s, i) => (
+              <div class="wb-tl-row" key={s.id ?? i}>
+                <div class="wb-tl-rail">
+                  <span
+                    class="wb-tl-dot"
+                    style={
+                      i > 0
+                        ? {
+                            background:
+                              "color-mix(in oklch, var(--color-base-content) 30%, transparent)",
+                          }
+                        : undefined
+                    }
+                  />
                 </div>
-                <div class="wb-tl-uri">{snap.uri}</div>
+                <div>
+                  <div class="wb-tl-msg">
+                    committed{i === 0 && <span class="wb-tl-current">current</span>}
+                  </div>
+                  <div class="wb-tl-uri">{s.uri}</div>
+                </div>
+                <div class="wb-tl-meta">{fmtAgo(s.created_at)}</div>
               </div>
-              <div class="wb-tl-meta">{new Date(snap.created_at).toLocaleString()}</div>
-            </div>
+            ))}
           </div>
         </div>
       </div>
+
+      {/* Preview section — requires active DuckDB session */}
+      {ctx.session.enabled && (
+        <div class="wb-section">
+          <div class="wb-section-title">
+            Preview
+            {preview && <span class="wb-count">{preview.rows.length} of 10</span>}
+          </div>
+          <div class="wb-panel" style={{ overflowX: "auto" }}>
+            {!preview ? (
+              <div class="wb-result-empty">
+                <span class="loading loading-xs" style={{ marginRight: 8 }} />
+                Loading preview…
+              </div>
+            ) : preview.error ? (
+              <div class="wb-result-empty" style={{ color: "var(--color-error)" }}>
+                {preview.error}
+              </div>
+            ) : (
+              <table class="table table-sm table-zebra">
+                <thead>
+                  <tr>
+                    {preview.columns.map((c) => (
+                      <th key={c} class="font-mono">
+                        {c}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {preview.rows.map((row, i) => (
+                    // biome-ignore lint/suspicious/noArrayIndexKey: preview rows have no stable key
+                    <tr key={i}>
+                      {row.map((cell, j) => (
+                        // biome-ignore lint/suspicious/noArrayIndexKey: column index is stable here
+                        <td key={j} class="font-mono" style={{ whiteSpace: "nowrap" }}>
+                          {cell === null ? <em class="wb-null">null</em> : String(cell)}
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -261,18 +453,59 @@ export function WelcomeView({ ctx }: { ctx: WbCtx }) {
 
 // ── Commit view ────────────────────────────────────────────────────────────────
 
+function storageMetaFromUri(uri: string): { storageBackend: string; accessMode: string } {
+  const m = uri.match(/^([a-z0-9-]+):\/\/([^/]+)/);
+  if (m) {
+    const [, scheme, host] = m;
+    if (scheme === "http-ds") return { storageBackend: host, accessMode: "direct" };
+    return { storageBackend: host, accessMode: "proxy" };
+  }
+  return { storageBackend: "primary-r2", accessMode: "proxy" };
+}
+
 export function CommitView({ ctx }: { ctx: WbCtx }) {
   const [name, setName] = useState("");
   const [uri, setUri] = useState("");
+  const [format, setFormat] = useState("auto");
   const [ok, setOk] = useState(false);
-  function commit() {
-    if (!name || !uri) return;
-    ctx.commitTable({ name, uri });
-    setOk(true);
-    setName("");
-    setUri("");
-    setTimeout(() => setOk(false), 2500);
+  const [err, setErr] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  async function commit() {
+    if (!name.trim() || !uri.trim()) return;
+    setSaving(true);
+    setErr(null);
+    try {
+      const { storageBackend, accessMode } = storageMetaFromUri(uri);
+      const headers = { ...(await authHeaders()), "Content-Type": "application/json" };
+      const res = await fetch(`${WORKER_BASE}/catalog/commit`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          table: name.trim(),
+          uri: uri.trim(),
+          storageBackend,
+          accessMode,
+          ...(format !== "auto" ? { format } : {}),
+        }),
+      });
+      if (!res.ok) {
+        const txt = await res.text();
+        throw new Error(txt || `Failed: ${res.status}`);
+      }
+      ctx.commitTable({ name: name.trim(), uri: uri.trim() });
+      setOk(true);
+      setName("");
+      setUri("");
+      setFormat("auto");
+      setTimeout(() => setOk(false), 2500);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Commit failed");
+    } finally {
+      setSaving(false);
+    }
   }
+
   return (
     <div class="wb-doc">
       <div class="wb-doc-head">
@@ -289,30 +522,78 @@ export function CommitView({ ctx }: { ctx: WbCtx }) {
         <fieldset class="fieldset">
           <legend class="fieldset-legend">Table name</legend>
           <input
-            class="input input-sm font-mono"
+            class="input input-sm font-mono w-full"
             placeholder="transactions"
             value={name}
             onChange={(e) => setName((e.target as HTMLInputElement).value)}
           />
         </fieldset>
         <fieldset class="fieldset">
+          <legend class="fieldset-legend">Format</legend>
+          <select
+            class="select select-sm w-full"
+            value={format}
+            onChange={(e) => setFormat((e.target as HTMLSelectElement).value)}
+          >
+            <option value="auto">Auto — infer from URI</option>
+            <option value="parquet">parquet</option>
+            <option value="ndjson">ndjson</option>
+            <option value="csv">csv</option>
+          </select>
+        </fieldset>
+        <fieldset class="fieldset" style={{ gridColumn: "1 / -1" }}>
           <legend class="fieldset-legend">URI</legend>
           <input
-            class="input input-sm font-mono"
-            style={{ gridColumn: "1 / -1" }}
+            class="input input-sm font-mono w-full"
             placeholder="r2://data-shack-storage/transactions/2026-05.parquet"
             value={uri}
             onChange={(e) => setUri((e.target as HTMLInputElement).value)}
           />
         </fieldset>
       </div>
+      <div class="wb-section" style={{ gap: 8 }}>
+        <div class="wb-con-hint">URI conventions</div>
+        <div
+          style={{
+            fontSize: 13,
+            color: "color-mix(in oklch, var(--color-base-content) 70%, transparent)",
+            display: "flex",
+            flexDirection: "column",
+            gap: 6,
+          }}
+        >
+          <p style={{ margin: 0 }}>
+            <code class="font-mono">r2://bucket/path.parquet</code> — R2-bound storage, scoped to
+            your namespace.
+          </p>
+          <p style={{ margin: 0 }}>
+            <code class="font-mono">r2-s3compat://backend-name/path</code> — S3-compatible backend
+            by name.
+          </p>
+          <p style={{ margin: 0 }}>
+            <code class="font-mono">http-ds://credName/path</code> — live HTTP source; backend
+            auto-filled.
+          </p>
+        </div>
+      </div>
+      {err && (
+        <div class="alert alert-error">
+          <span>{err}</span>
+        </div>
+      )}
       {ok && (
         <div class="alert alert-success">
           <span>Snapshot committed.</span>
         </div>
       )}
       <div>
-        <button type="button" class="btn btn-primary btn-sm" onClick={commit}>
+        <button
+          type="button"
+          class="btn btn-primary btn-sm"
+          onClick={() => commit().catch(() => {})}
+          disabled={saving || !name.trim() || !uri.trim()}
+        >
+          {saving && <span class="loading loading-xs" />}
           Commit
         </button>
       </div>

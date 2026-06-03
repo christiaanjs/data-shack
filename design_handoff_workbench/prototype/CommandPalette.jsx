@@ -17,6 +17,8 @@ function CommandPalette({ open, onClose, data, openTabs, ctx }) {
     // Actions
     out.push({ kind: "Action", icon: "plus", title: "New query", sub: "Open a blank SQL editor", run: () => ctx.openTab("sql", { title: "Untitled", sql: "" }) });
     out.push({ kind: "Action", icon: "database", title: "Commit snapshot", sub: "Register a storage file as a table", run: () => ctx.openTab("commit") });
+    out.push({ kind: "Action", icon: "key", title: "New credential", sub: "Add an HTTP / Google Sheets credential", run: () => ctx.openTab("new-cred") });
+    out.push({ kind: "Action", icon: "drive", title: "New storage backend", sub: "Add an R2 / S3-compatible backend", run: () => ctx.openTab("new-backend") });
     out.push({ kind: "Action", icon: ctx.session.enabled ? "x" : "play", title: ctx.session.enabled ? "Disable DuckDB session" : "Enable DuckDB session", sub: "Toggle the in-browser query engine", run: ctx.toggleSession });
     out.push({ kind: "Action", icon: "panel", title: "Toggle console panel", sub: "Show / hide the bottom dock", run: ctx.toggleDock });
     out.push({ kind: "Action", icon: ctx.theme === "dark" ? "sun" : "moon", title: ctx.theme === "dark" ? "Switch to light theme" : "Switch to dark theme", sub: "Change appearance", run: ctx.toggleTheme });

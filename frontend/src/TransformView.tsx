@@ -3,7 +3,7 @@ import { ResultGrid } from "./ResultGrid.tsx";
 import type { SqlEditorHandle } from "./SqlEditor.tsx";
 import { SqlEditor } from "./SqlEditor.tsx";
 import { WORKER_BASE, authHeaders, fmtAgo } from "./wb-api.ts";
-import { PlayIcon, SaveIcon, TransformIcon } from "./wbIcons.tsx";
+import { PlayIcon, PlusIcon, SaveIcon, TableIcon, TransformIcon, XIcon } from "./wbIcons.tsx";
 import type { QueryResult, WbCtx, WbTab, WbTransform } from "./workbench-types.ts";
 
 interface TrTrigger {
@@ -24,6 +24,11 @@ export function TransformView({ tab, ctx }: { tab: WbTab; ctx: WbCtx }) {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saveOk, setSaveOk] = useState(false);
 
+  // Trigger editing
+  const [watches, setWatches] = useState<string[]>([]);
+  const [editPolicy, setEditPolicy] = useState<"any" | "all">("any");
+  const [addOpen, setAddOpen] = useState(false);
+
   // Editable fields
   const [name, setName] = useState(tr?.name ?? "");
   const [outputTable, setOutputTable] = useState(tr?.output_table ?? "");
@@ -32,6 +37,12 @@ export function TransformView({ tab, ctx }: { tab: WbTab; ctx: WbCtx }) {
 
   // Triggers for config strip
   const [trTriggers, setTrTriggers] = useState<TrTrigger[]>([]);
+  // Sync watches/policy from loaded triggers
+  useEffect(() => {
+    setWatches(trTriggers.flatMap((t) => t.watches));
+    setEditPolicy((trTriggers[0]?.policy ?? "any") as "any" | "all");
+  }, [trTriggers]);
+
   const trId = tr?.id ?? null;
   useEffect(() => {
     if (!trId) return;
@@ -48,10 +59,17 @@ export function TransformView({ tab, ctx }: { tab: WbTab; ctx: WbCtx }) {
       .catch(() => {});
   }, [trId]);
 
-  const watches = trTriggers.flatMap((t) => t.watches);
-  const policy = trTriggers[0]?.policy ?? "any";
   const statusStr = tr?.status ?? "draft";
   const statusClass = statusStr === "draft" ? "idle" : statusStr;
+
+  const watchable = ctx.data.tables.filter((t) => t.latestSnapshot && !watches.includes(t.name));
+  function addWatch(n: string) {
+    setWatches((w) => [...w, n]);
+    setAddOpen(false);
+  }
+  function removeWatch(n: string) {
+    setWatches((w) => w.filter((x) => x !== n));
+  }
 
   async function dryRun() {
     const sql = edRef.current?.getDoc() ?? tr?.sql ?? "";
@@ -67,6 +85,7 @@ export function TransformView({ tab, ctx }: { tab: WbTab; ctx: WbCtx }) {
     const sql = edRef.current?.getDoc() ?? tr?.sql ?? "";
     setSaving(true);
     setSaveError(null);
+    let jobId: string | null = tr?.id ?? null;
     try {
       const headers = { ...(await authHeaders()), "Content-Type": "application/json" };
       if (isNew) {
@@ -86,6 +105,8 @@ export function TransformView({ tab, ctx }: { tab: WbTab; ctx: WbCtx }) {
           setSaveError(txt || "Failed to create transform");
           return;
         }
+        const created = (await res.json()) as { id: string };
+        jobId = created.id;
       } else {
         const res = await fetch(`${WORKER_BASE}/api/transform-jobs/${tr.id}`, {
           method: "PATCH",
@@ -98,6 +119,34 @@ export function TransformView({ tab, ctx }: { tab: WbTab; ctx: WbCtx }) {
           return;
         }
       }
+
+      // Sync triggers: delete existing, recreate if watches are specified
+      if (jobId) {
+        const trigHeaders = { ...(await authHeaders()), "Content-Type": "application/json" };
+        const delHeaders = await authHeaders();
+        await Promise.all(
+          trTriggers.map((t) =>
+            fetch(`${WORKER_BASE}/api/triggers/${t.id}`, {
+              method: "DELETE",
+              headers: delHeaders,
+            }).catch(() => {}),
+          ),
+        );
+        if (watches.length > 0) {
+          const tRes = await fetch(`${WORKER_BASE}/api/triggers`, {
+            method: "POST",
+            headers: trigHeaders,
+            body: JSON.stringify({ job_id: jobId, watches, policy: editPolicy }),
+          });
+          if (tRes.ok) {
+            const newTrigger = (await tRes.json()) as TrTrigger;
+            setTrTriggers([newTrigger]);
+          }
+        } else {
+          setTrTriggers([]);
+        }
+      }
+
       setSaveOk(true);
       setTimeout(() => setSaveOk(false), 2500);
     } finally {
@@ -197,27 +246,104 @@ export function TransformView({ tab, ctx }: { tab: WbTab; ctx: WbCtx }) {
       )}
 
       <div class="wb-sql-split">
-        <div class="wb-transform-config">
-          <span style={{ display: "flex", gap: 7, alignItems: "center" }}>
-            watches:{" "}
-            {watches.length > 0 ? (
-              watches.map((w) => (
-                <span key={w} class="badge badge-sm badge-outline font-mono">
-                  {w}
+        <div class="wb-tr-config">
+          {/* Watches */}
+          <div class="wb-tr-field">
+            <span class="wb-tr-label">Watches</span>
+            <div class="wb-tr-chips">
+              {watches.length === 0 && (
+                <span class="wb-empty-inline" style={{ fontSize: 12 }}>
+                  none — runs only on manual trigger
                 </span>
-              ))
-            ) : (
-              <em class="wb-empty-inline">none</em>
-            )}
-          </span>
-          <span style={{ display: "flex", gap: 6, alignItems: "center" }}>
-            trigger policy: <span class="badge badge-sm badge-ghost">{policy}</span>
-          </span>
-          <span style={{ display: "flex", gap: 6, alignItems: "center" }}>
-            status: <span class={`ds-status ds-status-${statusClass}`}>{statusStr}</span>
-            {" · "}
-            {fmtAgo(tr?.last_completed_at ?? tr?.last_run_at)}
-          </span>
+              )}
+              {watches.map((w) => (
+                <span key={w} class="wb-chip" title="Upstream table">
+                  <TableIcon size={11} />
+                  <span class="font-mono">{w}</span>
+                  <button
+                    type="button"
+                    class="wb-chip-x"
+                    onClick={() => removeWatch(w)}
+                    title="Remove watch"
+                  >
+                    <XIcon size={11} />
+                  </button>
+                </span>
+              ))}
+              <div class="wb-addwrap">
+                <button
+                  type="button"
+                  class="wb-chip wb-chip-add"
+                  onClick={() => setAddOpen((o) => !o)}
+                  disabled={watchable.length === 0}
+                >
+                  <PlusIcon size={11} />
+                  add watch
+                </button>
+                {addOpen && watchable.length > 0 && (
+                  <div class="wb-addmenu wb-scrollbar-thin" onMouseLeave={() => setAddOpen(false)}>
+                    {watchable.map((t) => (
+                      <button
+                        type="button"
+                        key={t.name}
+                        class="wb-addmenu-item font-mono"
+                        onClick={() => addWatch(t.name)}
+                      >
+                        <span class="wb-node-ico">
+                          <TableIcon size={12} />
+                        </span>
+                        {t.name}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Trigger policy */}
+          <div class="wb-tr-field">
+            <span class="wb-tr-label">Trigger policy</span>
+            <div
+              class={`wb-seg${watches.length < 2 ? " wb-seg-muted" : ""}`}
+              aria-label="Trigger policy"
+            >
+              <button
+                type="button"
+                class={`wb-seg-btn${editPolicy === "any" ? " active" : ""}`}
+                aria-pressed={editPolicy === "any"}
+                onClick={() => setEditPolicy("any")}
+              >
+                any
+              </button>
+              <button
+                type="button"
+                class={`wb-seg-btn${editPolicy === "all" ? " active" : ""}`}
+                aria-pressed={editPolicy === "all"}
+                onClick={() => setEditPolicy("all")}
+              >
+                all
+              </button>
+            </div>
+            <span class="wb-tr-hint">
+              {watches.length < 2
+                ? "Applies once 2+ tables are watched."
+                : editPolicy === "any"
+                  ? `Runs when any of the ${watches.length} watched tables commits a snapshot.`
+                  : `Runs only after all ${watches.length} watched tables have new snapshots.`}
+            </span>
+          </div>
+
+          {/* Status */}
+          <div class="wb-tr-field" style={{ marginLeft: "auto" }}>
+            <span class="wb-tr-label">Status</span>
+            <span style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12 }}>
+              <span class={`ds-status ds-status-${statusClass}`}>{statusStr}</span>
+              <span class="wb-tr-hint" style={{ margin: 0 }}>
+                · {fmtAgo(tr?.last_completed_at ?? tr?.last_run_at)}
+              </span>
+            </span>
+          </div>
         </div>
         <div class="wb-sql-editor">
           <SqlEditor
