@@ -55,7 +55,7 @@ A personal data integration platform built on Cloudflare that brings your data t
 | Workbench SQL editor: CodeMirror 6 with catalog-seeded autocomplete, per-kind tab views (SQL, table, transform, dashboard, credential, backend, job) | ✅ Done |
 | Workbench dashboard editor: create/edit/delete dashboards with JS artifact + SQL query editors and sandboxed live preview | ✅ Done |
 
-See [`build-plan.md`](./build-plan.md) for the full sequenced plan.
+Open issues are tracked via `bd list` (Beads issue tracker).
 
 ## Current capability
 
