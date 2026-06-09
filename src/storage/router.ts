@@ -146,7 +146,7 @@ storageRouter.post("/proxy-credentials", requireAuth, async (c) => {
     if (!row) return c.json({ error: "storage backend not found" }, 404);
     if (row.type === "r2-bound") {
       backendId = "r2-bound";
-      backendName = row.name;
+      backendName = "r2-bound";
     } else {
       // If resolved by name, backendName = the name. If resolved by id, backendName = id (backwards compat).
       backendId = row.id;

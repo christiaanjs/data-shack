@@ -354,7 +354,7 @@ export async function runHttpLoadJob(
     if (backendRow.type === "r2-bound") {
       const relPath = `${tableDir}/${filename}`;
       await writePaginatedToR2(fetchPages(), job.format, env.R2, r2BoundKey(job.user_id, relPath));
-      uri = `r2://${backendRow.name}/${relPath}`;
+      uri = `r2://r2-bound/${relPath}`;
     } else if (backendRow.type === "r2-s3compat") {
       let raw: {
         endpoint: string;
@@ -393,7 +393,7 @@ export async function runHttpLoadJob(
       const relPath = `${tableDir}/${filename}`;
       const r2Body = await toFixedLengthBody(upstream);
       await env.R2.put(r2BoundKey(job.user_id, relPath), r2Body);
-      uri = `r2://${backendRow.name}/${relPath}`;
+      uri = `r2://r2-bound/${relPath}`;
     } else if (backendRow.type === "r2-s3compat") {
       let raw: {
         endpoint: string;

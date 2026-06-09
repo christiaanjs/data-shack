@@ -161,10 +161,10 @@ describe("runHttpLoadJob r2-bound", () => {
       const job = makeJob(credId, backendId, "r2_cl_tbl");
       const { uri } = await runHttpLoadJob(job, env);
 
-      expect(uri).toMatch(new RegExp(`^r2://${backendName}/`));
+      expect(uri.startsWith("r2://r2-bound/")).toBe(true);
       expect(uri).not.toContain(USER_ID);
       // resolveUri will prepend users/${userId}/ — verify the actual R2 key
-      const relPath = uri.slice(`r2://${backendName}/`.length);
+      const relPath = uri.slice("r2://r2-bound/".length);
       const key = `users/${USER_ID}/${relPath}`;
       const obj = await env.R2.get(key);
       expect(obj).not.toBeNull();
@@ -178,10 +178,10 @@ describe("runHttpLoadJob r2-bound", () => {
       const job = makeJob(credId, backendId, "r2_nocl_tbl");
       const { uri } = await runHttpLoadJob(job, env);
 
-      expect(uri).toMatch(new RegExp(`^r2://${backendName}/`));
+      expect(uri.startsWith("r2://r2-bound/")).toBe(true);
       expect(uri).not.toContain(USER_ID);
       // resolveUri will prepend users/${userId}/ — verify the actual R2 key
-      const relPath = uri.slice(`r2://${backendName}/`.length);
+      const relPath = uri.slice("r2://r2-bound/".length);
       const key = `users/${USER_ID}/${relPath}`;
       const obj = await env.R2.get(key);
       expect(obj).not.toBeNull();
@@ -362,7 +362,7 @@ describe("runHttpLoadJob cursor pagination r2-bound", () => {
         }),
       };
       const { uri } = await runHttpLoadJob(job, env);
-      const relPath = uri.slice(`r2://${backendName}/`.length);
+      const relPath = uri.slice("r2://r2-bound/".length);
       const obj = await env.R2.get(`users/${USER_ID}/${relPath}`);
       expect(obj).not.toBeNull();
       const text = await obj!.text();
@@ -415,7 +415,7 @@ describe("runHttpLoadJob cursor pagination r2-bound", () => {
       expect(capturedUrls[1]).toContain("cursor=tok2");
       expect(capturedUrls[2]).toContain("cursor=tok3");
 
-      const relPath = uri.slice(`r2://${backendName}/`.length);
+      const relPath = uri.slice("r2://r2-bound/".length);
       const obj = await env.R2.get(`users/${USER_ID}/${relPath}`);
       const text = await obj!.text();
       expect(text).toContain('{"id":1}');
@@ -446,7 +446,7 @@ describe("runHttpLoadJob cursor pagination r2-bound", () => {
         }),
       };
       const { uri } = await runHttpLoadJob(job, env);
-      const relPath = uri.slice(`r2://${backendName}/`.length);
+      const relPath = uri.slice("r2://r2-bound/".length);
       const obj = await env.R2.get(`users/${USER_ID}/${relPath}`);
       const parsed = JSON.parse(await obj!.text()) as unknown[];
       expect(Array.isArray(parsed)).toBe(true);
@@ -809,8 +809,8 @@ describe("runGoogleSheetsLoadJob", () => {
         sheetName: "Sheet1",
       });
       const { uri } = await runGoogleSheetsLoadJob(job, gsEnv());
-      expect(uri).toMatch(new RegExp(`^r2://${backendName}/`));
-      const relPath = uri.slice(`r2://${backendName}/`.length);
+      expect(uri.startsWith("r2://r2-bound/")).toBe(true);
+      const relPath = uri.slice("r2://r2-bound/".length);
       const obj = await env.R2.get(`users/${GS_USER_ID}/${relPath}`);
       expect(obj).not.toBeNull();
       const text = await obj!.text();

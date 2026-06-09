@@ -357,9 +357,17 @@ export async function handleCallback(request: Request, env: Env): Promise<Respon
       env.JWT_SECRET,
     );
     if (pending.credential_id) {
-      await updateCredential(env.DB, pending.credential_id, userId, {
+      const updated = await updateCredential(env.DB, pending.credential_id, userId, {
         encryptedConfig: encryptedCfg,
       });
+      if (!updated) {
+        await insertCredential(env.DB, {
+          userId,
+          name: pending.credential_name ?? "Google Sheets",
+          type: "google-sheets",
+          encryptedConfig: encryptedCfg,
+        });
+      }
     } else {
       await insertCredential(env.DB, {
         userId,
