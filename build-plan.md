@@ -26,7 +26,8 @@ Each stage produces something functional and testable independently. Stages 1–
 | Stage 11 | IaC sync CLI — version-controlled warehouse config with plan/apply/destroy | Not started |
 | Stage 12 | Job history, audit log & error reporting — run log table, failure notifications, freshness SLAs | Not started |
 | Stage 13 | Data lineage graph — DAG of sources → tables → transforms in UI and MCP | Not started |
-| Stage 14 | Richer frontend — query REPL with history, catalog browser, CodeMirror SQL editor, multi-tab | Not started |
+| Saved queries + HTTP pagination | Saved queries D1 table + API; cursor pagination for HTTP load jobs | ✅ Done |
+| Stage 14 | Richer frontend — query REPL with history, catalog browser, CodeMirror SQL editor, multi-tab | 🚧 In progress |
 
 **Note on Stage 1 + Stage 2 storage resolution (updated — S3 proxy + URI unification):** The original per-key JWT token flow (`POST /api/storage/resolve`, `/api/storage/obj/:token`, `/api/storage/r2s3compat/obj/:token`) has been replaced by an S3-compatible proxy. `POST /api/storage/proxy-credentials` vends short-lived `{ accessKeyId, secret, endpoint, region, bucket }` credentials stored in `PROXY_CREDS_KV` with TTL. The frontend calls `acquireProxyCred()` to get a credential and `buildS3Secret()` to build a DuckDB `CREATE OR REPLACE SECRET` statement; all storage operations (GET, HEAD, PUT, ListObjectsV2) then flow through `GET|HEAD|PUT /api/storage/s3proxy/:bucket/*key` on the Worker (implemented in `src/storage/router.ts`), which forwards to the real backend (R2 binding for `r2-bound`, re-signed upstream S3 for `r2-s3compat`). This enables DuckDB `COPY TO … PARTITION_BY` (multiple PUT paths not known in advance) and `read_parquet('…/**/*.parquet', hive_partitioning=true)` (ListObjectsV2 to discover partition files). No CORS policy on the upstream bucket is needed. `POST /api/storage/resolve` is retained for `http-ds://` URI resolution only.
 
@@ -396,6 +397,21 @@ The current UI is functional but minimal: a single query editor with no history,
 - **Better catalog browser:** Table detail view showing schema (column names + inferred types from a `DESCRIBE` query), snapshot timeline, row count estimate, and storage size; click a table name in the catalog to open its detail view in a side panel
 - **Transform job SQL editor:** Replace the plain textarea with CodeMirror or Monaco (both available as WASM-friendly bundles); syntax highlighting + basic SQL autocomplete seeded from catalog table and column names
 - **Multi-tab REPL:** Open multiple query tabs linked to the same DuckDB-WASM session; each tab has its own SQL buffer and result grid; tabs share the same catalog views and proxy credentials so cross-tab joins work; closing a tab does not tear down the session
+
+### ✅ Implemented (partial)
+
+**Workbench IDE at `/workbench`:**
+- VS Code-style IDE shell (`WorkbenchShell.tsx`): activity rail, resizable sidebar (Explorer/SettingsTree), resizable console dock (Console REPL + History), tab strip, status bar, `⌘K` command palette
+- `Explorer.tsx`: tree sidebar with Catalog, Transforms, Saved Queries, Load Jobs, Dashboards groups; `SettingsTree` for Credentials/Backends
+- `TabViews.tsx` + per-kind views: `SqlView` (CodeMirror 6 SQL editor + result grid), `TransformView` (transform editor with status), `DashboardEditView` (JS artifact + SQL editors + live preview + delete), `CredView`, `BackendView`, `JobView`
+- `CommandPalette.tsx`: fuzzy-search palette (`⌘K`) across all resource types
+- `ConsoleDock.tsx`: DuckDB REPL with arrow-key history + History tab
+- `SqlEditor.tsx` / `JsEditor.tsx`: CodeMirror 6 editors with catalog autocomplete
+- `ResultGrid.tsx`: result table with column headers and row count
+
+**Remaining from Stage 14:**
+- Better catalog browser (schema, snapshot timeline, row counts, storage size)
+- Multi-tab sharing of temp views across tabs (currently each tab is independent)
 
 **Test:** Open two query tabs. Run a query in tab 1 that creates a temp view. Verify tab 2 can query that view. Use up-arrow to navigate query history. Open the catalog browser and click a table — verify schema and snapshot timeline appear. Open a transform job — verify the SQL editor highlights keywords and offers table name completions.
 
