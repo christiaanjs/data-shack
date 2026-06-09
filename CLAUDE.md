@@ -71,9 +71,9 @@ They have separate `node_modules`, `package.json`, and `tsconfig.json`. The work
 
 **Token lifetimes:** Access tokens 1 hour (JWT), refresh tokens 30 days (stored as SHA-256 hashes in D1, rotated on every use).
 
-**Key D1 tables:** `users`, `oauth_identities`, `oauth_states`, `oauth_clients`, `oauth_codes`, `oauth_refresh_tokens`, `credentials`, `storage_backends`, `load_jobs`, `allowed_emails`, `dashboards`, `dashboard_snapshots`. All timestamp columns are Unix milliseconds (`Date.now()`). `oauth_states` has a `credential_name` column (migration 0009) used to pass the credential name through the Google Sheets OAuth popup flow. `dashboards` has a nullable `slug` TEXT column (migration 0011) with a `UNIQUE(user_id, slug)` partial index. `dashboard_snapshots` records versioned snapshots of dashboard source and queries with a `snapshot_reason` field (`'update'` or `'delete'`).
+**Key D1 tables:** `users`, `oauth_identities`, `oauth_states`, `oauth_clients`, `oauth_codes`, `oauth_refresh_tokens`, `credentials`, `storage_backends`, `load_jobs`, `allowed_emails`, `dashboards`, `dashboard_snapshots`, `saved_queries`. All timestamp columns are Unix milliseconds (`Date.now()`). `oauth_states` has a `credential_name` column (migration 0009) used to pass the credential name through the Google Sheets OAuth popup flow, and a `credential_id` column (migration 0013) used to identify which existing google-sheets credential to update during re-auth. `dashboards` has a nullable `slug` TEXT column (migration 0011) with a `UNIQUE(user_id, slug)` partial index. `dashboard_snapshots` records versioned snapshots of dashboard source and queries with a `snapshot_reason` field (`'update'` or `'delete'`).
 
-**Load jobs:** Cron-triggered ETL jobs. Each job has a `source_type` column (`'http'` or `'google-sheets'`) and a `source_config` JSON column. The `scheduled()` handler queries D1 for due jobs and enqueues `{ jobId }` messages to `LOAD_JOB_QUEUE`. The `queue()` consumer fetches the job and branches on `source_type`: `'http'` runs `runHttpLoadJob` from `src/loaders/http.ts` (HTTP fetch → R2/S3 write → catalog commit); `'google-sheets'` runs `runGoogleSheetsLoadJob` from `src/loaders/google-sheets.ts` (token refresh → Sheets API v4 fetch → NDJSON conversion → R2/S3 write → catalog commit, with a 50 MB buffer limit). Updates `last_run_at`/`last_error`/`next_run_at` in D1; retries on failure (up to `max_retries = 3`). `POST /api/load-jobs/:id/trigger` enqueues directly for on-demand runs. The PATCH handler reads the existing job first to preserve `source_type`/`source_config` when those fields are omitted from the request body.
+**Load jobs:** Cron-triggered ETL jobs. Each job has a `source_type` column (`'http'` or `'google-sheets'`) and a `source_config` JSON column. The `scheduled()` handler queries D1 for due jobs and enqueues `{ jobId }` messages to `LOAD_JOB_QUEUE`. The `queue()` consumer fetches the job and branches on `source_type`: `'http'` runs `runHttpLoadJob` from `src/loaders/http.ts` (HTTP fetch → R2/S3 write → catalog commit); `'google-sheets'` runs `runGoogleSheetsLoadJob` from `src/loaders/google-sheets.ts` (token refresh → Sheets API v4 fetch → NDJSON conversion → R2/S3 write → catalog commit, with a 50 MB buffer limit). Updates `last_run_at`/`last_error`/`next_run_at` in D1; retries on failure (up to `max_retries = 3`). `POST /api/load-jobs/:id/trigger` enqueues directly for on-demand runs. The PATCH handler reads the existing job first to preserve `source_type`/`source_config` when those fields are omitted from the request body. `runHttpLoadJob` also supports cursor-based pagination via an optional `pagination_config` JSON column (`cursor_param`, `cursor_path`, `data_path` fields); multi-page responses are streamed with multipart upload. `date_range_config` supports parameterizing requests by date range.
 
 **Session DO:** `src/session/do.ts` — pairs MCP query requests with an active browser tab. Uses `ctx.acceptWebSocket(server, [userId])` (hibernation API) so the DO sleeps between events. An in-memory `pendingQueries` map (keyed by `queryId`) holds `{ resolve, reject }` closures while awaiting a browser response — safe because active `POST /query` fetch handlers prevent hibernation. On browser connect, dispatches any pending transform jobs via `dispatchPendingJobs` (fetches `GET /jobs/pending` from catalog DO, sends each as `{ type: "transform_job", ... }` over the socket). On socket close, resets any `running` transform jobs back to `pending` via `POST /jobs/reset-pending`. `GET /session/status` returns the count of connected sockets; `POST /dispatch-jobs` can be called by the Worker to push freshly triggered jobs.
 
@@ -91,23 +91,44 @@ They have separate `node_modules`, `package.json`, and `tsconfig.json`. The work
 
 **Shared storage helpers:** `src/storage/catalog-fetch.ts` — `resolveTableSnapshot` (catalog table name → latest `SnapshotInfo` via catalog DO), `fetchStorageUri` (streams raw bytes from `r2://` or `r2-s3compat://` URIs, handling both R2 bound and named backends), `inferSnapshotFormat`, `isProxyReadableFormat`, `isProxyReadableUri`. Used by both `src/index.ts` (the `GET /api/table-data/:tableName` proxy endpoint) and `src/mcp/server.ts` to avoid duplicated storage resolution logic. `GET /api/table-data/:tableName` (behind `requireAuth`) resolves a catalog table to its latest snapshot, validates format is JSON/NDJSON, and streams raw bytes from storage — no DuckDB required. Errors are always JSON; success carries `Content-Type: application/json` or `application/x-ndjson`.
 
+**Saved queries:** `src/db/saved-queries.ts` — `insertSavedQuery`, `listSavedQueries`, `deleteSavedQuery`. Worker routes: `GET /api/saved-queries` (list), `POST /api/saved-queries` (create with `{ name, sql }`), `DELETE /api/saved-queries/:id`. Queries are stored in D1 `saved_queries` table (migration 0012) and exposed in the workbench IDE sidebar.
+
 ## Frontend architecture
 
 Single-file auth client in `frontend/src/auth.ts` — handles DCR (Dynamic Client Registration), PKCE code verifier generation, token exchange, auto-refresh (5-minute buffer), and token storage in `localStorage`. PKCE verifier and state are stored in short-lived HTTP cookies (`max-age=600s`) rather than `sessionStorage`, so the OAuth round-trip survives the Android PWA context switch (standalone PWA → Chrome Custom Tab for `/callback`). On HTTPS, cookies use the `__Host-` prefix (`__Host-oauth_pkce_v` and `__Host-oauth_pkce_s`) to enforce `Secure + path=/ + host-only` scope. On `http://localhost` the prefix is omitted since `__Host-` requires HTTPS.
 
-`frontend/src/App.tsx` is an auth state machine: `null` (loading) → `false` (login screen) → `true` (authenticated). On load it either handles the `/callback` route (token exchange) or checks for an existing access token. After authentication it calls `GET /me` to resolve `userId`. Catalog state (`catalogTables`, `catalogLoading`, `catalogError`, `catalogFailed`, `dbReady`, `dbError`) is lifted here and persists across tab switches. A `catalogReadyRef` tracks a chained promise for all in-flight view refreshes; `getCatalogReady()` returns it so transform jobs can await catalog freshness. An amber `hasNewData` dot in the navbar flashes for 3 s on each catalog commit. URL routing is provided by preact-iso (`LocationProvider` wraps the app in `frontend/src/main.tsx`; `useLocation()` drives tab navigation — `activeTab` is derived from the URL path, not state). A DuckDB session toggle (`sessionEnabled`) defaults to off on coarse-pointer/mobile devices and is persisted in `localStorage` under `"duckdb-session-enabled"`. Three split effects manage initialization: Effect A = catalog WebSocket (always active when authed), Effect B = catalog metadata (switches between `runCatalogInit` with DuckDB and lightweight `fetchCatalogMetadata` without), Effect C = DuckDB init + session WebSocket (only when `sessionEnabled`). A `setDashboardCommitListener` stable callback forwards catalog commit events to the active dashboard panel. `isStandalone` (module-level constant, not reactive state) detects `display-mode: standalone` or iOS `navigator.standalone`; `hideNavbar` is derived as `isStandalone && /^\/dashboards\/.+/.test(path)` so the navbar is hidden when opened as a home screen shortcut on a specific dashboard.
+`frontend/src/App.tsx` routes `/workbench` to `<WorkbenchShell />` (fully self-contained IDE); all other paths render `<LegacyApp />` (the existing tab-based UI). `<LegacyApp />` is an auth state machine: `null` (loading) → `false` (login screen) → `true` (authenticated). On load it either handles the `/callback` route (token exchange) or checks for an existing access token. After authentication it calls `GET /me` to resolve `userId`. Catalog state (`catalogTables`, `catalogLoading`, `catalogError`, `catalogFailed`, `dbReady`, `dbError`) is lifted here and persists across tab switches. A `catalogReadyRef` tracks a chained promise for all in-flight view refreshes; `getCatalogReady()` returns it so transform jobs can await catalog freshness. An amber `hasNewData` dot in the navbar flashes for 3 s on each catalog commit. URL routing is provided by preact-iso (`LocationProvider` wraps the app in `frontend/src/main.tsx`; `useLocation()` drives tab navigation — `activeTab` is derived from the URL path, not state). A DuckDB session toggle (`sessionEnabled`) defaults to off on coarse-pointer/mobile devices and is persisted in `localStorage` under `"duckdb-session-enabled"`. Three split effects manage initialization: Effect A = catalog WebSocket (always active when authed), Effect B = catalog metadata (switches between `runCatalogInit` with DuckDB and lightweight `fetchCatalogMetadata` without), Effect C = DuckDB init + session WebSocket (only when `sessionEnabled`). A `setDashboardCommitListener` stable callback forwards catalog commit events to the active dashboard panel. `isStandalone` (module-level constant, not reactive state) detects `display-mode: standalone` or iOS `navigator.standalone`; `hideNavbar` is derived as `isStandalone && /^\/dashboards\/.+/.test(path)` so the navbar is hidden when opened as a home screen shortcut on a specific dashboard.
 
 `VITE_DEV_TOKEN` in the frontend environment skips OAuth entirely — the token is sent as `X-Dev-Token` on every request.
 
 `frontend/src/catalogWs.ts` — `connectCatalogWs()` opens a WebSocket to `GET /catalog/ws` after auth. On each `commit` message, creates a `refreshSingleView` promise, chains it with `Promise.all` onto the accumulated refresh promise, then calls `onCommit(event, accumulatedPromise)`. Reconnects on close with 5 s backoff; eager-reconnects on tab visibility restore; removes the `visibilitychange` listener in `close()`.
 
-`frontend/src/sessionWs.ts` — connects to the session DO WebSocket (`GET /session/ws`) after auth. Config includes `getCatalogReady`; `socket.onmessage` awaits it before processing any message. Handles three inbound message types: `query` (runs SQL in DuckDB, streams row batches back), `transform_job` (awaits catalog ready, sends `job_claimed`, acquires proxy credentials, runs COPY TO SQL, sends `job_complete` or `job_error` — no longer calls `registerCatalogViews`), `job_status` (server broadcast of running/done/failed — updates UI across all connected tabs and machines). The Session DO receives `job_complete`, looks up the job spec, commits the output URI to the catalog DO, and marks the job `done`. Status indicators surface in App.tsx.
+`frontend/src/sessionWs.ts` — connects to the session DO WebSocket (`GET /session/ws`) after auth. Config includes `getCatalogReady`; `socket.onmessage` awaits it before processing any message. Handles three inbound message types: `query` (runs SQL in DuckDB, streams row batches back), `transform_job` (awaits catalog ready, sends `job_claimed`, acquires proxy credentials, runs COPY TO SQL, sends `job_complete` or `job_error` — no longer calls `registerCatalogViews`), `job_status` (server broadcast of running/done/failed — updates UI across all connected tabs and machines). The Session DO receives `job_complete`, looks up the job spec, commits the output URI to the catalog DO, and marks the job `done`. Status indicators surface in WorkbenchShell.tsx.
 
 `frontend/src/catalogViews.ts` — `registerCatalogViews` uses `GET /catalog/snapshots-latest` (single request, LEFT JOIN) instead of N+1 fetches; batch-resolves `http-ds://` URIs via a single `POST /api/storage/resolve` before creating views; `refreshSingleView` re-creates a single view for incoming commit events; shared private `registerView` with `preResolvedUrl?` param avoids per-table round-trips. Tables that fail are reported without blocking the others. Also exports `fetchCatalogMetadata` — a lightweight function that calls `GET /catalog/snapshots-latest` without initialising DuckDB, used when `sessionEnabled` is false.
 
 `frontend/src/DashboardsPanel.tsx` — list and viewer for persisted dashboards. List view shows all dashboards with Open/Delete actions. Viewer derives the active dashboard ID from the URL (`/dashboards/dash_xxx` or `/dashboards/my-slug`) via `useLocation()`, fetches the detail from `GET /api/dashboards/:id`, and runs bound queries. When `sessionEnabled`, queries run in DuckDB (awaiting `getCatalogReady()` first); otherwise they use `runProxyQuery` which fetches `GET /api/table-data/:tableName` and parses raw JSON/NDJSON client-side (`parseJsonColumnar` handles both `[{...}]` arrays and NDJSON). Renders artifact in a `sandbox="allow-scripts"` iframe using `srcdoc` (React 18 + Babel standalone + Recharts, pinned versions); the iframe's boilerplate `<style>` sets `body { margin:0; padding:0 }`. Re-runs queries automatically on catalog commit via `setCatalogCommitListener`. Navigation uses `route()` from `useLocation()`. Accepts `isStandalone` prop: when true and viewing a specific dashboard, the back-button/title header is hidden so the iframe fills the entire viewport.
 
 `frontend/src/QueryPanel.tsx` — receives catalog and DuckDB state as props from App; no longer manages its own DuckDB singleton or catalog fetch; state persists across tab switches.
+
+**Workbench IDE** (`/workbench` route — `frontend/src/WorkbenchShell.tsx`): a VS Code-style IDE shell. Manages auth (same DCR/PKCE flow as the legacy app), catalog WebSocket, session WebSocket, tab state, and all workbench data. Activity rail with Explorer/Settings toggle; resizable sidebar; tab strip with close buttons; resizable bottom console dock; status bar.
+
+- `frontend/src/Explorer.tsx` — `Explorer` component shows Catalog, Transforms, Saved Queries, Load Jobs, Dashboards tree groups; exported `SettingsTree` shows Credentials and Storage Backends (both defaultOpen). `TreeGroup`, `TableNode`, `SimpleNode` internal components with chevron expand animation.
+- `frontend/src/TabViews.tsx` — `TabContent` router dispatches to per-kind view components. Includes `SqlView` (SQL editor + result grid + run/save toolbar), `TableView`, `CommitView`, `GenericView`.
+- `frontend/src/TransformView.tsx` — full transform editor: name/output-table toolbar, SQL editor + result grid, status strip, save (`POST /api/transform-jobs`) and dry-run actions.
+- `frontend/src/DashboardEditView.tsx` — dashboard create/edit view: title + slug inputs, per-query SQL editors, JS artifact editor (`JsEditor`), sandboxed preview iframe, save (`POST/PATCH /api/dashboards/:id`), and delete with two-step confirm.
+- `frontend/src/CredView.tsx`, `frontend/src/BackendView.tsx`, `frontend/src/JobView.tsx` — detail/edit views for credentials, storage backends, and load jobs respectively.
+- `frontend/src/CommandPalette.tsx` — `⌘K` command palette: fuzzy-search across tables, transforms, saved queries, jobs, dashboards, credentials, backends, and commands.
+- `frontend/src/ConsoleDock.tsx` — bottom dock with Console tab (DuckDB REPL with arrow-key history) and History tab (click to re-open as SQL tab).
+- `frontend/src/SqlEditor.tsx` — CodeMirror 6 SQL editor with catalog-seeded autocomplete via `Compartment`; exposes `SqlEditorHandle` ref for `getDoc()`/`setDoc()`/`focus()`.
+- `frontend/src/JsEditor.tsx` — CodeMirror 6 JS editor (for dashboard artifact source); same handle pattern.
+- `frontend/src/ResultGrid.tsx` — virtualized result table with column headers and row count badge.
+- `frontend/src/wb-api.ts` — shared `WORKER_BASE` constant and `authHeaders()` helper used by all workbench tab views.
+- `frontend/src/wbIcons.tsx` — lucide-preact icon wrappers with `strokeWidth=1.6` baked in; single source for all workbench icons.
+- `frontend/src/workbench-types.ts` — `WbTab`, `WbCtx`, `WbData`, `WbTransform`, `WbJob`, `WbDashboard`, `WbCredential`, `WbBackend`, `WbTransform`, `QueryResult`, `LogEntry`, `HistoryEntry`, `SavedQuery`.
+- `frontend/src/resolveQuery.ts` — `resolveStorageUris()` scans SQL for `r2://` and `http-ds://` URIs and prepends `CREATE OR REPLACE SECRET` preamble statements before execution.
+- `frontend/src/cmTheme.ts` — CodeMirror editor theme matching the workbench dark/light palette.
+- `frontend/src/dashboardUtils.ts` — `buildIframeHtml()` assembles the sandboxed iframe `srcdoc` (React 18 + Babel + Recharts boilerplate with the user artifact injected).
 
 **Cloudflare Pages Functions** (`frontend/functions/`): file-based serverless handlers deployed alongside the Pages SPA. `frontend/wrangler.toml` (`name = "data-shack"`, `pages_build_output_dir = "dist"`) is required for `wrangler pages deploy` (run from `frontend/`) to discover `frontend/functions/` automatically.
 
@@ -185,3 +206,60 @@ The `TEST_MIGRATIONS` binding in `vitest.config.ts` is populated from the `migra
 - `test/load-jobs.test.ts` — Load jobs CRUD, trigger endpoint, scheduler/consumer helpers
 - `test/loader.test.ts` — `runHttpLoadJob` and `runGoogleSheetsLoadJob` unit tests (mocked fetch, both backend types, missing env vars, Sheets API errors)
 - `test/dashboard.test.ts` — dashboard CRUD via MCP submit_dashboard/list_dashboards/get_dashboard/update_dashboard tools and REST API; slug auto-generation and lookup; dashboard versioning (snapshot on update/delete); validation (50 KB limit, missing fields, invalid queries array); user isolation in list/get; PATCH /api/dashboards/:id; GET /api/table-data/:tableName (auth, 404 for unknown table, 400 for parquet format, success path with R2 JSON streaming)
+
+
+<!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:970c3bf2 -->
+## Beads Issue Tracker
+
+This project uses **bd (beads)** for issue tracking. Run `bd prime` to see full workflow context and commands.
+
+### Quick Reference
+
+```bash
+bd ready              # Find available work
+bd show <id>          # View issue details
+bd update <id> --claim  # Claim work
+bd close <id>         # Complete work
+```
+
+### Rules
+
+- Use `bd` for ALL task tracking — do NOT use TodoWrite, TaskCreate, or markdown TODO lists
+- Run `bd prime` for detailed command reference and session close protocol
+- Use `bd remember` for persistent knowledge — do NOT use MEMORY.md files
+
+**Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md for details and anti-patterns.
+
+## Agent Context Profiles
+
+The managed Beads block is task-tracking guidance, not permission to override repository, user, or orchestrator instructions.
+
+- **Conservative (default)**: Use `bd` for task tracking. Do not run git commits, git pushes, or Dolt remote sync unless explicitly asked. At handoff, report changed files, validation, and suggested next commands.
+- **Minimal**: Keep tool instruction files as pointers to `bd prime`; use the same conservative git policy unless active instructions say otherwise.
+- **Team-maintainer**: Only when the repository explicitly opts in, agents may close beads, run quality gates, commit, and push as part of session close. A current "do not commit" or "do not push" instruction still wins.
+
+## Session Completion
+
+This protocol applies when ending a Beads implementation workflow. It is subordinate to explicit user, repository, and orchestrator instructions.
+
+1. **File issues for remaining work** - Create beads for anything that needs follow-up
+2. **Run quality gates** (if code changed) - Tests, linters, builds
+3. **Update issue status** - Close finished work, update in-progress items
+4. **Handle git/sync by active profile**:
+   ```bash
+   # Conservative/minimal/default: report status and proposed commands; wait for approval.
+   git status
+
+   # Team-maintainer opt-in only, unless current instructions forbid it:
+   git pull --rebase
+   bd dolt push
+   git push
+   git status
+   ```
+5. **Hand off** - Summarize changes, validation, issue status, and any blocked sync/commit/push step
+
+**Critical rules:**
+- Explicit user or orchestrator instructions override this Beads block.
+- Do not commit or push without clear authority from the active profile or the current user request.
+- If a required sync or push is blocked, stop and report the exact command and error.
+<!-- END BEADS INTEGRATION -->

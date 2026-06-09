@@ -38,14 +38,6 @@ const HTTP_CONFIG_TEMPLATE = JSON.stringify(
   2,
 );
 
-const R2_BOUND_CONFIG_TEMPLATE = JSON.stringify(
-  {
-    bucket: "data-shack-storage",
-  },
-  null,
-  2,
-);
-
 const R2_S3COMPAT_CONFIG_TEMPLATE = JSON.stringify(
   {
     endpoint: "https://<accountId>.r2.cloudflarestorage.com",
@@ -241,11 +233,9 @@ function AddForm({
   const initialConfig =
     typeOptions[0] === "http"
       ? HTTP_CONFIG_TEMPLATE
-      : typeOptions[0] === "r2-bound"
-        ? R2_BOUND_CONFIG_TEMPLATE
-        : typeOptions[0] === "r2-s3compat"
-          ? R2_S3COMPAT_CONFIG_TEMPLATE
-          : "{}";
+      : typeOptions[0] === "r2-s3compat"
+        ? R2_S3COMPAT_CONFIG_TEMPLATE
+        : "{}";
   const [config, setConfig] = useState(initialConfig);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -262,15 +252,9 @@ function AddForm({
     setType(newType);
     if (newType === "http") {
       setConfig(HTTP_CONFIG_TEMPLATE);
-    } else if (newType === "r2-bound") {
-      setConfig(R2_BOUND_CONFIG_TEMPLATE);
     } else if (newType === "r2-s3compat") {
       setConfig(R2_S3COMPAT_CONFIG_TEMPLATE);
-    } else if (
-      config === HTTP_CONFIG_TEMPLATE ||
-      config === R2_BOUND_CONFIG_TEMPLATE ||
-      config === R2_S3COMPAT_CONFIG_TEMPLATE
-    ) {
+    } else if (config === HTTP_CONFIG_TEMPLATE || config === R2_S3COMPAT_CONFIG_TEMPLATE) {
       setConfig("{}");
     }
     if (newType === "google-sheets") {
@@ -291,7 +275,9 @@ function AddForm({
             spreadsheetId: gsSpreadsheetId,
             sheetName: gsSheetName || "Sheet1",
           })
-        : config;
+        : type === "r2-bound"
+          ? "{}"
+          : config;
       await onAdd(name, type, configJson);
       setName("");
       if (isGsGuided) {
@@ -302,11 +288,9 @@ function AddForm({
         setConfig(
           type === "http"
             ? HTTP_CONFIG_TEMPLATE
-            : type === "r2-bound"
-              ? R2_BOUND_CONFIG_TEMPLATE
-              : type === "r2-s3compat"
-                ? R2_S3COMPAT_CONFIG_TEMPLATE
-                : "{}",
+            : type === "r2-s3compat"
+              ? R2_S3COMPAT_CONFIG_TEMPLATE
+              : "{}",
         );
       }
     } catch (err) {
@@ -406,6 +390,10 @@ function AddForm({
             </p>
           </fieldset>
         </div>
+      ) : type === "r2-bound" ? (
+        <p class="text-xs text-base-content/50">
+          Uses the Cloudflare R2 bucket bound to this worker — no extra config required.
+        </p>
       ) : (
         <fieldset class="fieldset">
           <legend class="fieldset-legend">Config (JSON)</legend>
@@ -421,13 +409,6 @@ function AddForm({
               <strong>headers</strong> — sent on every request; use <code>{"{{name}}"}</code> to
               reference a value from <strong>variables</strong> (keeps secrets out of the header
               string).
-            </p>
-          )}
-          {type === "r2-bound" && (
-            <p class="text-xs text-base-content/50 mt-1">
-              The primary Cloudflare R2 bucket bound to this worker. <strong>bucket</strong> — set
-              to <code>data-shack-storage</code> (used for URI construction in the catalog). Load
-              jobs writing to this backend use the Worker's R2 binding directly.
             </p>
           )}
           {type === "r2-s3compat" && (
@@ -507,17 +488,21 @@ function EditBackendDialog({
     setSubmitting(true);
     setError(null);
     try {
-      let parsedConfig: unknown;
-      try {
-        parsedConfig = JSON.parse(config ?? "{}");
-      } catch {
-        throw new Error("Config must be valid JSON");
-      }
       const headers = await getAuthHeaders();
+      let body: Record<string, unknown> = { name };
+      if (backend.type !== "r2-bound") {
+        let parsedConfig: unknown;
+        try {
+          parsedConfig = JSON.parse(config ?? "{}");
+        } catch {
+          throw new Error("Config must be valid JSON");
+        }
+        body = { name, config: parsedConfig };
+      }
       const res = await fetch(`${workerBase}/api/storage-backends/${backend.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json", ...headers },
-        body: JSON.stringify({ name, config: parsedConfig }),
+        body: JSON.stringify(body),
       });
       if (!res.ok) {
         const data = (await res.json()) as { error?: string };
@@ -575,15 +560,21 @@ function EditBackendDialog({
                 />
               </fieldset>
             </div>
-            <fieldset class="fieldset">
-              <legend class="fieldset-legend">Config (JSON)</legend>
-              <textarea
-                class="textarea textarea-bordered textarea-sm font-mono w-full"
-                rows={backend.type === "http" || backend.type === "r2-s3compat" ? 8 : 3}
-                value={config ?? ""}
-                onInput={(e) => setConfig((e.target as HTMLTextAreaElement).value)}
-              />
-            </fieldset>
+            {backend.type === "r2-bound" ? (
+              <p class="text-xs text-base-content/50">
+                Uses the Cloudflare R2 bucket bound to this worker — no config required.
+              </p>
+            ) : (
+              <fieldset class="fieldset">
+                <legend class="fieldset-legend">Config (JSON)</legend>
+                <textarea
+                  class="textarea textarea-bordered textarea-sm font-mono w-full"
+                  rows={backend.type === "http" || backend.type === "r2-s3compat" ? 8 : 3}
+                  value={config ?? ""}
+                  onInput={(e) => setConfig((e.target as HTMLTextAreaElement).value)}
+                />
+              </fieldset>
+            )}
             <div class="modal-action">
               <button type="button" class="btn btn-sm" onClick={onClose}>
                 Cancel

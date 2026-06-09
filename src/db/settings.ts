@@ -128,6 +128,31 @@ export async function listHttpCredentials(
   return result.results;
 }
 
+export async function updateCredential(
+  db: D1Database,
+  id: string,
+  userId: string,
+  opts: { name?: string; encryptedConfig?: string },
+): Promise<boolean> {
+  const setParts: string[] = [];
+  const bindValues: unknown[] = [];
+  if (opts.name !== undefined) {
+    setParts.push("name = ?");
+    bindValues.push(opts.name);
+  }
+  if (opts.encryptedConfig !== undefined) {
+    setParts.push("encrypted_config = ?");
+    bindValues.push(opts.encryptedConfig);
+  }
+  setParts.push("updated_at = ?");
+  bindValues.push(Date.now(), id, userId);
+  const result = await db
+    .prepare(`UPDATE credentials SET ${setParts.join(", ")} WHERE id = ? AND user_id = ?`)
+    .bind(...bindValues)
+    .run();
+  return (result.meta.changes ?? 0) > 0;
+}
+
 export async function updateStorageBackend(
   db: D1Database,
   id: string,

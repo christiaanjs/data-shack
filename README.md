@@ -49,8 +49,13 @@ A personal data integration platform built on Cloudflare that brings your data t
 | Per-dashboard home screen shortcuts: Cloudflare Pages Functions serve per-slug HTML with dashboard title and dedicated manifest | ✅ Done |
 | Android PWA OAuth fix: PKCE verifier/state stored in `__Host-` cookies (shared across PWA + Custom Tab contexts) | ✅ Done |
 | Standalone mode: navbar hidden on dashboard viewer pages; back button/title hidden when opened as PWA shortcut | ✅ Done |
+| Saved queries: `GET/POST/DELETE /api/saved-queries`, D1 `saved_queries` table, workbench sidebar integration | ✅ Done |
+| HTTP load job cursor pagination: `pagination_config` JSON, cursor-based multi-page fetch with streaming multipart upload | ✅ Done |
+| Workbench IDE: full VS Code-style IDE at `/workbench`; activity rail, resizable sidebar/dock, tab strip, `⌘K` palette, Console REPL, History | ✅ Done |
+| Workbench SQL editor: CodeMirror 6 with catalog-seeded autocomplete, per-kind tab views (SQL, table, transform, dashboard, credential, backend, job) | ✅ Done |
+| Workbench dashboard editor: create/edit/delete dashboards with JS artifact + SQL query editors and sandboxed live preview | ✅ Done |
 
-See [`build-plan.md`](./build-plan.md) for the full sequenced plan.
+Open issues are tracked via `bd list` (Beads issue tracker).
 
 ## Current capability
 

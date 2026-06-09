@@ -29,6 +29,7 @@ import {
   updateLoadJob,
   updateLoadJobOutcome,
 } from "./db/load-jobs.ts";
+import { deleteSavedQuery, insertSavedQuery, listSavedQueries } from "./db/saved-queries.ts";
 import {
   deleteCredential,
   deleteStorageBackend,
@@ -39,6 +40,7 @@ import {
   insertStorageBackend,
   listCredentials,
   listStorageBackends,
+  updateCredential,
   updateStorageBackend,
 } from "./db/settings.ts";
 import { decryptHttpConfig, resolveHeaderTemplates } from "./http-config.ts";
@@ -359,6 +361,38 @@ app.delete("/api/credentials/:id", requireAuth, async (c) => {
   return new Response(null, { status: 204 });
 });
 
+app.patch("/api/credentials/:id", requireAuth, async (c) => {
+  const body = await c.req.json<Record<string, unknown>>();
+  const opts: { name?: string; encryptedConfig?: string } = {};
+
+  if (body.name !== undefined) {
+    if (typeof body.name !== "string") return c.json({ error: "name must be a string" }, 400);
+    const name = body.name.trim();
+    if (!name || name.length > 64 || !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(name)) {
+      return c.json(
+        {
+          error:
+            "name must be 1–64 characters, start with a letter or digit, and contain only letters, digits, '.', '_', or '-'",
+        },
+        400,
+      );
+    }
+    opts.name = name;
+  }
+
+  if (body.config !== undefined) {
+    opts.encryptedConfig = await encryptConfig(JSON.stringify(body.config), c.env.JWT_SECRET);
+  }
+
+  if (!opts.name && !opts.encryptedConfig) {
+    return c.json({ error: "at least one of name or config must be provided" }, 400);
+  }
+
+  const updated = await updateCredential(c.env.DB, c.req.param("id"), c.get("userId"), opts);
+  if (!updated) return c.json({ error: "not found" }, 404);
+  return c.json({ id: c.req.param("id") });
+});
+
 app.post("/api/credentials/:id/test", requireAuth, async (c) => {
   const row = await getCredentialConfig(c.env.DB, c.req.param("id"), c.get("userId"));
   if (!row) return c.json({ error: "not found" }, 404);
@@ -401,8 +435,11 @@ app.post("/api/storage-backends", requireAuth, async (c) => {
     type?: unknown;
     config?: unknown;
   }>();
-  if (typeof body.name !== "string" || typeof body.type !== "string" || !body.config) {
-    return c.json({ error: "name, type, and config are required" }, 400);
+  if (typeof body.name !== "string" || typeof body.type !== "string") {
+    return c.json({ error: "name and type are required" }, 400);
+  }
+  if (body.type !== "r2-bound" && !body.config) {
+    return c.json({ error: "config is required" }, 400);
   }
   const name = body.name.trim();
   if (!name || name.length > 64 || name.includes("/")) {
@@ -411,7 +448,10 @@ app.post("/api/storage-backends", requireAuth, async (c) => {
   if (name === "r2-bound" || name === "data-shack") {
     return c.json({ error: `'${name}' is a reserved backend name` }, 400);
   }
-  const encryptedConfig = await encryptConfig(JSON.stringify(body.config), c.env.JWT_SECRET);
+  const encryptedConfig = await encryptConfig(
+    JSON.stringify(body.type === "r2-bound" ? {} : body.config),
+    c.env.JWT_SECRET,
+  );
   try {
     const result = await insertStorageBackend(c.env.DB, {
       userId: c.get("userId"),
@@ -1056,6 +1096,30 @@ app.get("/api/table-data/:tableName", requireAuth, async (c) => {
   }
   const contentType = effectiveFormat === "ndjson" ? "application/x-ndjson" : "application/json";
   return new Response(dataRes.body, { headers: { "Content-Type": contentType } });
+});
+
+// ── Saved Queries ─────────────────────────────────────────────────────────
+
+app.get("/api/saved-queries", requireAuth, async (c) => {
+  const userId = c.get("userId");
+  const queries = await listSavedQueries(c.env.DB, userId);
+  return c.json({ queries });
+});
+
+app.post("/api/saved-queries", requireAuth, async (c) => {
+  const userId = c.get("userId");
+  const body = (await c.req.json()) as { name?: string; sql?: string };
+  if (!body.name || !body.sql) return c.json({ error: "name and sql required" }, 400);
+  const query = await insertSavedQuery(c.env.DB, { userId, name: body.name, sql: body.sql });
+  return c.json({ query }, 201);
+});
+
+app.delete("/api/saved-queries/:id", requireAuth, async (c) => {
+  const userId = c.get("userId");
+  const id = c.req.param("id");
+  const deleted = await deleteSavedQuery(c.env.DB, id, userId);
+  if (!deleted) return c.json({ error: "not found" }, 404);
+  return c.json({ ok: true });
 });
 
 // ── Root ─────────────────────────────────────────────────────────────────
