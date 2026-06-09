@@ -24,7 +24,7 @@ import {
   RotateCcw,
   Save,
   Search,
-  Settings,
+  Settings2,
   Sun,
   Table2,
   Terminal,
@@ -59,7 +59,7 @@ export function DatabaseIcon({ size }: { size: number }) {
   return <Database size={size} strokeWidth={SW} />;
 }
 export function SettingsIcon({ size }: { size: number }) {
-  return <Settings size={size} strokeWidth={SW} />;
+  return <Settings2 size={size} strokeWidth={SW} />;
 }
 export function PanelIcon({ size }: { size: number }) {
   return <PanelBottom size={size} strokeWidth={SW} />;
@@ -98,14 +98,14 @@ export function PlayIcon({ size }: { size: number }) {
 export function SaveIcon({ size }: { size: number }) {
   return <Save size={size} strokeWidth={SW} />;
 }
+export function TrashIcon({ size }: { size: number }) {
+  return <Trash2 size={size} strokeWidth={SW} />;
+}
 export function RefreshIcon({ size }: { size: number }) {
   return <RotateCcw size={size} strokeWidth={SW} />;
 }
 export function HistoryIcon({ size }: { size: number }) {
   return <History size={size} strokeWidth={SW} />;
-}
-export function TrashIcon({ size }: { size: number }) {
-  return <Trash2 size={size} strokeWidth={SW} />;
 }
 export function LinkIcon({ size }: { size: number }) {
   return <Link size={size} strokeWidth={SW} />;

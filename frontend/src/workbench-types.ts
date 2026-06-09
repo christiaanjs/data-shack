@@ -118,4 +118,5 @@ export interface WbCtx {
   toggleTheme: () => void;
   toggleDock: () => void;
   openPalette: () => void;
+  refreshData: () => void;
 }

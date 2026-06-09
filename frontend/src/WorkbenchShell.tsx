@@ -681,6 +681,7 @@ export function WorkbenchShell() {
       toggleTheme,
       toggleDock,
       openPalette,
+      refreshData: loadExplorerData,
     }),
     [
       data,
@@ -700,6 +701,7 @@ export function WorkbenchShell() {
       toggleTheme,
       toggleDock,
       openPalette,
+      loadExplorerData,
     ],
   );
 

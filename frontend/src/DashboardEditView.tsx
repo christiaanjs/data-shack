@@ -5,7 +5,7 @@ import type { SqlEditorHandle } from "./SqlEditor.tsx";
 import { SqlEditor } from "./SqlEditor.tsx";
 import { buildIframeHtml } from "./dashboardUtils.ts";
 import { WORKER_BASE, authHeaders } from "./wb-api.ts";
-import { ChartIcon, PlusIcon, SaveIcon, XIcon } from "./wbIcons.tsx";
+import { ChartIcon, PlusIcon, SaveIcon, TrashIcon, XIcon } from "./wbIcons.tsx";
 import type { WbCtx, WbDashboard, WbTab } from "./workbench-types.ts";
 
 function uid(): string {
@@ -64,6 +64,8 @@ export function DashboardEditView({ tab, ctx }: { tab: WbTab; ctx: WbCtx }) {
   const [saveErr, setSaveErr] = useState<string | null>(null);
   const [saveOk, setSaveOk] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   // On mount, fetch existing dashboard if we have an id
   useEffect(() => {
@@ -154,6 +156,24 @@ export function DashboardEditView({ tab, ctx }: { tab: WbTab; ctx: WbCtx }) {
     }
   }
 
+  async function deleteDashboard() {
+    if (!dashId) return;
+    setDeleting(true);
+    try {
+      const headers = await authHeaders();
+      const res = await fetch(`${WORKER_BASE}/api/dashboards/${dashId}`, {
+        method: "DELETE",
+        headers,
+      });
+      if (!res.ok) throw new Error(`Failed: ${res.status}`);
+      ctx.closeTab(tab.id);
+      ctx.refreshData();
+    } catch {
+      setDeleting(false);
+      setConfirmDelete(false);
+    }
+  }
+
   function addQuery() {
     setQueries((prev) => [...prev, ""]);
     setQueryIds((prev) => [...prev, uid()]);
@@ -204,6 +224,38 @@ export function DashboardEditView({ tab, ctx }: { tab: WbTab; ctx: WbCtx }) {
         <span style={{ flex: 1 }} />
         {saveOk && <span style={{ fontSize: 12, color: "var(--color-success)" }}>Saved.</span>}
         {saveErr && <span style={{ fontSize: 12, color: "var(--color-error)" }}>{saveErr}</span>}
+        {dashId && !confirmDelete && (
+          <button
+            type="button"
+            class="btn btn-ghost btn-sm"
+            title="Delete dashboard"
+            onClick={() => setConfirmDelete(true)}
+          >
+            <TrashIcon size={13} />
+          </button>
+        )}
+        {dashId && confirmDelete && (
+          <>
+            <span style={{ fontSize: 12, color: "var(--color-error)" }}>Delete?</span>
+            <button
+              type="button"
+              class="btn btn-error btn-sm"
+              onClick={deleteDashboard}
+              disabled={deleting}
+            >
+              {deleting ? <span class="loading loading-xs" /> : null}
+              Yes
+            </button>
+            <button
+              type="button"
+              class="btn btn-ghost btn-sm"
+              onClick={() => setConfirmDelete(false)}
+              disabled={deleting}
+            >
+              No
+            </button>
+          </>
+        )}
         <button
           type="button"
           class={`btn btn-ghost btn-sm${running || !ctx.session.enabled ? " btn-disabled" : ""}`}
