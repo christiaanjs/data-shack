@@ -36,7 +36,9 @@
       "dist",
       "*.lock",
       "frontend/src/style.css",
-      "design_handoff_workbench"
+      "design_handoff_workbench",
+      ".beads",
+      ".claude"
     ]
   }
 }
