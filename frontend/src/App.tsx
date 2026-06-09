@@ -403,7 +403,9 @@ function LegacyApp() {
         </div>
       )}
 
-      <main class="flex-1 flex flex-col min-h-0">
+      <main
+        class={`flex-1 flex flex-col${activeTab === "dashboards" ? " min-h-0" : " overflow-y-auto"}`}
+      >
         {activeTab === "query" && (
           <QueryPanel
             workerBase={WORKER_BASE}
