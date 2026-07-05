@@ -96,7 +96,7 @@ export function connectSession(config: {
       if (msg.type === "query") {
         await handleQuery(socket, msg, workerBase, getAuthHeaders, getDb);
       } else if (msg.type === "transform_job") {
-        await handleTransformJob(socket, msg, workerBase, getAuthHeaders, getDb);
+        await handleTransformJob(socket, msg, workerBase, getAuthHeaders, getDb, getCatalogReady);
       } else if (msg.type === "job_status") {
         const ev: JobEvent =
           msg.status === "failed"
@@ -211,16 +211,30 @@ async function handleTransformJob(
   workerBase: string,
   getAuthHeaders: () => Promise<Record<string, string>>,
   getDb: () => Promise<AsyncDuckDB>,
+  getCatalogReady: () => Promise<void>,
 ) {
   // Claim the job — Session DO will broadcast job_status: running to all connected sockets.
   ws.send(JSON.stringify({ type: "job_claimed", jobId: msg.jobId }));
 
-  try {
+  const runOnce = async () => {
     const db = await getDb();
-    // Catalog views are kept current by the catalog WebSocket (getCatalogReady was awaited
-    // before this handler was called in onmessage). No full re-registration needed here.
     const { sql, preamble } = await resolveStorageUris(msg.sql, workerBase, getAuthHeaders);
     await runQuery(db, sql, preamble.length > 0 ? preamble : undefined);
+  };
+
+  try {
+    // Catalog views are kept current by the catalog WebSocket (getCatalogReady was awaited
+    // before this handler was called in onmessage). No full re-registration needed here.
+    try {
+      await runOnce();
+    } catch {
+      // A job dispatched right after a session reconnect can race the catalog
+      // WebSocket's own reconnect + view resync. Wait for the catalog to settle
+      // and retry once before reporting failure.
+      await new Promise((r) => setTimeout(r, 2000));
+      await getCatalogReady();
+      await runOnce();
+    }
     ws.send(JSON.stringify({ type: "job_complete", jobId: msg.jobId }));
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);

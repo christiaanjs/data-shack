@@ -1,6 +1,10 @@
 import * as duckdb from "@duckdb/duckdb-wasm";
 
-let dbInstance: duckdb.AsyncDuckDB | null = null;
+// Memoized as a promise (not an instance) so concurrent callers during startup
+// share ONE initialization. Caching the instance only after init completes let
+// parallel callers each spin up their own DuckDB — views registered on one
+// instance were invisible to queries running on another.
+let dbInitPromise: Promise<duckdb.AsyncDuckDB> | null = null;
 
 function resolveLogLevel(): duckdb.LogLevel {
   switch (import.meta.env.VITE_DUCKDB_LOG_LEVEL) {
@@ -17,9 +21,17 @@ function resolveLogLevel(): duckdb.LogLevel {
   }
 }
 
-export async function initDuckDB(): Promise<duckdb.AsyncDuckDB> {
-  if (dbInstance) return dbInstance;
+export function initDuckDB(): Promise<duckdb.AsyncDuckDB> {
+  if (!dbInitPromise) {
+    dbInitPromise = createDuckDB().catch((err: unknown) => {
+      dbInitPromise = null; // failed init is not cached — the next call retries
+      throw err;
+    });
+  }
+  return dbInitPromise;
+}
 
+async function createDuckDB(): Promise<duckdb.AsyncDuckDB> {
   const bundle = await duckdb.selectBundle(duckdb.getJsDelivrBundles());
 
   if (!bundle.mainWorker) throw new Error("No DuckDB worker URL available for this platform");
@@ -43,7 +55,6 @@ export async function initDuckDB(): Promise<duckdb.AsyncDuckDB> {
     await conn.close();
   }
 
-  dbInstance = db;
   return db;
 }
 

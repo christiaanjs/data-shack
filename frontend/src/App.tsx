@@ -224,6 +224,26 @@ function LegacyApp() {
     dashboardCommitListenerRef.current?.(event);
   }, []);
 
+  // Full catalog re-sync after a WebSocket reconnect: commits broadcast while
+  // the socket was down were lost, so stale/missing views must be rebuilt.
+  const resyncCatalog = useCallback(async () => {
+    if (sessionEnabledRef.current) {
+      await runCatalogInit();
+    } else {
+      const tables = await fetchCatalogMetadata(WORKER_BASE, getAuthHeaders);
+      setCatalogTables(tables);
+    }
+  }, [runCatalogInit]);
+
+  const handleResync = useCallback((refreshPromise: Promise<void>) => {
+    catalogReadyRef.current = refreshPromise;
+  }, []);
+
+  const handleRefreshFailed = useCallback((table: string) => {
+    if (!sessionEnabledRef.current) return;
+    setCatalogFailed((prev) => (prev.includes(table) ? prev : [...prev, table]));
+  }, []);
+
   // ── Effect A: Catalog WebSocket ───────────────────────────────────────────
 
   useEffect(() => {
@@ -237,13 +257,16 @@ function LegacyApp() {
       getAuthHeaders,
       getDb,
       onCommit: handleCommit,
+      resync: resyncCatalog,
+      onResync: handleResync,
+      onRefreshFailed: handleRefreshFailed,
     });
     catalogWsRef.current = catConn;
     return () => {
       catConn.close();
       catalogWsRef.current = null;
     };
-  }, [authed, handleCommit, getDb]);
+  }, [authed, handleCommit, getDb, resyncCatalog, handleResync, handleRefreshFailed]);
 
   // ── Effect B: Catalog metadata ────────────────────────────────────────────
 

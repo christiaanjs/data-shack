@@ -29,14 +29,29 @@ export function connectCatalogWs(config: {
    * Receives the refresh promise so the caller can track it immediately.
    */
   onCommit: (event: CatalogCommitEvent, refreshPromise: Promise<void>) => void;
+  /**
+   * Re-syncs the full catalog (metadata + views). Called after a RECONNECT —
+   * commits broadcast while the socket was down were never received, so a
+   * full refresh is the only way to recover them.
+   */
+  resync?: () => Promise<void>;
+  /**
+   * Receives the accumulated refresh promise when a reconnect resync starts,
+   * so the caller can fold it into its catalog-ready tracking.
+   */
+  onResync?: (refreshPromise: Promise<void>) => void;
+  /** Called when a single-view refresh has failed after retrying. */
+  onRefreshFailed?: (table: string) => void;
   onStatusChange?: (connected: boolean) => void;
 }): CatalogConnection {
-  const { workerBase, getAuthHeaders, getDb, onCommit, onStatusChange } = config;
+  const { workerBase, getAuthHeaders, getDb, onCommit, resync, onResync, onRefreshFailed } = config;
+  const { onStatusChange } = config;
 
   let ws: WebSocket | null = null;
   let closed = false;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let visibilityHandler: (() => void) | null = null;
+  let hasConnectedBefore = false;
   // Accumulates across commits: resolves when every in-flight view refresh is done.
   let currentRefreshPromise: Promise<void> = Promise.resolve();
 
@@ -58,6 +73,20 @@ export function connectCatalogWs(config: {
 
     socket.onopen = () => {
       onStatusChange?.(true);
+      // On reconnect, re-sync the full catalog: any commits broadcast while
+      // the socket was down were lost, leaving views stale or missing.
+      if (hasConnectedBefore && resync) {
+        const resyncPromise = (async () => {
+          try {
+            await resync();
+          } catch {
+            // Resync failure is surfaced by the caller's own error state.
+          }
+        })();
+        currentRefreshPromise = Promise.all([currentRefreshPromise, resyncPromise]).then(() => {});
+        onResync?.(currentRefreshPromise);
+      }
+      hasConnectedBefore = true;
       pingInterval = setInterval(() => {
         if (socket.readyState === WebSocket.OPEN) {
           socket.send(JSON.stringify({ type: "ping" }));
@@ -100,9 +129,18 @@ export function connectCatalogWs(config: {
       const thisRefresh = (async () => {
         try {
           const db = await getDb();
-          await refreshSingleView(db, commitEvent.table, snapshot, workerBase, getAuthHeaders);
+          try {
+            await refreshSingleView(db, commitEvent.table, snapshot, workerBase, getAuthHeaders);
+          } catch {
+            // Transient failures (expiring proxy cred, flaky network) usually
+            // clear on a second attempt.
+            await new Promise((r) => setTimeout(r, 2000));
+            await refreshSingleView(db, commitEvent.table, snapshot, workerBase, getAuthHeaders);
+          }
         } catch {
-          // Non-fatal — the next full refresh will fix it.
+          // Both attempts failed (or the DuckDB session is disabled) — let the
+          // caller mark the table as failed instead of pretending it's fresh.
+          onRefreshFailed?.(commitEvent.table);
         }
       })();
 

@@ -130,6 +130,8 @@ export async function registerCatalogViews(
 /**
  * Re-creates the DuckDB view for a single table using a freshly committed snapshot.
  * Called by the catalog WebSocket handler when a commit message arrives.
+ * Throws when the view could not be (re-)created so callers can retry or
+ * surface the failure instead of silently proceeding with a stale catalog.
  */
 export async function refreshSingleView(
   db: AsyncDuckDB,
@@ -140,6 +142,9 @@ export async function refreshSingleView(
 ): Promise<void> {
   const failed: string[] = [];
   await registerView(db, tableName, snapshot, workerBase, getAuthHeaders, new Map(), failed);
+  if (failed.length > 0) {
+    throw new Error(`Failed to refresh view for table "${tableName}"`);
+  }
 }
 
 async function registerView(
