@@ -197,6 +197,14 @@ async function handleQuery(
   }
 }
 
+// Matches DuckDB errors caused by a view/table that hasn't been registered
+// (yet) — e.g. `Catalog Error: Table with name "x" does not exist!`. These are
+// the errors a catalog resync can fix; anything else is deterministic.
+function isStaleCatalogError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /catalog error|does not exist|not found/i.test(message);
+}
+
 async function handleTransformJob(
   ws: WebSocket,
   msg: {
@@ -227,10 +235,13 @@ async function handleTransformJob(
     // before this handler was called in onmessage). No full re-registration needed here.
     try {
       await runOnce();
-    } catch {
+    } catch (err) {
       // A job dispatched right after a session reconnect can race the catalog
-      // WebSocket's own reconnect + view resync. Wait for the catalog to settle
-      // and retry once before reporting failure.
+      // WebSocket's own reconnect + view resync. Only for missing-table/view
+      // errors, wait for the catalog to settle and retry once — anything else
+      // (syntax error, permission failure) is deterministic and rethrown as-is
+      // to avoid re-executing the transform SQL.
+      if (!isStaleCatalogError(err)) throw err;
       await new Promise((r) => setTimeout(r, 2000));
       await getCatalogReady();
       await runOnce();

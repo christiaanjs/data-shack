@@ -367,8 +367,16 @@ export function WorkbenchShell() {
     if (sessionEnabledRef.current) {
       await runCatalogInit();
     } else {
-      const tables = await fetchCatalogMetadata(WORKER_BASE, getAuthHeaders);
-      setCatalogTables(tables);
+      setCatalogLoading(true);
+      setCatalogError(null);
+      try {
+        const tables = await fetchCatalogMetadata(WORKER_BASE, getAuthHeaders);
+        setCatalogTables(tables);
+      } catch (err) {
+        setCatalogError(err instanceof Error ? err.message : "Catalog load failed");
+      } finally {
+        setCatalogLoading(false);
+      }
     }
   }, [runCatalogInit]);
 
