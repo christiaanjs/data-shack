@@ -302,10 +302,19 @@ export function WorkbenchShell() {
     setCatalogError(null);
     setCatalogFailed([]);
     try {
-      const db = await initDuckDB();
-      const { tables, failed } = await registerCatalogViews(db, WORKER_BASE, getAuthHeaders);
-      setCatalogTables(tables);
-      if (failed.length > 0) setCatalogFailed(failed);
+      let result: Awaited<ReturnType<typeof registerCatalogViews>>;
+      try {
+        const db = await initDuckDB();
+        result = await registerCatalogViews(db, WORKER_BASE, getAuthHeaders);
+      } catch {
+        // Cold-load failures (DuckDB bundle fetch, catalog fetch during token
+        // refresh) are usually transient — retry the whole init once.
+        await new Promise((r) => setTimeout(r, 2000));
+        const db = await initDuckDB();
+        result = await registerCatalogViews(db, WORKER_BASE, getAuthHeaders);
+      }
+      setCatalogTables(result.tables);
+      if (result.failed.length > 0) setCatalogFailed(result.failed);
     } catch (err) {
       setCatalogError(err instanceof Error ? err.message : "Catalog load failed");
     } finally {
@@ -357,7 +366,10 @@ export function WorkbenchShell() {
       ];
     });
     setCatalogFailed((prev) => prev.filter((n) => n !== event.table));
-    catalogReadyRef.current = refreshPromise;
+    // Chain instead of overwrite: on initial load the ref holds the still-running
+    // runCatalogInit promise — dropping it would let getCatalogReady() resolve
+    // before any views exist.
+    catalogReadyRef.current = Promise.all([catalogReadyRef.current, refreshPromise]).then(() => {});
     dashboardCommitListenerRef.current?.(event);
   }, []);
 
@@ -381,7 +393,7 @@ export function WorkbenchShell() {
   }, [runCatalogInit]);
 
   const handleResync = useCallback((refreshPromise: Promise<void>) => {
-    catalogReadyRef.current = refreshPromise;
+    catalogReadyRef.current = Promise.all([catalogReadyRef.current, refreshPromise]).then(() => {});
   }, []);
 
   const handleRefreshFailed = useCallback((table: string) => {
@@ -408,20 +420,22 @@ export function WorkbenchShell() {
       resync: resyncCatalog,
       onResync: handleResync,
       onRefreshFailed: handleRefreshFailed,
+      getCatalogReady,
     });
     catalogWsRef.current = catConn;
     return () => {
       catConn.close();
       catalogWsRef.current = null;
     };
-  }, [authed, handleCommit, resyncCatalog, handleResync, handleRefreshFailed]);
+  }, [authed, handleCommit, resyncCatalog, handleResync, handleRefreshFailed, getCatalogReady]);
 
   // ── Effect B: Catalog metadata ──────────────────────────────────────────────
   useEffect(() => {
     if (!authed) return;
     if (sessionEnabled) {
       const p = runCatalogInit();
-      catalogReadyRef.current = p;
+      // Chain so any commit refreshes already in flight aren't dropped.
+      catalogReadyRef.current = Promise.all([catalogReadyRef.current, p]).then(() => {});
     } else {
       setCatalogLoading(true);
       setCatalogError(null);

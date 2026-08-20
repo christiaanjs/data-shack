@@ -42,10 +42,19 @@ export function connectCatalogWs(config: {
   onResync?: (refreshPromise: Promise<void>) => void;
   /** Called when a single-view refresh has failed after retrying. */
   onRefreshFailed?: (table: string) => void;
+  /**
+   * Returns a promise that resolves when all catalog work in flight at call
+   * time (initial view registration, prior refreshes) is done. Commit-driven
+   * view refreshes wait on it so they never race the initial
+   * registerCatalogViews pass — without this, a commit arriving during page
+   * load could be clobbered by the init pass re-creating the view from the
+   * older snapshot list it fetched before the commit.
+   */
+  getCatalogReady?: () => Promise<void>;
   onStatusChange?: (connected: boolean) => void;
 }): CatalogConnection {
   const { workerBase, getAuthHeaders, getDb, onCommit, resync, onResync, onRefreshFailed } = config;
-  const { onStatusChange } = config;
+  const { getCatalogReady, onStatusChange } = config;
 
   let ws: WebSocket | null = null;
   let closed = false;
@@ -123,11 +132,19 @@ export function connectCatalogWs(config: {
         created_at: Date.now(),
       };
 
+      // Capture the catalog-ready barrier NOW, before the caller folds this
+      // refresh into it — awaiting the ref's later value would deadlock on
+      // this very refresh.
+      const barrier = getCatalogReady?.() ?? Promise.resolve();
+
       // Create the refresh promise BEFORE notifying the caller so they can
       // immediately track it. Chain with any existing in-flight refresh so
       // getRefreshPromise() covers ALL pending catalog updates, not just the last.
       const thisRefresh = (async () => {
         try {
+          // Wait for the initial registration (and prior refreshes) to finish
+          // so this commit's fresher snapshot is applied last, never clobbered.
+          await barrier;
           const db = await getDb();
           try {
             await refreshSingleView(db, commitEvent.table, snapshot, workerBase, getAuthHeaders);
