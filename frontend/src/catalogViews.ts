@@ -77,8 +77,27 @@ export async function registerCatalogViews(
 
   if (withSnaps.length === 0) return { tables, failed: [] };
 
+  let failed = await registerViewsPass(db, withSnaps, workerBase, getAuthHeaders);
+  if (failed.length > 0) {
+    // Transient failures (expiring proxy creds, cold-load network flakes)
+    // usually clear on a second attempt. Re-run only the failed tables with
+    // fresh credentials and freshly resolved token URLs.
+    await new Promise((r) => setTimeout(r, 2000));
+    const retryEntries = withSnaps.filter((t) => failed.includes(t.name));
+    failed = await registerViewsPass(db, retryEntries, workerBase, getAuthHeaders);
+  }
+
+  return { tables, failed };
+}
+
+async function registerViewsPass(
+  db: AsyncDuckDB,
+  entries: (CatalogTableWithSnapshot & { latestSnapshot: CatalogSnapshot })[],
+  workerBase: string,
+  getAuthHeaders: () => Promise<Record<string, string>>,
+): Promise<string[]> {
   // Batch-resolve http-ds:// URIs to signed token URLs before creating views.
-  const httpDsEntries = withSnaps.filter(({ latestSnapshot }) =>
+  const httpDsEntries = entries.filter(({ latestSnapshot }) =>
     latestSnapshot.uri.startsWith("http-ds://"),
   );
   const httpDsTokenMap = new Map<string, string>();
@@ -107,7 +126,7 @@ export async function registerCatalogViews(
   const secretsByBackend = new Map<string, string>();
   const failed: string[] = [];
 
-  for (const { name, latestSnapshot: snapshot } of withSnaps) {
+  for (const { name, latestSnapshot: snapshot } of entries) {
     // For http-ds:// URIs, pass the pre-resolved token URL to avoid per-table round-trips.
     const preResolvedUrl = snapshot.uri.startsWith("http-ds://")
       ? httpDsTokenMap.get(snapshot.uri)
@@ -124,12 +143,14 @@ export async function registerCatalogViews(
     );
   }
 
-  return { tables, failed };
+  return failed;
 }
 
 /**
  * Re-creates the DuckDB view for a single table using a freshly committed snapshot.
  * Called by the catalog WebSocket handler when a commit message arrives.
+ * Throws when the view could not be (re-)created so callers can retry or
+ * surface the failure instead of silently proceeding with a stale catalog.
  */
 export async function refreshSingleView(
   db: AsyncDuckDB,
@@ -140,6 +161,9 @@ export async function refreshSingleView(
 ): Promise<void> {
   const failed: string[] = [];
   await registerView(db, tableName, snapshot, workerBase, getAuthHeaders, new Map(), failed);
+  if (failed.length > 0) {
+    throw new Error(`Failed to refresh view for table "${tableName}"`);
+  }
 }
 
 async function registerView(

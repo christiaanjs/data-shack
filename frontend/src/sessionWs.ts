@@ -96,7 +96,7 @@ export function connectSession(config: {
       if (msg.type === "query") {
         await handleQuery(socket, msg, workerBase, getAuthHeaders, getDb);
       } else if (msg.type === "transform_job") {
-        await handleTransformJob(socket, msg, workerBase, getAuthHeaders, getDb);
+        await handleTransformJob(socket, msg, workerBase, getAuthHeaders, getDb, getCatalogReady);
       } else if (msg.type === "job_status") {
         const ev: JobEvent =
           msg.status === "failed"
@@ -197,6 +197,14 @@ async function handleQuery(
   }
 }
 
+// Matches DuckDB errors caused by a view/table that hasn't been registered
+// (yet) — e.g. `Catalog Error: Table with name "x" does not exist!`. These are
+// the errors a catalog resync can fix; anything else is deterministic.
+function isStaleCatalogError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /catalog error|does not exist|not found/i.test(message);
+}
+
 async function handleTransformJob(
   ws: WebSocket,
   msg: {
@@ -211,16 +219,33 @@ async function handleTransformJob(
   workerBase: string,
   getAuthHeaders: () => Promise<Record<string, string>>,
   getDb: () => Promise<AsyncDuckDB>,
+  getCatalogReady: () => Promise<void>,
 ) {
   // Claim the job — Session DO will broadcast job_status: running to all connected sockets.
   ws.send(JSON.stringify({ type: "job_claimed", jobId: msg.jobId }));
 
-  try {
+  const runOnce = async () => {
     const db = await getDb();
-    // Catalog views are kept current by the catalog WebSocket (getCatalogReady was awaited
-    // before this handler was called in onmessage). No full re-registration needed here.
     const { sql, preamble } = await resolveStorageUris(msg.sql, workerBase, getAuthHeaders);
     await runQuery(db, sql, preamble.length > 0 ? preamble : undefined);
+  };
+
+  try {
+    // Catalog views are kept current by the catalog WebSocket (getCatalogReady was awaited
+    // before this handler was called in onmessage). No full re-registration needed here.
+    try {
+      await runOnce();
+    } catch (err) {
+      // A job dispatched right after a session reconnect can race the catalog
+      // WebSocket's own reconnect + view resync. Only for missing-table/view
+      // errors, wait for the catalog to settle and retry once — anything else
+      // (syntax error, permission failure) is deterministic and rethrown as-is
+      // to avoid re-executing the transform SQL.
+      if (!isStaleCatalogError(err)) throw err;
+      await new Promise((r) => setTimeout(r, 2000));
+      await getCatalogReady();
+      await runOnce();
+    }
     ws.send(JSON.stringify({ type: "job_complete", jobId: msg.jobId }));
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);
