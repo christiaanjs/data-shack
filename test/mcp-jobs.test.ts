@@ -52,6 +52,17 @@ async function createBackend(name: string): Promise<string> {
   return data.id;
 }
 
+async function createGoogleSheetsCredential(name: string): Promise<string> {
+  const res = await SELF.fetch("http://localhost/api/credentials", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+    body: JSON.stringify({ name, type: "google-sheets", config: { refreshToken: "rt_fake" } }),
+  });
+  expect(res.status).toBe(201);
+  const data = (await res.json()) as { id: string };
+  return data.id;
+}
+
 // ── Load job tools ──────────────────────────────────────────────────────
 
 describe("load job MCP tools", () => {
@@ -128,6 +139,106 @@ describe("load job MCP tools", () => {
       storage_backend: backendName,
     });
     expect(data.error?.message).toMatch(/Credential not found/);
+  });
+
+  it("create_load_job rejects an invalid source_type", async () => {
+    const credName = `cred-${crypto.randomUUID().slice(0, 8)}`;
+    const backendName = `backend-${crypto.randomUUID().slice(0, 8)}`;
+    await createCredential(credName);
+    await createBackend(backendName);
+    const data = await callMcp("create_load_job", {
+      name: "job",
+      table_name: "t",
+      credential: credName,
+      storage_backend: backendName,
+      source_type: "ftp",
+    });
+    expect(data.error?.message).toMatch(/source_type must be/);
+  });
+
+  it("create_load_job rejects a credential/source_type mismatch", async () => {
+    const credName = `cred-${crypto.randomUUID().slice(0, 8)}`;
+    const backendName = `backend-${crypto.randomUUID().slice(0, 8)}`;
+    await createCredential(credName); // type: http
+    await createBackend(backendName);
+    const data = await callMcp("create_load_job", {
+      name: "job",
+      table_name: "t",
+      credential: credName,
+      storage_backend: backendName,
+      source_type: "google-sheets",
+      source_config: { spreadsheetId: "sheet1" },
+    });
+    expect(data.error?.message).toMatch(/is type 'http', but source_type is 'google-sheets'/);
+  });
+
+  it("create_load_job rejects a google-sheets job without source_config", async () => {
+    const credName = `gscred-${crypto.randomUUID().slice(0, 8)}`;
+    const backendName = `backend-${crypto.randomUUID().slice(0, 8)}`;
+    await createGoogleSheetsCredential(credName);
+    await createBackend(backendName);
+    const data = await callMcp("create_load_job", {
+      name: "job",
+      table_name: "t",
+      credential: credName,
+      storage_backend: backendName,
+      source_type: "google-sheets",
+    });
+    expect(data.error?.message).toMatch(/spreadsheetId/);
+  });
+
+  it("create_load_job accepts a matching google-sheets credential and source_config", async () => {
+    const credName = `gscred-${crypto.randomUUID().slice(0, 8)}`;
+    const backendName = `backend-${crypto.randomUUID().slice(0, 8)}`;
+    await createGoogleSheetsCredential(credName);
+    await createBackend(backendName);
+    const data = await callMcp("create_load_job", {
+      name: "Sheets job",
+      table_name: "t",
+      credential: credName,
+      storage_backend: backendName,
+      source_type: "google-sheets",
+      source_config: { spreadsheetId: "sheet1" },
+    });
+    expect(data.result?.content[0]!.text).toContain("Sheets job");
+  });
+
+  it("update_load_job rejects a credential/source_type mismatch introduced by switching credential", async () => {
+    const gsCredName = `gscred-${crypto.randomUUID().slice(0, 8)}`;
+    const httpCredName = `cred-${crypto.randomUUID().slice(0, 8)}`;
+    const backendName = `backend-${crypto.randomUUID().slice(0, 8)}`;
+    await createGoogleSheetsCredential(gsCredName);
+    await createCredential(httpCredName);
+    await createBackend(backendName);
+    const created = await callMcp("create_load_job", {
+      name: "Sheets job",
+      table_name: "t",
+      credential: gsCredName,
+      storage_backend: backendName,
+      source_type: "google-sheets",
+      source_config: { spreadsheetId: "sheet1" },
+    });
+    const jobId = /id: (lj_\w+)/.exec(created.result?.content[0]!.text ?? "")![1]!;
+
+    const data = await callMcp("update_load_job", { id: jobId, credential: httpCredName });
+    expect(data.error?.message).toMatch(/is type 'http', but source_type is 'google-sheets'/);
+  });
+
+  it("update_load_job rejects switching source_type to google-sheets without source_config", async () => {
+    const credName = `cred-${crypto.randomUUID().slice(0, 8)}`;
+    const backendName = `backend-${crypto.randomUUID().slice(0, 8)}`;
+    await createCredential(credName);
+    await createBackend(backendName);
+    const created = await callMcp("create_load_job", {
+      name: "job",
+      table_name: "t",
+      credential: credName,
+      storage_backend: backendName,
+    });
+    const jobId = /id: (lj_\w+)/.exec(created.result?.content[0]!.text ?? "")![1]!;
+
+    const data = await callMcp("update_load_job", { id: jobId, source_type: "google-sheets" });
+    expect(data.error?.message).toMatch(/is type 'http', but source_type is 'google-sheets'/);
   });
 
   it("update_load_job requires at least one field", async () => {

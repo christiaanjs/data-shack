@@ -38,6 +38,28 @@ const MAX_READ_BYTES = 1_048_576; // 1 MB
 const SAFE_TABLE_NAME = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
 const VALID_HTTP_METHODS = ["GET", "POST"] as const;
 const VALID_FORMATS = ["json", "ndjson", "csv", "parquet"] as const;
+const VALID_SOURCE_TYPES = ["http", "google-sheets"] as const;
+
+// Returns an error message, or null if the config is valid.
+function validateGoogleSheetsSourceConfig(raw: unknown): string | null {
+  if (typeof raw !== "object" || raw === null) {
+    return "source_config with a spreadsheetId is required for source_type 'google-sheets'";
+  }
+  const cfg = raw as Record<string, unknown>;
+  if (typeof cfg.spreadsheetId !== "string" || !cfg.spreadsheetId.trim()) {
+    return "source_config.spreadsheetId is required for source_type 'google-sheets'";
+  }
+  return null;
+}
+
+function parseSourceConfig(raw: string | null): unknown {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
 
 interface JsonRpcRequest {
   jsonrpc: "2.0";
@@ -1133,12 +1155,23 @@ async function handleCreateLoadJob(
     return respondError(-32602, "table_name must match [a-zA-Z_][a-zA-Z0-9_]*");
   }
 
+  const sourceType = typeof args.source_type === "string" ? args.source_type : "http";
+  if (!VALID_SOURCE_TYPES.includes(sourceType as (typeof VALID_SOURCE_TYPES)[number])) {
+    return respondError(-32602, "source_type must be 'http' or 'google-sheets'");
+  }
+
   const credentialArg = args.credential;
   if (typeof credentialArg !== "string" || !credentialArg.trim()) {
     return respondError(-32602, "credential is required");
   }
   const cred = await getCredentialByNameOrId(env.DB, credentialArg.trim(), userId);
   if (!cred) return respondError(-32602, `Credential not found: ${credentialArg}`);
+  if (cred.type !== sourceType) {
+    return respondError(
+      -32602,
+      `Credential "${credentialArg}" is type '${cred.type}', but source_type is '${sourceType}'`,
+    );
+  }
 
   const backendArg = args.storage_backend;
   if (typeof backendArg !== "string" || !backendArg.trim()) {
@@ -1158,6 +1191,11 @@ async function handleCreateLoadJob(
     !VALID_FORMATS.includes(args.format as (typeof VALID_FORMATS)[number])
   ) {
     return respondError(-32602, "format must be json, ndjson, csv, or parquet");
+  }
+
+  if (sourceType === "google-sheets") {
+    const configError = validateGoogleSheetsSourceConfig(args.source_config);
+    if (configError) return respondError(-32602, configError);
   }
 
   let dateRangeConfig: string | null = null;
@@ -1191,7 +1229,7 @@ async function handleCreateLoadJob(
       cron_schedule: typeof args.cron_schedule === "string" ? args.cron_schedule : undefined,
       date_range_config: dateRangeConfig,
       pagination_config: paginationConfig,
-      source_type: typeof args.source_type === "string" ? args.source_type : undefined,
+      source_type: sourceType,
       source_config:
         args.source_config !== undefined && args.source_config !== null
           ? JSON.stringify(args.source_config)
@@ -1243,6 +1281,7 @@ async function handleUpdateLoadJob(
     source_config: existing.source_config,
   };
   let changed = false;
+  let resolvedCredType: string | undefined;
 
   if ("name" in args) {
     if (typeof args.name !== "string" || !args.name.trim()) {
@@ -1265,6 +1304,7 @@ async function handleUpdateLoadJob(
     const cred = await getCredentialByNameOrId(env.DB, args.credential.trim(), userId);
     if (!cred) return respondError(-32602, `Credential not found: ${args.credential}`);
     patch.credential_id = cred.id;
+    resolvedCredType = cred.type;
     changed = true;
   }
   if ("storage_backend" in args) {
@@ -1277,8 +1317,11 @@ async function handleUpdateLoadJob(
     changed = true;
   }
   if ("source_type" in args) {
-    if (typeof args.source_type !== "string" || !args.source_type.trim()) {
-      return respondError(-32602, "source_type must be a non-empty string");
+    if (
+      typeof args.source_type !== "string" ||
+      !VALID_SOURCE_TYPES.includes(args.source_type as (typeof VALID_SOURCE_TYPES)[number])
+    ) {
+      return respondError(-32602, "source_type must be 'http' or 'google-sheets'");
     }
     patch.source_type = args.source_type;
     changed = true;
@@ -1347,6 +1390,29 @@ async function handleUpdateLoadJob(
 
   if (!changed) {
     return respondError(-32602, "at least one field must be provided to update");
+  }
+
+  if ("credential" in args || "source_type" in args || "source_config" in args) {
+    let credentialType: string;
+    if (resolvedCredType !== undefined) {
+      credentialType = resolvedCredType;
+    } else {
+      const credRow = await getCredentialConfig(env.DB, patch.credential_id, userId);
+      if (!credRow) return respondError(-32602, `Credential not found: ${patch.credential_id}`);
+      credentialType = credRow.type;
+    }
+    if (credentialType !== patch.source_type) {
+      return respondError(
+        -32602,
+        `Credential is type '${credentialType}', but source_type is '${patch.source_type}'`,
+      );
+    }
+    if (patch.source_type === "google-sheets") {
+      const rawSourceConfig =
+        "source_config" in args ? args.source_config : parseSourceConfig(existing.source_config);
+      const configError = validateGoogleSheetsSourceConfig(rawSourceConfig);
+      if (configError) return respondError(-32602, configError);
+    }
   }
 
   let updated: Awaited<ReturnType<typeof updateLoadJob>>;
