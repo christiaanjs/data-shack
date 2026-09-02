@@ -977,7 +977,7 @@ export function WorkbenchShell() {
 
           {/* Tab content */}
           <div class="wb-tabcontent">
-            <TabContent tab={activeTab} ctx={ctx} />
+            <TabContent key={activeTab?.id ?? "welcome"} tab={activeTab} ctx={ctx} />
           </div>
 
           {/* Dock resize handle */}
