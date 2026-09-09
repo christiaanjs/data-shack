@@ -56,9 +56,21 @@ export function connectCatalogWs(config: {
   const { workerBase, getAuthHeaders, getDb, onCommit, resync, onResync, onRefreshFailed } = config;
   const { getCatalogReady, onStatusChange } = config;
 
+  // Reconnect backoff: starts at 1s, doubles up to 30s. A connection that
+  // stays open at least RECONNECT_RESET_AFTER_MS is treated as healthy and
+  // resets the delay — this is what keeps a genuinely flaky connection from
+  // turning into a tight reconnect storm while still recovering quickly from
+  // a single dropped connection.
+  const RECONNECT_BASE_DELAY_MS = 1_000;
+  const RECONNECT_MAX_DELAY_MS = 30_000;
+  const RECONNECT_RESET_AFTER_MS = 60_000;
+
   let ws: WebSocket | null = null;
   let closed = false;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let reconnectDelayMs = RECONNECT_BASE_DELAY_MS;
+  let connectedAt: number | null = null;
+  let lastConnectAttemptAt = 0;
   let visibilityHandler: (() => void) | null = null;
   let hasConnectedBefore = false;
   // Accumulates across commits: resolves when every in-flight view refresh is done.
@@ -66,6 +78,7 @@ export function connectCatalogWs(config: {
 
   async function connect() {
     if (closed) return;
+    lastConnectAttemptAt = Date.now();
 
     const headers = await getAuthHeaders();
     const token =
@@ -81,6 +94,7 @@ export function connectCatalogWs(config: {
     let pingInterval: ReturnType<typeof setInterval> | null = null;
 
     socket.onopen = () => {
+      connectedAt = Date.now();
       onStatusChange?.(true);
       // On reconnect, re-sync the full catalog: any commits broadcast while
       // the socket was down were lost, leaving views stale or missing.
@@ -167,21 +181,31 @@ export function connectCatalogWs(config: {
       onCommit(commitEvent, currentRefreshPromise);
     };
 
-    socket.onclose = () => {
+    socket.onclose = (event: CloseEvent) => {
       if (pingInterval !== null) {
         clearInterval(pingInterval);
         pingInterval = null;
       }
+      console.warn(
+        `[catalogWs] closed: code=${event.code} reason=${event.reason || "none"} wasClean=${event.wasClean}`,
+      );
+      const wasOpenFor = connectedAt !== null ? Date.now() - connectedAt : 0;
+      connectedAt = null;
       ws = null;
       onStatusChange?.(false);
       if (!closed) {
+        reconnectDelayMs =
+          wasOpenFor >= RECONNECT_RESET_AFTER_MS
+            ? RECONNECT_BASE_DELAY_MS
+            : Math.min(reconnectDelayMs * 2, RECONNECT_MAX_DELAY_MS);
         reconnectTimer = setTimeout(() => {
           connect().catch(() => {});
-        }, 5000);
+        }, reconnectDelayMs);
       }
     };
 
-    socket.onerror = () => {
+    socket.onerror = (event) => {
+      console.warn("[catalogWs] error", event);
       socket.close();
     };
   }
@@ -190,6 +214,10 @@ export function connectCatalogWs(config: {
   if (typeof document !== "undefined") {
     visibilityHandler = () => {
       if (document.visibilityState === "visible" && !closed && ws?.readyState !== WebSocket.OPEN) {
+        // Guard against a visibilitychange storm (e.g. a backgrounded mobile
+        // tab firing repeatedly) forcing an immediate reconnect on every
+        // event and bypassing the backoff above entirely.
+        if (Date.now() - lastConnectAttemptAt < RECONNECT_BASE_DELAY_MS) return;
         if (reconnectTimer !== null) {
           clearTimeout(reconnectTimer);
           reconnectTimer = null;

@@ -278,12 +278,23 @@ export class CatalogDO implements DurableObject {
     // Ping messages keep the connection alive; nothing else requires a response.
   }
 
-  async webSocketClose(_ws: WebSocket, _code: number, _reason: string): Promise<void> {
-    // Stateless subscription — no cleanup needed.
+  async webSocketClose(
+    _ws: WebSocket,
+    code: number,
+    reason: string,
+    wasClean: boolean,
+  ): Promise<void> {
+    // Stateless subscription — no cleanup needed, but logging the close
+    // code/reason gives visibility into reconnect storms driven by
+    // unexpected server-side or network closures.
+    console.log(
+      `[CatalogDO] webSocketClose: code=${code} reason=${reason || "none"} wasClean=${wasClean}`,
+    );
   }
 
-  async webSocketError(_ws: WebSocket, _error: unknown): Promise<void> {
-    // No cleanup needed.
+  async webSocketError(_ws: WebSocket, error: unknown): Promise<void> {
+    // No cleanup needed, but logged for the same reason as webSocketClose.
+    console.error("[CatalogDO] webSocketError:", error);
   }
 
   private getTables(): Response {
