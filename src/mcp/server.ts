@@ -347,7 +347,8 @@ const TOOLS: Tool[] = [
   },
   {
     name: "trigger_load_job",
-    description: "Run a load job immediately without waiting for its cron schedule.",
+    description:
+      "Enqueue a load job to run immediately without waiting for its cron schedule. This is asynchronous: the call returns as soon as the job is queued, before it has actually run. The queue consumer (fetch → storage write → catalog commit) typically takes a few seconds. Poll list_load_jobs afterward and check last_run_at / last_error to see the outcome — don't assume completion just because this call returned.",
     inputSchema: {
       type: "object",
       properties: { id: { type: "string", description: "Load job id (lj_...)" } },
@@ -636,7 +637,12 @@ export async function mcpHandler(
       if (!job) return respondError(-32602, `Load job not found: ${jobId}`);
       await env.LOAD_JOB_QUEUE.send({ jobId: job.id });
       return respond({
-        content: [{ type: "text", text: `Load job "${job.name}" queued to run now.` }],
+        content: [
+          {
+            type: "text",
+            text: `Load job "${job.name}" queued. This runs asynchronously and typically takes a few seconds — call list_load_jobs afterward and check last_run_at / last_error for the outcome rather than assuming it's done.`,
+          },
+        ],
       });
     }
 
