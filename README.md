@@ -54,6 +54,7 @@ A personal data integration platform built on Cloudflare that brings your data t
 | Workbench IDE: full VS Code-style IDE at `/workbench`; activity rail, resizable sidebar/dock, tab strip, `⌘K` palette, Console REPL, History | ✅ Done |
 | Workbench SQL editor: CodeMirror 6 with catalog-seeded autocomplete, per-kind tab views (SQL, table, transform, dashboard, credential, backend, job) | ✅ Done |
 | Workbench dashboard editor: create/edit/delete dashboards with JS artifact + SQL query editors and sandboxed live preview | ✅ Done |
+| MCP job management: full CRUD + trigger for load jobs and transform jobs, plus trigger CRUD — `list/create/update/delete/trigger_load_job`, `set_load_job_enabled`, `list/create/update/delete/trigger_transform_job`, `list/create/delete_trigger` | ✅ Done |
 
 Open issues are tracked via `bd list` (Beads issue tracker).
 
@@ -249,12 +250,22 @@ Currently implemented:
 - `list_dashboards` — list all saved dashboards with id, slug, title, and creation date (no browser session required)
 - `get_dashboard` — retrieve full source and queries for a dashboard by id or slug (no browser session required)
 - `update_dashboard` — update title, artifact, queries, and/or slug; auto-snapshots the previous version (no browser session required)
+- `list_load_jobs` — list load job definitions with schedule, source type, and last-run status (no browser session required)
+- `create_load_job` — define a new cron-triggered HTTP or Google Sheets load job; accepts credential/storage backend by name or id (no browser session required)
+- `update_load_job` — partially edit an existing load job; any omitted field is left unchanged (no browser session required)
+- `delete_load_job` — permanently remove a load job
+- `set_load_job_enabled` — pause or resume a load job's cron schedule without deleting it
+- `trigger_load_job` — run a load job immediately, bypassing its cron schedule
+- `list_transform_jobs` — list transform job definitions with SQL, output table, and status (no browser session required)
+- `create_transform_job` — define a derived table: SQL, output table/URI/backend, and format (no browser session required)
+- `update_transform_job` — partially edit an existing transform job; rejected if the job is currently running
+- `delete_transform_job` — permanently remove a transform job and any triggers referencing it
+- `trigger_transform_job` — queue a transform job to run on the next connected browser session
+- `list_triggers` — list table-watch → transform-job trigger mappings
+- `create_trigger` — watch one or more catalog tables and auto-queue a transform job on commit
+- `delete_trigger` — remove a trigger
 
-Planned (not yet implemented):
-- `list_etl_jobs` — active job definitions and schedules
-- `create_load_job` — define a new source connector and cron schedule
-- `create_transform_job` — define a derived table with its SQL and input dependencies
-- `pause_etl_job` — disable a job without deleting it
+All job-management tools above operate purely through D1 and the catalog DO's SQLite state — none require a browser session to define, edit, or list. Only *running* a transform job (`trigger_transform_job` or a fired trigger) needs an active browser tab, matching the "load jobs are always runnable, transform jobs are conditionally runnable" design principle.
 
 ### Dashboarding Platform
 
