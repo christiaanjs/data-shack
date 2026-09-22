@@ -1,0 +1,50 @@
+#cloud-config
+package_update: true
+packages:
+  - docker.io
+  - git
+
+write_files:
+  - path: /opt/data-shack/session.env
+    permissions: '0600'
+    owner: root:root
+    content: |
+      WORKER_URL=${worker_url}
+      AUTH_MODE=${auth_mode}
+      DEV_TOKEN=${dev_token}
+      AUTH_CREDENTIALS_PATH=/data/credentials.json
+      ENABLE_CATALOG_VIEWS=${enable_catalog_views}
+      LOG_LEVEL=${log_level}
+
+runcmd:
+  - mkdir -p /opt/data-shack/data
+  - systemctl enable --now docker
+  - >-
+    git clone --branch '${git_ref}' --depth 1 '${repo_url}' /opt/data-shack/src
+    || (cd /opt/data-shack/src && git fetch origin '${git_ref}' && git checkout '${git_ref}')
+  - docker build -t data-shack-session-client /opt/data-shack/src/container
+  - |
+    cat <<'UNIT' > /etc/systemd/system/data-shack-session.service
+    [Unit]
+    Description=data-shack DuckDB session container
+    After=docker.service network-online.target
+    Requires=docker.service
+    Wants=network-online.target
+
+    [Service]
+    EnvironmentFile=/opt/data-shack/session.env
+    ExecStartPre=-/usr/bin/docker rm -f data-shack-session
+    ExecStart=/usr/bin/docker run --rm --name data-shack-session \
+      --env-file /opt/data-shack/session.env \
+      -v /opt/data-shack/data:/data \
+      data-shack-session-client
+    ExecStop=-/usr/bin/docker stop data-shack-session
+    Restart=always
+    RestartSec=5
+    TimeoutStartSec=120
+
+    [Install]
+    WantedBy=multi-user.target
+    UNIT
+  - systemctl daemon-reload
+  - systemctl enable --now data-shack-session.service

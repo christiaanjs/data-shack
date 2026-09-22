@@ -1,0 +1,16 @@
+services:
+  session-client:
+    build: .
+    restart: unless-stopped
+    environment:
+      WORKER_URL: ${WORKER_URL:?set WORKER_URL to your data-shack Worker origin}
+      AUTH_MODE: ${AUTH_MODE:-dev-token}
+      DEV_TOKEN: ${DEV_TOKEN:-}
+      AUTH_CREDENTIALS_PATH: /data/credentials.json
+      ENABLE_CATALOG_VIEWS: ${ENABLE_CATALOG_VIEWS:-true}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    # Only needed for AUTH_MODE=oauth-refresh: mount the credentials.json
+    # produced locally by `npm run login` so refreshed tokens persist across
+    # restarts. Harmless to leave mounted (and empty) in dev-token mode.
+    volumes:
+      - ./credentials.json:/data/credentials.json
