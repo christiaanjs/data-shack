@@ -1,0 +1,17 @@
+# Copy to terraform.tfvars and fill in. Get tenancy/user OCIDs and the API
+# key fingerprint from OCI Console → Profile → My Profile → API Keys → Add
+# API Key (this also generates the private key file for private_key_path).
+
+tenancy_ocid      = "ocid1.tenancy.oc1..xxxxx"
+user_ocid         = "ocid1.user.oc1..xxxxx"
+fingerprint       = "xx:xx:xx:...:xx"
+private_key_path  = "~/.oci/oci_api_key.pem"
+region            = "us-ashburn-1"
+compartment_ocid  = "ocid1.tenancy.oc1..xxxxx" # tenancy root compartment, unless you use a sub-compartment
+
+ssh_public_key_path = "~/.ssh/id_rsa.pub"
+ssh_ingress_cidr    = "203.0.113.4/32" # your IP — never leave this as 0.0.0.0/0
+
+worker_url = "https://data-shack.example.workers.dev"
+auth_mode  = "token" # recommended — or "dev-token"/"oauth-refresh", see ../../README.md
+api_token  = "dspat_..." # create one in the Workbench UI: Settings -> API Tokens

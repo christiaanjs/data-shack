@@ -15,6 +15,7 @@ import {
   HardDrive,
   History,
   Key,
+  KeyRound,
   Link,
   LogOut,
   Moon,
@@ -88,6 +89,9 @@ export function ChartIcon({ size }: { size: number }) {
 }
 export function KeyIcon({ size }: { size: number }) {
   return <Key size={size} strokeWidth={SW} />;
+}
+export function TokenIcon({ size }: { size: number }) {
+  return <KeyRound size={size} strokeWidth={SW} />;
 }
 export function DriveIcon({ size }: { size: number }) {
   return <HardDrive size={size} strokeWidth={SW} />;

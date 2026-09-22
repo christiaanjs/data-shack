@@ -14,6 +14,7 @@ import {
   SearchIcon,
   SunIcon,
   TableIcon,
+  TokenIcon,
   TransformIcon,
   XIcon,
 } from "./wbIcons.tsx";
@@ -64,6 +65,13 @@ export function CommandPalette({ open, onClose, data, openTabs, ctx }: CommandPa
         title: "Commit snapshot",
         sub: "Register a storage file as a table",
         run: () => ctx.openTab("commit"),
+      },
+      {
+        kind: "Action",
+        icon: <TokenIcon size={16} />,
+        title: "API Tokens",
+        sub: "Create or revoke long-lived bearer tokens",
+        run: () => ctx.openTab("tokens"),
       },
       {
         kind: "Action",
