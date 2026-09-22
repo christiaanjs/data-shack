@@ -124,6 +124,7 @@ resource "oci_core_instance" "session_client" {
       git_ref              = var.git_ref
       worker_url           = var.worker_url
       auth_mode             = var.auth_mode
+      api_token             = var.api_token
       dev_token             = var.dev_token
       enable_catalog_views  = var.enable_catalog_views
       log_level             = var.log_level

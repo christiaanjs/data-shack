@@ -10,6 +10,7 @@ import {
   KeyIcon,
   PlusIcon,
   TableIcon,
+  TokenIcon,
   TransformIcon,
 } from "./wbIcons.tsx";
 import type { WbData } from "./workbench-types.ts";
@@ -249,9 +250,26 @@ interface SettingsTreeProps {
 }
 
 export function SettingsTree({ data, activeKey, onOpen }: SettingsTreeProps) {
-  const { credentials, backends } = data;
+  const { credentials, backends, tokens } = data;
   return (
     <div class="wb-side-scroll wb-scrollbar-thin">
+      <TreeGroup
+        icon={<TokenIcon size={13} />}
+        label="API Tokens"
+        count={tokens.length}
+        onAdd={() => onOpen("tokens")}
+      >
+        {tokens.map((t) => (
+          <SimpleNode
+            key={t.id}
+            icon={<TokenIcon size={14} />}
+            label={t.name}
+            active={activeKey === "tokens"}
+            onOpen={() => onOpen("tokens")}
+          />
+        ))}
+      </TreeGroup>
+
       <TreeGroup
         icon={<KeyIcon size={13} />}
         label="Credentials"

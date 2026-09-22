@@ -5,6 +5,7 @@ services:
     environment:
       WORKER_URL: ${WORKER_URL:?set WORKER_URL to your data-shack Worker origin}
       AUTH_MODE: ${AUTH_MODE:-dev-token}
+      API_TOKEN: ${API_TOKEN:-}
       DEV_TOKEN: ${DEV_TOKEN:-}
       AUTH_CREDENTIALS_PATH: /data/credentials.json
       ENABLE_CATALOG_VIEWS: ${ENABLE_CATALOG_VIEWS:-true}

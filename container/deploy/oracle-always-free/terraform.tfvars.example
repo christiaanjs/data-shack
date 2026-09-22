@@ -13,5 +13,5 @@ ssh_public_key_path = "~/.ssh/id_rsa.pub"
 ssh_ingress_cidr    = "203.0.113.4/32" # your IP — never leave this as 0.0.0.0/0
 
 worker_url = "https://data-shack.example.workers.dev"
-auth_mode  = "dev-token" # or "oauth-refresh" — see ../../README.md
-dev_token  = "some-secret-matching-the-workers-DEV_TOKEN"
+auth_mode  = "token" # recommended — or "dev-token"/"oauth-refresh", see ../../README.md
+api_token  = "dspat_..." # create one in the Workbench UI: Settings -> API Tokens

@@ -2,6 +2,7 @@ import { Cron } from "croner";
 import { cors } from "hono/cors";
 import { createMiddleware } from "hono/factory";
 import { Hono } from "hono/tiny";
+import { hashToken } from "./auth/jwt.ts";
 import { authenticate } from "./auth/middleware.ts";
 import { oauthRouter } from "./auth/oauth.ts";
 import { CatalogDO } from "./catalog/do.ts";
@@ -43,6 +44,11 @@ import {
   updateCredential,
   updateStorageBackend,
 } from "./db/settings.ts";
+import {
+  deletePersonalAccessToken,
+  insertPersonalAccessToken,
+  listPersonalAccessTokens,
+} from "./db/tokens.ts";
 import { decryptHttpConfig, resolveHeaderTemplates } from "./http-config.ts";
 import { validateDateRangeConfig, validatePaginationConfig } from "./loaders/config-types.ts";
 import { refreshGoogleAccessToken, runGoogleSheetsLoadJob } from "./loaders/google-sheets.ts";
@@ -1120,6 +1126,67 @@ app.delete("/api/saved-queries/:id", requireAuth, async (c) => {
   const deleted = await deleteSavedQuery(c.env.DB, id, userId);
   if (!deleted) return c.json({ error: "not found" }, 404);
   return c.json({ ok: true });
+});
+
+// ── Personal Access Tokens ──────────────────────────────────────────────────
+// User-created long-lived bearer tokens (Authorization: Bearer dspat_...),
+// validated by src/auth/middleware.ts. Intended for headless/script clients
+// (e.g. container/) that can't do an interactive OAuth login.
+
+const MAX_TOKEN_EXPIRY_DAYS = 3650; // 10 years
+
+app.get("/api/tokens", requireAuth, async (c) => {
+  const tokens = await listPersonalAccessTokens(c.env.DB, c.get("userId"));
+  return c.json({ tokens });
+});
+
+app.post("/api/tokens", requireAuth, async (c) => {
+  const body = await c.req.json<{ name?: unknown; expiresInDays?: unknown }>();
+  if (typeof body.name !== "string" || !body.name.trim()) {
+    return c.json({ error: "name is required" }, 400);
+  }
+  const name = body.name.trim().slice(0, 100);
+
+  let expiresAt: number | null = null;
+  if (body.expiresInDays !== undefined && body.expiresInDays !== null) {
+    const days = body.expiresInDays;
+    if (
+      typeof days !== "number" ||
+      !Number.isInteger(days) ||
+      days < 1 ||
+      days > MAX_TOKEN_EXPIRY_DAYS
+    ) {
+      return c.json(
+        {
+          error: `expiresInDays must be an integer between 1 and ${MAX_TOKEN_EXPIRY_DAYS}, or omitted for no expiry`,
+        },
+        400,
+      );
+    }
+    expiresAt = Date.now() + days * 24 * 60 * 60 * 1000;
+  }
+
+  const secret = `dspat_${crypto.randomUUID().replace(/-/g, "")}${crypto.randomUUID().replace(/-/g, "")}`;
+  const tokenHash = await hashToken(secret);
+  const result = await insertPersonalAccessToken(c.env.DB, {
+    userId: c.get("userId"),
+    name,
+    tokenHash,
+    expiresAt,
+  });
+
+  // The plaintext token is returned only in this response — it's never
+  // recoverable again (only its hash is stored).
+  return c.json(
+    { id: result.id, name, token: secret, created_at: result.created_at, expires_at: expiresAt },
+    201,
+  );
+});
+
+app.delete("/api/tokens/:id", requireAuth, async (c) => {
+  const deleted = await deletePersonalAccessToken(c.env.DB, c.req.param("id"), c.get("userId"));
+  if (!deleted) return c.json({ error: "not found" }, 404);
+  return new Response(null, { status: 204 });
 });
 
 // ── Root ─────────────────────────────────────────────────────────────────

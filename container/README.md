@@ -30,37 +30,47 @@ the only inbound traffic is the WS push from the DO once a socket already
 exists. So the deployment target needs to be an always-on host, not a
 request-triggered FaaS; see `deploy/README.md`.
 
-**Auth: two supported modes**, both already supported by the existing Worker
+**Auth: three supported modes**, all already supported by the existing Worker
 with no server-side changes:
 
-- **`AUTH_MODE=dev-token`** (default, simplest) — a static shared secret,
-  matching the Worker's `ENABLE_DEV_AUTH` bypass
-  (`src/auth/middleware.ts`). No expiry, no refresh logic, no persistent
-  volume needed. Give this container its own `DEV_TOKEN`/`DEV_USER_ID`
-  secret pair on the Worker — don't reuse your local-dev or CI secret — since
-  it's effectively a long-lived bearer credential for whatever `DEV_USER_ID`
-  you configure.
-- **`AUTH_MODE=oauth-refresh`** — proper per-user OAuth: a one-time
-  interactive login (`npm run login`, run on your own machine, not in the
-  container) mints a 30-day refresh token via the same DCR + PKCE flow the
-  frontend uses (`frontend/src/auth.ts`), saved to a JSON file. The container
-  exchanges it for a 1-hour access JWT on startup and ~5 minutes before every
-  expiry (`src/auth/oauthTokenProvider.ts`). Refresh tokens **rotate on every
-  use** (`src/auth/oauth.ts`'s `claimRefreshToken`), so the container
-  persists the newly issued refresh token back to the same file after every
-  refresh — mount that file on a real volume, and run exactly one container
-  per credential file (a second replica sharing the file will race the
-  rotation and lock the other out).
-
-Pick `dev-token` unless you specifically want the container to act as a
-distinct, revocable Google identity rather than a shared secret.
+- **`AUTH_MODE=token`** (recommended) — a personal access token you create
+  yourself from the Workbench UI: Settings → API Tokens → New token (or
+  `POST /api/tokens`). It's a real, revocable, optionally-expiring credential
+  scoped to your own user — no shared secret, no interactive OAuth dance, no
+  rotating file to persist. The Worker recognizes the `dspat_` prefix and
+  checks it against the `personal_access_tokens` table directly
+  (`src/auth/middleware.ts`), independent of `ENABLE_DEV_AUTH`/`ENABLE_OAUTH`.
+  Revoke it from the same UI page the moment you decommission a container.
+- **`AUTH_MODE=dev-token`** (simplest, but a shared secret) — a static
+  token matching the Worker's `ENABLE_DEV_AUTH` bypass
+  (`src/auth/middleware.ts`). No expiry, no refresh logic. Give this
+  container its own `DEV_TOKEN`/`DEV_USER_ID` secret pair on the Worker —
+  don't reuse your local-dev or CI secret — since it's effectively a
+  long-lived bearer credential for whatever `DEV_USER_ID` you configure, and
+  unlike a personal access token it can't be revoked individually (only by
+  rotating the Worker's `DEV_TOKEN` secret, which invalidates every client
+  using it).
+- **`AUTH_MODE=oauth-refresh`** — proper per-user OAuth via a full DCR +
+  PKCE login, for cases where a personal access token isn't suitable (e.g.
+  you want the container to act as a distinct Google identity rather than a
+  token scoped to your existing user): a one-time interactive login
+  (`npm run login`, run on your own machine, not in the container) mints a
+  30-day refresh token (`frontend/src/auth.ts`'s flow), saved to a JSON
+  file. The container exchanges it for a 1-hour access JWT on startup and
+  ~5 minutes before every expiry (`src/auth/oauthTokenProvider.ts`). Refresh
+  tokens **rotate on every use** (`src/auth/oauth.ts`'s `claimRefreshToken`),
+  so the container persists the newly issued refresh token back to the same
+  file after every refresh — mount that file on a real volume, and run
+  exactly one container per credential file (a second replica sharing the
+  file will race the rotation and lock the other out).
 
 ## Configuration
 
 | Env var | Required | Default | Meaning |
 |---|---|---|---|
 | `WORKER_URL` | yes | — | Worker origin, e.g. `https://data-shack.example.workers.dev` |
-| `AUTH_MODE` | no | `dev-token` | `dev-token` or `oauth-refresh` |
+| `AUTH_MODE` | no | `dev-token` | `token`, `dev-token`, or `oauth-refresh` |
+| `API_TOKEN` | if `AUTH_MODE=token` | — | A personal access token from Settings → API Tokens in the Workbench UI |
 | `DEV_TOKEN` | if `AUTH_MODE=dev-token` | — | Must match the Worker's `DEV_TOKEN` secret |
 | `AUTH_CREDENTIALS_PATH` | if `AUTH_MODE=oauth-refresh` | `/data/credentials.json` | Path to the file produced by `npm run login` |
 | `ENABLE_CATALOG_VIEWS` | no | `true` | Also connect to `/catalog/ws` and register `CREATE VIEW` per catalog table, so SQL can reference tables by name. Set `false` to skip if you only ever query raw `r2://`/`http-ds://` URIs directly. |
@@ -73,6 +83,10 @@ distinct, revocable Google identity rather than a shared secret.
 ```bash
 npm install
 npm run typecheck
+
+# token mode — create a token in the Workbench UI first (Settings → API Tokens)
+WORKER_URL=http://localhost:8787 AUTH_MODE=token API_TOKEN=dspat_... \
+  npm run build && npm start
 
 # dev-token mode
 WORKER_URL=http://localhost:8787 AUTH_MODE=dev-token DEV_TOKEN=some-local-secret \
@@ -91,8 +105,8 @@ docker build -t data-shack-session-client .
 
 docker run --rm \
   -e WORKER_URL=https://your-worker.example.workers.dev \
-  -e AUTH_MODE=dev-token \
-  -e DEV_TOKEN=some-secret \
+  -e AUTH_MODE=token \
+  -e API_TOKEN=dspat_... \
   data-shack-session-client
 
 # oauth-refresh mode needs a writable volume for the rotating refresh token:

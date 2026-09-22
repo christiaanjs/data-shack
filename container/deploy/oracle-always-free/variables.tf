@@ -75,9 +75,16 @@ variable "worker_url" {
 }
 
 variable "auth_mode" {
-  description = "\"dev-token\" or \"oauth-refresh\" — see ../../README.md."
+  description = "\"token\" (recommended), \"dev-token\", or \"oauth-refresh\" — see ../../README.md."
   type        = string
-  default     = "dev-token"
+  default     = "token"
+}
+
+variable "api_token" {
+  description = "A personal access token (dspat_...) from the Workbench UI's Settings -> API Tokens, when auth_mode = token."
+  type        = string
+  default     = ""
+  sensitive   = true
 }
 
 variable "dev_token" {

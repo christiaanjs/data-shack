@@ -14,20 +14,25 @@ the VM (no container registry needed).
    → **Add API Key**. This gives you the fingerprint and a private key file
    for `terraform.tfvars`.
 4. Your Worker already deployed (`../../CLAUDE.md`'s bootstrap steps at the
-   repo root). For `AUTH_MODE=dev-token`, the production Worker needs
-   `ENABLE_DEV_AUTH` enabled (it's off by default in production — only
-   `.dev.vars` sets it locally) plus a dedicated `DEV_TOKEN`/`DEV_USER_ID`
-   pair:
-   ```bash
-   # from the repo root — add ENABLE_DEV_AUTH = "true" under the root [vars]
-   # table in wrangler.toml (same style as the existing ENABLE_OAUTH line),
-   # then redeploy, then set the two secrets:
-   npm run deploy
-   wrangler secret put DEV_TOKEN
-   wrangler secret put DEV_USER_ID   # an existing row's id in the `users` D1 table — see src/db/queries.ts
-   ```
-   `DEV_TOKEN` should be a value generated specifically for this container
-   (e.g. `openssl rand -hex 32`), not reused from local dev.
+   repo root).
+   - For `AUTH_MODE=token` (recommended, the `terraform.tfvars.example`
+     default) — no Worker changes needed. Sign into the Workbench UI
+     (`/workbench`) and create a token: Settings → API Tokens → New token.
+     Paste it into `terraform.tfvars` as `api_token`.
+   - For `AUTH_MODE=dev-token`, the production Worker needs
+     `ENABLE_DEV_AUTH` enabled (it's off by default in production — only
+     `.dev.vars` sets it locally) plus a dedicated `DEV_TOKEN`/`DEV_USER_ID`
+     pair:
+     ```bash
+     # from the repo root — add ENABLE_DEV_AUTH = "true" under the root [vars]
+     # table in wrangler.toml (same style as the existing ENABLE_OAUTH line),
+     # then redeploy, then set the two secrets:
+     npm run deploy
+     wrangler secret put DEV_TOKEN
+     wrangler secret put DEV_USER_ID   # an existing row's id in the `users` D1 table — see src/db/queries.ts
+     ```
+     `DEV_TOKEN` should be a value generated specifically for this container
+     (e.g. `openssl rand -hex 32`), not reused from local dev.
 
 ## Deploy
 
@@ -89,6 +94,8 @@ sudo systemctl restart data-shack-session
 terraform destroy
 ```
 
-Also revoke the `DEV_TOKEN` secret (or re-run the interactive login to
-invalidate the old refresh token) if you're decommissioning this container
-rather than just moving it.
+Also revoke the credential this container used — the token in Settings →
+API Tokens for `AUTH_MODE=token`, the `DEV_TOKEN` secret for `dev-token`, or
+re-run the interactive login to invalidate the old refresh token for
+`oauth-refresh` — if you're decommissioning this container rather than just
+moving it.

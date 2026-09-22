@@ -8,7 +8,8 @@ export type TabKind =
   | "job"
   | "cred"
   | "backend"
-  | "commit";
+  | "commit"
+  | "tokens";
 
 export interface QueryResult {
   columns: string[];
@@ -91,6 +92,14 @@ export interface WbBackend {
   type: string;
 }
 
+export interface WbToken {
+  id: string;
+  name: string;
+  created_at: number;
+  last_used_at: number | null;
+  expires_at: number | null;
+}
+
 export interface WbData {
   tables: CatalogTableWithSnapshot[];
   transforms: WbTransform[];
@@ -99,6 +108,7 @@ export interface WbData {
   savedQueries: SavedQuery[];
   credentials: WbCredential[];
   backends: WbBackend[];
+  tokens: WbToken[];
 }
 
 export interface WbCtx {

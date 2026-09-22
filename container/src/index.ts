@@ -1,4 +1,5 @@
 import { OAuthRefreshTokenProvider } from "./auth/oauthTokenProvider.js";
+import { PatTokenProvider } from "./auth/patTokenProvider.js";
 import { DevTokenProvider } from "./auth/tokenProvider.js";
 import type { TokenProvider } from "./auth/tokenProvider.js";
 import { connectCatalogWs } from "./catalog/ws.js";
@@ -13,6 +14,10 @@ function buildTokenProvider(config: ReturnType<typeof loadConfig>): TokenProvide
   if (config.authMode === "dev-token") {
     // config.devToken is guaranteed set by loadConfig() when authMode is "dev-token".
     return new DevTokenProvider(config.devToken as string);
+  }
+  if (config.authMode === "token") {
+    // config.patToken is guaranteed set by loadConfig() when authMode is "token".
+    return new PatTokenProvider(config.patToken as string);
   }
   return new OAuthRefreshTokenProvider(config.workerBase, config.credentialsPath);
 }
