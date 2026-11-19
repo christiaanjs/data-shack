@@ -9,6 +9,7 @@ export { CatalogDO };
 import { SessionDO } from "./session/do.ts";
 export { SessionDO };
 import { decryptConfig, encryptConfig } from "./crypto.ts";
+import { deleteApiToken, insertApiToken, listApiTokens } from "./db/api-tokens.ts";
 import {
   deleteDashboard,
   getDashboardByIdOrSlug,
@@ -74,7 +75,7 @@ function isAllowedOrigin(origin: string, allowedOrigin: string, allowSubdomains:
   }
 }
 
-type Variables = { userId: string };
+type Variables = { userId: string; authMethod: "dev" | "jwt" | "api-token" };
 
 const app = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -107,6 +108,7 @@ const requireAuth = createMiddleware<{ Bindings: Env; Variables: Variables }>(as
   const auth = await authenticate(c.req.raw, c.env);
   if (!auth) return new Response("Unauthorized", { status: 401 });
   c.set("userId", auth.userId);
+  c.set("authMethod", auth.method);
   return next();
 });
 
@@ -1118,6 +1120,46 @@ app.delete("/api/saved-queries/:id", requireAuth, async (c) => {
   const userId = c.get("userId");
   const id = c.req.param("id");
   const deleted = await deleteSavedQuery(c.env.DB, id, userId);
+  if (!deleted) return c.json({ error: "not found" }, 404);
+  return c.json({ ok: true });
+});
+
+// ── API tokens (long-lived CI credentials) ───────────────────────────────
+
+app.get("/api/tokens", requireAuth, async (c) => {
+  const tokens = await listApiTokens(c.env.DB, c.get("userId"));
+  return c.json({ tokens });
+});
+
+app.post("/api/tokens", requireAuth, async (c) => {
+  // An API token must not be able to mint further tokens.
+  if (c.get("authMethod") === "api-token") {
+    return c.json({ error: "API tokens cannot create other tokens" }, 403);
+  }
+  const body = (await c.req.json().catch(() => ({}))) as {
+    name?: string;
+    expires_in_days?: number | null;
+  };
+  const name = body.name?.trim();
+  if (!name || name.length > 100) return c.json({ error: "name required (max 100 chars)" }, 400);
+  let expiresAt: number | null = null;
+  if (body.expires_in_days != null) {
+    const days = body.expires_in_days;
+    if (!Number.isFinite(days) || days <= 0 || days > 3650) {
+      return c.json({ error: "expires_in_days must be between 1 and 3650" }, 400);
+    }
+    expiresAt = Date.now() + days * 86_400_000;
+  }
+  const { token, row } = await insertApiToken(c.env.DB, {
+    userId: c.get("userId"),
+    name,
+    expiresAt,
+  });
+  return c.json({ token, ...row }, 201);
+});
+
+app.delete("/api/tokens/:id", requireAuth, async (c) => {
+  const deleted = await deleteApiToken(c.env.DB, c.req.param("id"), c.get("userId"));
   if (!deleted) return c.json({ error: "not found" }, 404);
   return c.json({ ok: true });
 });

@@ -111,6 +111,27 @@ export function authSetToken(workerUrl: string, token: string): void {
   console.log(pc.green(`✓ Token saved for ${workerUrl}`));
 }
 
+export async function authCreateToken(name: string, expiresDays?: number): Promise<void> {
+  const auth = loadAuth();
+  if (!auth) {
+    console.error(pc.red("Not authenticated. Run `dshack auth login <worker-url>` first."));
+    process.exit(1);
+  }
+  const res = await fetch(`${auth.worker_url}/api/tokens`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${auth.access_token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ name, expires_in_days: expiresDays ?? null }),
+  });
+  if (!res.ok) {
+    console.error(pc.red(`Failed to create token (${res.status}): ${await res.text()}`));
+    process.exit(1);
+  }
+  const { token, id } = (await res.json()) as { token: string; id: string };
+  console.log(pc.green(`✓ Created token ${id} (${name})`));
+  console.log(pc.yellow("Copy it now — it will not be shown again:\n"));
+  console.log(token);
+}
+
 export function authLogout(): void {
   clearAuth();
   console.log(pc.green("✓ Logged out"));

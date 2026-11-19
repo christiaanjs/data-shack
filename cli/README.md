@@ -35,6 +35,7 @@ dshack apply    # apply changes
 ```
 dshack auth login <worker-url>          # Browser OAuth (PKCE)
 dshack auth token <worker-url> <jwt>    # Store a token directly (CI/dev)
+dshack auth create-token <name> [--expires-days N]  # Mint a long-lived CI API token
 dshack auth status                      # Show current auth
 dshack auth logout                      # Remove stored credentials
 ```
@@ -233,6 +234,14 @@ sql: |
 ```
 
 ## CI/CD
+
+Access JWTs expire after 1 hour, so CI should use a long-lived API token. Create one after `dshack auth login`:
+
+```bash
+dshack auth create-token github-actions --expires-days 365
+```
+
+The token (`dsk_…`) is shown once; store it as the `DSHACK_TOKEN` secret. Only a SHA-256 hash is kept server-side. Manage tokens with `GET /api/tokens` and `DELETE /api/tokens/:id` (revocation is immediate). API tokens cannot create other tokens.
 
 Use `DS_TOKEN` and `DS_WORKER_URL` environment variables instead of stored auth:
 

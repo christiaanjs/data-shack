@@ -1,7 +1,13 @@
 #!/usr/bin/env node
 import { Command } from "commander";
 import { applyCommand } from "./commands/apply.js";
-import { authLogin, authLogout, authSetToken, authStatus } from "./commands/auth.js";
+import {
+  authCreateToken,
+  authLogin,
+  authLogout,
+  authSetToken,
+  authStatus,
+} from "./commands/auth.js";
 import { destroyCommand } from "./commands/destroy.js";
 import { initCommand } from "./commands/init.js";
 import { planCommand } from "./commands/plan.js";
@@ -26,6 +32,14 @@ auth
   .command("token <worker-url> <token>")
   .description("Store an existing JWT (for CI/dev environments)")
   .action((workerUrl: string, token: string) => authSetToken(workerUrl, token));
+
+auth
+  .command("create-token <name>")
+  .description("Create a long-lived API token for CI (requires `auth login`)")
+  .option("--expires-days <n>", "Token lifetime in days (default: never expires)", Number)
+  .action((name: string, opts: { expiresDays?: number }) =>
+    authCreateToken(name, opts.expiresDays),
+  );
 
 auth
   .command("logout")
