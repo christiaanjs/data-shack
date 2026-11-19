@@ -15,7 +15,9 @@ export async function resolveTableSnapshot(
   tableName: string,
   catalogStub: ReturnType<DurableObjectNamespace["get"]>,
 ): Promise<SnapshotInfo | null> {
-  const res = await catalogStub.fetch(`http://do/snapshots/${encodeURIComponent(tableName)}`);
+  const res = await catalogStub.fetch(
+    `http://do/snapshots/${encodeURIComponent(tableName)}?limit=1`,
+  );
   if (!res.ok) return null;
   const { snapshots } = (await res.json()) as { snapshots: SnapshotInfo[] };
   return snapshots[0] ?? null;
