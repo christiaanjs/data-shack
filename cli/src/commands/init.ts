@@ -5,8 +5,12 @@ import pc from "picocolors";
 import { ApiClient } from "../lib/api.js";
 import { loadAuth } from "../lib/auth.js";
 import { hashConfig } from "../lib/hash.js";
-import { createState } from "../lib/state.js";
+import { sanitizeConfig } from "../lib/sanitize.js";
+import { createState, saveState } from "../lib/state.js";
 import type { State } from "../lib/types.js";
+
+// Env vars (name → real value) for secrets replaced by $ENV refs during a pull.
+const pulledEnv: Record<string, string> = {};
 
 const DIRS = ["data-sources", "transforms", "catalog"];
 
@@ -107,7 +111,17 @@ export async function initCommand(workerUrl: string, opts: { pull?: boolean }): 
   await pullTransforms(api, state, cwd);
   await pullSavedQueries(api, state, cwd);
 
+  saveState(state, cwd);
   console.log(pc.green(`\n✓ Pulled ${Object.keys(state.resources).length} resources into state.`));
+  const names = Object.keys(pulledEnv).sort();
+  if (names.length > 0) {
+    console.log(
+      pc.yellow(
+        "\nSecrets were NOT written to disk. Set these env vars before `dshack plan` / `apply`:",
+      ),
+    );
+    for (const n of names) console.log(`  ${n}`);
+  }
 }
 
 async function pullCredentials(api: ApiClient, state: State, cwd: string): Promise<void> {
@@ -125,8 +139,13 @@ async function pullCredentials(api: ApiClient, state: State, cwd: string): Promi
       type: cred.type,
       config: detail.config,
     };
+    const { config, env } = sanitizeConfig(cred.name, detail.config, {
+      maskAllVariables: cred.type === "http",
+    });
+    Object.assign(pulledEnv, env);
     const path = `data-sources/credentials/${slugify(cred.name)}.yaml`;
-    writeYaml(resolve(cwd, path), resource);
+    writeYaml(resolve(cwd, path), { ...resource, config });
+    // Hash the real config: `plan` hashes the secret-resolved resource.
     state.resources[path] = { id: cred.id, kind: "credential", hash: hashConfig(resource) };
     console.log(pc.dim(`  + ${path}`));
   }
@@ -142,8 +161,10 @@ async function pullBackends(api: ApiClient, state: State, cwd: string): Promise<
       config: Record<string, unknown>;
     }>(`/api/storage-backends/${b.id}`);
     const resource = { kind: "storage-backend", name: b.name, type: b.type, config: detail.config };
+    const { config, env } = sanitizeConfig(b.name, detail.config ?? {});
+    Object.assign(pulledEnv, env);
     const path = `data-sources/backends/${slugify(b.name)}.yaml`;
-    writeYaml(resolve(cwd, path), resource);
+    writeYaml(resolve(cwd, path), { ...resource, config });
     state.resources[path] = { id: b.id, kind: "storage-backend", hash: hashConfig(resource) };
     console.log(pc.dim(`  + ${path}`));
   }

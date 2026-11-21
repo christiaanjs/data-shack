@@ -53,7 +53,11 @@ transforms/           ← transform jobs (with triggers)
 catalog/              ← saved queries
 ```
 
-Pass `--pull` to fetch all existing resources from the API and write them as YAML files. Useful for bootstrapping IaC on top of a pre-existing deployment.
+Pass `--pull` to fetch all existing resources from the API and write them as YAML files, and record them in `.dshack/state.json` so an immediate `plan` shows no changes. Useful for bootstrapping IaC on top of a pre-existing deployment.
+
+Secret values (http credential `variables`, and any config key containing `secret`, `token`, `password` or `key`) are **never written to disk**: they are replaced with `$ENV:NAME` references and the required variable names are printed. Export them before running `plan`/`apply`.
+
+**Proxies:** the CLI honours `HTTPS_PROXY`/`HTTP_PROXY`/`NO_PROXY` (Node's built-in fetch does not).
 
 ### `dshack plan`
 

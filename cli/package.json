@@ -13,7 +13,8 @@
   "dependencies": {
     "commander": "^12.1.0",
     "js-yaml": "^4.1.0",
-    "picocolors": "^1.1.0"
+    "picocolors": "^1.1.0",
+    "undici": "^8.13.1"
   },
   "devDependencies": {
     "@types/js-yaml": "^4.0.9",
