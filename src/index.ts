@@ -9,9 +9,11 @@ export { CatalogDO };
 import { SessionDO } from "./session/do.ts";
 export { SessionDO };
 import { decryptConfig, encryptConfig } from "./crypto.ts";
+import { deleteApiToken, insertApiToken, listApiTokens } from "./db/api-tokens.ts";
 import {
   deleteDashboard,
   getDashboardByIdOrSlug,
+  insertDashboard,
   listDashboards,
   resolveUniqueSlug,
   slugify,
@@ -74,7 +76,7 @@ function isAllowedOrigin(origin: string, allowedOrigin: string, allowSubdomains:
   }
 }
 
-type Variables = { userId: string };
+type Variables = { userId: string; authMethod: "dev" | "jwt" | "api-token" };
 
 const app = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -107,6 +109,7 @@ const requireAuth = createMiddleware<{ Bindings: Env; Variables: Variables }>(as
   const auth = await authenticate(c.req.raw, c.env);
   if (!auth) return new Response("Unauthorized", { status: 401 });
   c.set("userId", auth.userId);
+  c.set("authMethod", auth.method);
   return next();
 });
 
@@ -967,6 +970,65 @@ app.get("/api/dashboards", requireAuth, async (c) => {
   return c.json({ dashboards });
 });
 
+app.post("/api/dashboards", requireAuth, async (c) => {
+  const userId = c.get("userId");
+  let body: { title?: unknown; artifact_source?: unknown; queries?: unknown; slug?: unknown };
+  try {
+    body = (await c.req.json()) as typeof body;
+  } catch {
+    return c.json({ error: "invalid JSON" }, 400);
+  }
+  if (typeof body.title !== "string" || !body.title.trim()) {
+    return c.json({ error: "title must be a non-empty string" }, 400);
+  }
+  if (typeof body.artifact_source !== "string" || !body.artifact_source.trim()) {
+    return c.json({ error: "artifact_source must be a non-empty string" }, 400);
+  }
+  if (new TextEncoder().encode(body.artifact_source).length > 50_000) {
+    return c.json({ error: "artifact_source exceeds 50 KB limit" }, 400);
+  }
+  if (
+    !Array.isArray(body.queries) ||
+    (body.queries as unknown[]).some((q) => typeof q !== "string")
+  ) {
+    return c.json({ error: "queries must be an array of strings" }, 400);
+  }
+  if (body.slug !== undefined && body.slug !== null && typeof body.slug !== "string") {
+    return c.json({ error: "slug must be a string or null" }, 400);
+  }
+
+  // Same slug rules as the MCP submit_dashboard tool: auto-generate from the title when
+  // omitted; null/empty means no slug.
+  let slug: string | undefined;
+  if (typeof body.slug === "string" && body.slug.trim()) {
+    slug = await resolveUniqueSlug(c.env.DB, userId, slugify(body.slug));
+  } else if (body.slug === undefined) {
+    slug = await resolveUniqueSlug(c.env.DB, userId, slugify(body.title.trim()));
+  }
+
+  const { id } = await insertDashboard(c.env.DB, {
+    userId,
+    title: body.title.trim(),
+    artifactSource: body.artifact_source,
+    queries: body.queries as string[],
+    slug,
+  });
+  const row = await getDashboardByIdOrSlug(c.env.DB, id, userId);
+  if (!row) return c.json({ error: "not found" }, 404);
+  return c.json(
+    {
+      id: row.id,
+      title: row.title,
+      slug: row.slug,
+      artifact_source: row.artifact_source,
+      queries: JSON.parse(row.queries) as string[],
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+    },
+    201,
+  );
+});
+
 app.get("/api/dashboards/:id", requireAuth, async (c) => {
   const row = await getDashboardByIdOrSlug(c.env.DB, c.req.param("id"), c.get("userId"));
   if (!row) return c.json({ error: "not found" }, 404);
@@ -1120,6 +1182,46 @@ app.delete("/api/saved-queries/:id", requireAuth, async (c) => {
   const userId = c.get("userId");
   const id = c.req.param("id");
   const deleted = await deleteSavedQuery(c.env.DB, id, userId);
+  if (!deleted) return c.json({ error: "not found" }, 404);
+  return c.json({ ok: true });
+});
+
+// ── API tokens (long-lived CI credentials) ───────────────────────────────
+
+app.get("/api/tokens", requireAuth, async (c) => {
+  const tokens = await listApiTokens(c.env.DB, c.get("userId"));
+  return c.json({ tokens });
+});
+
+app.post("/api/tokens", requireAuth, async (c) => {
+  // An API token must not be able to mint further tokens.
+  if (c.get("authMethod") === "api-token") {
+    return c.json({ error: "API tokens cannot create other tokens" }, 403);
+  }
+  const body = (await c.req.json().catch(() => ({}))) as {
+    name?: string;
+    expires_in_days?: number | null;
+  };
+  const name = body.name?.trim();
+  if (!name || name.length > 100) return c.json({ error: "name required (max 100 chars)" }, 400);
+  let expiresAt: number | null = null;
+  if (body.expires_in_days != null) {
+    const days = body.expires_in_days;
+    if (!Number.isFinite(days) || days <= 0 || days > 3650) {
+      return c.json({ error: "expires_in_days must be between 1 and 3650" }, 400);
+    }
+    expiresAt = Date.now() + days * 86_400_000;
+  }
+  const { token, row } = await insertApiToken(c.env.DB, {
+    userId: c.get("userId"),
+    name,
+    expiresAt,
+  });
+  return c.json({ token, ...row }, 201);
+});
+
+app.delete("/api/tokens/:id", requireAuth, async (c) => {
+  const deleted = await deleteApiToken(c.env.DB, c.req.param("id"), c.get("userId"));
   if (!deleted) return c.json({ error: "not found" }, 404);
   return c.json({ ok: true });
 });
