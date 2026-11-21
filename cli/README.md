@@ -110,7 +110,7 @@ my-warehouse/
     └── spending/
         ├── dashboard.yaml
         ├── artifact.jsx        ← React + Recharts component
-        └── query-1.sql
+        └── monthly-totals.sql
 ```
 
 Subdirectory layout is up to you — all `.yaml` / `.yml` files under the four top-level directories are discovered recursively.
@@ -230,9 +230,11 @@ title: Spending
 slug: spending
 artifact_file: artifact.jsx    # React component, default export, Recharts available
 query_files:
-  - query-1.sql
-  - query-2.sql
+  - monthly-totals.sql
+  - by-category.sql
 ```
+
+The API has no query names (the artifact reads `data[i]` by position), so a query can name itself with a leading `-- name: monthly-totals` comment. It is part of the SQL, so it survives the round-trip. `init --pull` names each file after that marker, else after the query's main `FROM` table, else `query-N` — it never edits the SQL. The order of `query_files` sets the index.
 
 ## State file
 

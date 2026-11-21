@@ -4,7 +4,7 @@ import yaml from "js-yaml";
 import pc from "picocolors";
 import { ApiClient } from "../lib/api.js";
 import { loadAuth } from "../lib/auth.js";
-import { normalizeText, writeSidecar } from "../lib/external-files.js";
+import { normalizeText, queryFileNames, writeSidecar } from "../lib/external-files.js";
 import { hashConfig } from "../lib/hash.js";
 import { sanitizeConfig } from "../lib/sanitize.js";
 import { createState, saveState } from "../lib/state.js";
@@ -298,11 +298,9 @@ async function pullDashboards(api: ApiClient, state: State, cwd: string): Promis
     const abs = resolve(cwd, path);
     // Dashboard code is JSX (React + Recharts), queries are SQL — both get their own files.
     writeSidecar(abs, "artifact.jsx", resource.artifact_source);
-    const queryFiles = queries.map((q, i) => {
-      const f = `query-${i + 1}.sql`;
-      writeSidecar(abs, f, q);
-      return f;
-    });
+    // Named by a leading `-- name: x` comment when present, else derived from the SQL.
+    const queryFiles = queryFileNames(queries);
+    queries.forEach((q, i) => writeSidecar(abs, queryFiles[i] as string, q));
     writeYaml(abs, {
       kind: "dashboard",
       title: detail.title,

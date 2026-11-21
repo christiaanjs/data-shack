@@ -68,3 +68,33 @@ export function writeSidecar(yamlAbs: string, fileName: string, content: string)
   mkdirSync(dirname(abs), { recursive: true });
   writeFileSync(abs, `${normalizeText(content)}\n`);
 }
+
+const NAME_MARKER = /^\s*--\s*name:\s*([A-Za-z0-9_-]+)\s*$/;
+
+/**
+ * Dashboard queries have no names in the API (the artifact reads them by index),
+ * so a query can name itself with a leading `-- name: foo` comment. It is part of
+ * the SQL string, so it round-trips through the API untouched.
+ */
+export function parseQueryName(sql: string): string | null {
+  const first = sql.split("\n").find((l) => l.trim() !== "");
+  return first?.match(NAME_MARKER)?.[1] ?? null;
+}
+
+/** File names for a dashboard's queries: marker, else main FROM table, else query-N. */
+export function queryFileNames(queries: string[]): string[] {
+  const used = new Set<string>();
+  return queries.map((sql, i) => {
+    const base =
+      parseQueryName(sql) ??
+      sql
+        .replace(/--.*$/gm, "")
+        .match(/\bFROM\s+["`]?([A-Za-z_]\w*)/i)?.[1]
+        ?.replace(/_/g, "-") ??
+      `query-${i + 1}`;
+    let name = base.toLowerCase();
+    for (let n = 2; used.has(name); n++) name = `${base.toLowerCase()}-${n}`;
+    used.add(name);
+    return `${name}.sql`;
+  });
+}
