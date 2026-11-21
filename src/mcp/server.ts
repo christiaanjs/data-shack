@@ -108,14 +108,14 @@ const TOOLS: Tool[] = [
   {
     name: "read_data",
     description:
-      "Read JSON or NDJSON data directly from a URI without requiring a browser session. Supports http-ds://credentialId/path for HTTP data sources, r2://backendName/key for R2 storage (both r2-bound and r2-s3compat backends), and catalog://tableName to read the latest snapshot of a catalog table from its storage backend. Size limit: 1 MB.",
+      "Read JSON or NDJSON data directly from a URI without requiring a browser session. Supports http-ds://credentialId/path for HTTP data sources, r2://backendName/key for R2 storage (both r2-bound and r2-s3compat backends), r2://sheetsBackendName/sheet_name for a tab of a google-sheets storage backend (returned as a JSON array of row objects keyed by the header row), and catalog://tableName to read the latest snapshot of a catalog table from its storage backend. Size limit: 1 MB.",
     inputSchema: {
       type: "object",
       properties: {
         uri: {
           type: "string",
           description:
-            "URI to read from. Examples: http-ds://cred_abc/accounts, r2://data-shack/reference/config.json, catalog://transactions",
+            "URI to read from. Examples: http-ds://cred_abc/accounts, r2://data-shack/reference/config.json, r2://my-sheets/sheet_balances, catalog://transactions",
         },
       },
       required: ["uri"],

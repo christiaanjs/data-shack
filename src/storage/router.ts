@@ -7,9 +7,8 @@ import {
   getStorageBackendByNameOrId,
   getStorageBackendConfig,
 } from "../db/settings.ts";
-import { refreshGoogleAccessToken } from "../loaders/google-sheets.ts";
-import type { GoogleSheetsCredential } from "../loaders/google-sheets.ts";
 import type { Env } from "../types.ts";
+import { getSheetsAccess, readSheetAsJson, sheetNameFromKey } from "./google-sheets.ts";
 import { parseS3AuthCredential, r2BoundKey, signS3Request } from "./resolve.ts";
 
 // Names that always map to the built-in R2 Worker binding rather than a D1 backend row.
@@ -112,7 +111,7 @@ function addCorsHeaders(headers: Headers): void {
   );
 }
 
-function corsError(status: 400 | 401 | 403 | 502, message: string): Response {
+function corsError(status: 400 | 401 | 403 | 404 | 502, message: string): Response {
   const h = new Headers({ "Content-Type": "text/plain" });
   addCorsHeaders(h);
   return new Response(message, { status, headers: h });
@@ -388,47 +387,12 @@ storageRouter.on(["GET", "HEAD", "PUT", "POST", "DELETE", "OPTIONS"], "/s3proxy/
   if (!backendRow) return new Response("Not Found", { status: 404 });
 
   if (backendRow.type === "google-sheets") {
-    let sheetsCfg: { spreadsheetId: string; sheetName: string; gid?: number; credentialId: string };
-    try {
-      sheetsCfg = JSON.parse(
-        await decryptConfig(backendRow.encrypted_config, c.env.JWT_SECRET),
-      ) as typeof sheetsCfg;
-    } catch {
-      return corsError(502, "Bad Gateway");
-    }
-
-    const credRow = await getCredentialConfig(c.env.DB, sheetsCfg.credentialId, userId);
-    if (!credRow || credRow.type !== "google-sheets") {
-      return corsError(502, "google-sheets credential not found");
-    }
-
-    let cred: GoogleSheetsCredential;
-    try {
-      cred = JSON.parse(
-        await decryptConfig(credRow.encrypted_config, c.env.JWT_SECRET),
-      ) as GoogleSheetsCredential;
-    } catch {
-      return corsError(502, "Bad Gateway");
-    }
-
-    if (!c.env.GOOGLE_CLIENT_ID || !c.env.GOOGLE_CLIENT_SECRET) {
-      return corsError(502, "Google OAuth not configured");
-    }
-
-    let accessToken: string;
-    try {
-      accessToken = await refreshGoogleAccessToken(
-        c.env.GOOGLE_CLIENT_ID,
-        c.env.GOOGLE_CLIENT_SECRET,
-        cred.refreshToken,
-      );
-    } catch {
-      return corsError(502, "Failed to refresh Google access token");
-    }
+    const access = await getSheetsAccess(backendRow.encrypted_config, userId, c.env);
+    if (!access.ok) return corsError(access.status, access.message);
+    const { accessToken, config: sheetsCfg } = access;
 
     // S3 key → sheet name: strip extension, fall back to configured sheetName.
-    const keyBase = key.includes(".") ? key.slice(0, key.lastIndexOf(".")) : key;
-    const sheetName = keyBase || sheetsCfg.sheetName || "Sheet1";
+    const sheetName = sheetNameFromKey(key, sheetsCfg.sheetName);
 
     if (method === "PUT") {
       // Accept JSON array or NDJSON (DuckDB COPY TO FORMAT JSON/NDJSON), fall back to CSV.
@@ -505,24 +469,9 @@ storageRouter.on(["GET", "HEAD", "PUT", "POST", "DELETE", "OPTIONS"], "/s3proxy/
     }
 
     // GET / HEAD: use Sheets API values endpoint and return a JSON array of objects.
-    const valuesUrl = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(sheetsCfg.spreadsheetId)}/values/${encodeURIComponent(sheetName)}`;
-    const valuesRes = await fetch(valuesUrl, {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    });
-    if (!valuesRes.ok) {
-      return corsError(502, `Sheets API error: ${valuesRes.status}`);
-    }
-    const valuesData = (await valuesRes.json()) as { values?: string[][] };
-    const allRows = valuesData.values ?? [];
-    const sheetsHeaders = allRows[0] ?? [];
-    const jsonRows = allRows.slice(1).map((row) => {
-      const obj: Record<string, string> = {};
-      for (let i = 0; i < sheetsHeaders.length; i++) {
-        obj[sheetsHeaders[i]!] = row[i] ?? "";
-      }
-      return obj;
-    });
-    const jsonBody = JSON.stringify(jsonRows);
+    const read = await readSheetAsJson(accessToken, sheetsCfg.spreadsheetId, sheetName);
+    if (!read.ok) return corsError(read.status, read.message);
+    const jsonBody = read.body;
     const getHeaders = new Headers({ "Content-Type": "application/json" });
     getHeaders.set("Content-Length", String(new TextEncoder().encode(jsonBody).length));
     addCorsHeaders(getHeaders);

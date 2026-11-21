@@ -1,5 +1,6 @@
 import { getStorageBackendByNameOrId, getStorageBackendConfig } from "../db/settings.ts";
 import type { Env } from "../types.ts";
+import { getSheetsAccess, readSheetAsJson, sheetNameFromKey } from "./google-sheets.ts";
 import { parseR2S3CompatUri, parseR2Uri, r2BoundKey, signS3Request } from "./resolve.ts";
 import { decryptR2S3CompatConfig } from "./router.ts";
 
@@ -86,12 +87,34 @@ async function fetchR2Bucket(
 
   // Named backend → look up by name first, then by ID.
   const backendRow = await getStorageBackendByNameOrId(env.DB, bucket, userId);
+  if (backendRow?.type === "google-sheets") {
+    return fetchGoogleSheet(backendRow.encrypted_config, key, userId, env);
+  }
   if (!backendRow || backendRow.type !== "r2-s3compat") {
     return new Response("Storage backend not found", { status: 404 });
   }
   const cfg = await decryptR2S3CompatConfig(backendRow.encrypted_config, env.JWT_SECRET);
   if (!cfg) return new Response("Bad Gateway", { status: 502 });
   return fetchS3Object(cfg, key);
+}
+
+// Reads a tab of a google-sheets backend as a JSON array of row objects.
+// The key names the tab: "sheet_balances" or "sheet_balances.json" → tab "sheet_balances".
+async function fetchGoogleSheet(
+  encryptedConfig: string,
+  key: string,
+  userId: string,
+  env: Env,
+): Promise<Response> {
+  const access = await getSheetsAccess(encryptedConfig, userId, env);
+  if (!access.ok) return new Response(access.message, { status: access.status });
+  const read = await readSheetAsJson(
+    access.accessToken,
+    access.config.spreadsheetId,
+    sheetNameFromKey(key, access.config.sheetName),
+  );
+  if (!read.ok) return new Response(read.message, { status: read.status });
+  return new Response(read.body, { headers: { "Content-Type": "application/json" } });
 }
 
 async function fetchS3Object(

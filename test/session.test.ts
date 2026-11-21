@@ -1,6 +1,6 @@
 import { SELF } from "cloudflare:test";
 import { env } from "cloudflare:workers";
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 const DEV_HEADERS = { "X-Dev-Token": "test-token" };
 
@@ -965,5 +965,86 @@ describe("transform job dispatch via WebSocket", () => {
     expect(msg.outputTable).toBe("orphan_reset");
 
     ws2.close();
+  });
+});
+
+// ── read_data: google-sheets backends ─────────────────────────────────────────
+
+describe("read_data with a google-sheets storage backend", () => {
+  const backendName = "gs-read-data-backend";
+  const fetchedSheetUrls: string[] = [];
+  const savedFetch = globalThis.fetch;
+
+  beforeAll(async () => {
+    const credRes = await SELF.fetch("http://localhost/api/credentials", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({
+        name: "gs-read-data-cred",
+        type: "google-sheets",
+        config: { refreshToken: "rt_fake" },
+      }),
+    });
+    const { id: credentialId } = (await credRes.json()) as { id: string };
+    const backendRes = await SELF.fetch("http://localhost/api/storage-backends", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({
+        name: backendName,
+        type: "google-sheets",
+        config: { spreadsheetId: "ss_123", sheetName: "Default", credentialId },
+      }),
+    });
+    expect(backendRes.status).toBe(201);
+
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : (input as Request).url;
+      if (url.includes("oauth2.googleapis.com/token")) {
+        return Response.json({ access_token: "at_fake", expires_in: 3600 });
+      }
+      if (url.startsWith("https://sheets.googleapis.com/")) {
+        fetchedSheetUrls.push(url);
+        if (url.includes("/values/sheet_balances")) {
+          return Response.json({
+            values: [
+              ["account", "balance"],
+              ["cheque", "100"],
+              ["savings", "250"],
+            ],
+          });
+        }
+        return new Response("bad range", { status: 400 });
+      }
+      return savedFetch(input, init);
+    };
+  });
+
+  afterAll(() => {
+    globalThis.fetch = savedFetch;
+  });
+
+  it("reads a sheet tab named by the second path entry", async () => {
+    const data = await mcpCall("read_data", { uri: `r2://${backendName}/sheet_balances` });
+    const text = data.result?.content[0]?.text ?? "";
+    expect(JSON.parse(text)).toEqual([
+      { account: "cheque", balance: "100" },
+      { account: "savings", balance: "250" },
+    ]);
+    expect(fetchedSheetUrls.at(-1)).toContain("/spreadsheets/ss_123/values/sheet_balances");
+  });
+
+  it("also accepts a file extension on the sheet name", async () => {
+    const data = await mcpCall("read_data", { uri: `r2://${backendName}/sheet_balances.json` });
+    expect(data.result?.content[0]?.text).toContain("cheque");
+  });
+
+  it("reports an unknown sheet as not found", async () => {
+    const data = await mcpCall("read_data", { uri: `r2://${backendName}/no_such_sheet` });
+    expect(data.error?.message).toMatch(/not found/i);
   });
 });
