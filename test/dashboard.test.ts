@@ -184,6 +184,53 @@ describe("submit_dashboard MCP tool", () => {
   });
 });
 
+describe("POST /api/dashboards", () => {
+  const post = (body: unknown) =>
+    SELF.fetch("http://localhost/api/dashboards", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify(body),
+    });
+
+  it("returns 401 without auth", async () => {
+    const res = await SELF.fetch("http://localhost/api/dashboards", { method: "POST", body: "{}" });
+    expect(res.status).toBe(401);
+  });
+
+  it("creates a dashboard with an auto-generated slug", async () => {
+    const res = await post({
+      title: "REST Created",
+      artifact_source: SIMPLE_ARTIFACT,
+      queries: ["SELECT 1"],
+    });
+    expect(res.status).toBe(201);
+    const d = (await res.json()) as { id: string; slug: string; queries: string[] };
+    expect(d.id).toMatch(/^dash_/);
+    expect(d.slug).toBe("rest-created");
+    expect(d.queries).toEqual(["SELECT 1"]);
+  });
+
+  it("uses an explicit slug and allows a null slug", async () => {
+    const a = await post({
+      title: "T",
+      artifact_source: SIMPLE_ARTIFACT,
+      queries: [],
+      slug: "my-rest-slug",
+    });
+    expect(((await a.json()) as { slug: string }).slug).toBe("my-rest-slug");
+    const b = await post({ title: "T", artifact_source: SIMPLE_ARTIFACT, queries: [], slug: null });
+    expect(((await b.json()) as { slug: string | null }).slug).toBeNull();
+  });
+
+  it("validates the body", async () => {
+    expect((await post({ artifact_source: "x", queries: [] })).status).toBe(400);
+    expect((await post({ title: "T", queries: [] })).status).toBe(400);
+    expect((await post({ title: "T", artifact_source: "x", queries: "no" })).status).toBe(400);
+    const big = "x".repeat(50_001);
+    expect((await post({ title: "T", artifact_source: big, queries: [] })).status).toBe(400);
+  });
+});
+
 describe("GET /api/dashboards", () => {
   it("returns 401 without auth", async () => {
     const res = await SELF.fetch("http://localhost/api/dashboards");

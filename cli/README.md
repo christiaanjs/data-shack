@@ -103,11 +103,27 @@ my-warehouse/
 │       └── transactions.yaml
 ├── transforms/
 │   └── enriched-sales.yaml
-└── catalog/
-    └── monthly-summary.yaml
+├── catalog/
+│   ├── monthly-summary.yaml
+│   └── monthly-summary.sql     ← SQL lives in its own file (see below)
+└── dashboards/
+    └── spending/
+        ├── dashboard.yaml
+        ├── artifact.jsx        ← React + Recharts component
+        └── query-1.sql
 ```
 
-Subdirectory layout is up to you — all `.yaml` / `.yml` files under the three top-level directories are discovered recursively.
+Subdirectory layout is up to you — all `.yaml` / `.yml` files under the four top-level directories are discovered recursively.
+
+## SQL and JSX in their own files
+
+So editors can highlight them, long text fields can live next to the YAML instead of inside it. A `*_file` field replaces the inline field; paths are relative to the YAML file. `init --pull` writes this layout. Inline `sql:` / `queries:` still work, and a resource hashes the same either way. Trailing whitespace is ignored, and a missing referenced file is an error.
+
+| Kind | Inline field | File field | Extension |
+|---|---|---|---|
+| `transform`, `saved-query` | `sql` | `sql_file` | `.sql` |
+| `dashboard` | `artifact_source` | `artifact_file` | `.jsx` |
+| `dashboard` | `queries` | `query_files` (list) | `.sql` |
 
 ## Secret references
 
@@ -186,10 +202,7 @@ output_table: enriched_transactions
 output_uri: r2://main-r2/data/enriched/transactions.ndjson
 format: ndjson
 requires_browser: true          # default: true — runs SQL in DuckDB via browser session
-sql: |
-  SELECT t.*, c.name AS category_name
-  FROM transactions t
-  JOIN categories c ON t.category_id = c.id
+sql_file: enriched-transactions.sql   # or inline: sql: |
 triggers:
   - watches: [transactions, categories]
     policy: all        # fire only when both tables have new snapshots
@@ -204,13 +217,21 @@ Maps to `POST /api/saved-queries`.
 ```yaml
 kind: saved-query
 name: monthly-revenue
-sql: |
-  SELECT
-    strftime('%Y-%m', created_at / 1000, 'unixepoch') AS month,
-    SUM(amount) / 100.0 AS revenue_usd
-  FROM transactions
-  GROUP BY month
-  ORDER BY month DESC
+sql_file: monthly-revenue.sql
+```
+
+### `kind: dashboard`
+
+Maps to `/api/dashboards`. `queries[i]` is passed to the component as `data[i]`. `slug` is optional (derived from the title on create; omit it on update to keep the current one).
+
+```yaml
+kind: dashboard
+title: Spending
+slug: spending
+artifact_file: artifact.jsx    # React component, default export, Recharts available
+query_files:
+  - query-1.sql
+  - query-2.sql
 ```
 
 ## State file

@@ -14,7 +14,14 @@ export interface Change {
   error?: string;
 }
 
-const KIND_ORDER = ["credential", "storage-backend", "load-job", "transform", "saved-query"];
+const KIND_ORDER = [
+  "credential",
+  "storage-backend",
+  "load-job",
+  "transform",
+  "saved-query",
+  "dashboard",
+];
 
 export function computePlan(
   files: Array<{ path: string; resource: Resource }>,
