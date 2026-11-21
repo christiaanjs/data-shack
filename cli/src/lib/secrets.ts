@@ -25,7 +25,7 @@ function resolveString(value: string): string {
       // fall through to env var
     }
     const env = process.env[name];
-    if (env === undefined)
+    if (!env)
       throw new Error(
         `Secret not resolved: $DOPPLER:${name} — Doppler unavailable and env var ${name} not set`,
       );
@@ -36,7 +36,8 @@ function resolveString(value: string): string {
   if (envRef) {
     const name = envRef[1]!;
     const env = process.env[name];
-    if (env === undefined) throw new Error(`Env var not set: ${name}`);
+    // Empty counts as unset: CI turns missing secrets into empty strings.
+    if (!env) throw new Error(`Env var not set: ${name}`);
     return env;
   }
 

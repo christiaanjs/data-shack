@@ -25,23 +25,32 @@ export function computePlan(
 
   for (const { path, resource } of files) {
     seen.add(path);
-    let resolved: Resource;
-    let hash: string;
-    try {
-      resolved = resolveSecrets(resource);
-      hash = hashConfig(resolved);
-    } catch (e) {
-      changes.push({ kind: "create", path, resource, error: (e as Error).message });
+    // Hash the file as written ($ENV refs unresolved) so unchanged resources
+    // can be planned without any secret env vars. Rotating a secret's value
+    // without editing the YAML is therefore not detected as a change.
+    const hash = hashConfig(resource);
+    const existing = state.resources[path];
+    if (existing && existing.hash === hash) {
+      changes.push({ kind: "no-change", path, resource, hash, existing });
       continue;
     }
-    const existing = state.resources[path];
-    if (!existing) {
-      changes.push({ kind: "create", path, resource, resolved, hash });
-    } else if (existing.hash !== hash) {
-      changes.push({ kind: "update", path, resource, resolved, hash, existing });
-    } else {
-      changes.push({ kind: "no-change", path, resource, resolved, hash, existing });
+    // Secrets are only needed for resources that will actually be written.
+    let resolved: Resource | undefined;
+    let error: string | undefined;
+    try {
+      resolved = resolveSecrets(resource);
+    } catch (e) {
+      error = (e as Error).message;
     }
+    changes.push({
+      kind: existing ? "update" : "create",
+      path,
+      resource,
+      resolved,
+      hash,
+      existing,
+      error,
+    });
   }
 
   for (const path of Object.keys(state.resources)) {

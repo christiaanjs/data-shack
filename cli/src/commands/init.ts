@@ -145,8 +145,11 @@ async function pullCredentials(api: ApiClient, state: State, cwd: string): Promi
     Object.assign(pulledEnv, env);
     const path = `data-sources/credentials/${slugify(cred.name)}.yaml`;
     writeYaml(resolve(cwd, path), { ...resource, config });
-    // Hash the real config: `plan` hashes the secret-resolved resource.
-    state.resources[path] = { id: cred.id, kind: "credential", hash: hashConfig(resource) };
+    state.resources[path] = {
+      id: cred.id,
+      kind: "credential",
+      hash: hashConfig({ ...resource, config }),
+    };
     console.log(pc.dim(`  + ${path}`));
   }
 }
@@ -165,7 +168,11 @@ async function pullBackends(api: ApiClient, state: State, cwd: string): Promise<
     Object.assign(pulledEnv, env);
     const path = `data-sources/backends/${slugify(b.name)}.yaml`;
     writeYaml(resolve(cwd, path), { ...resource, config });
-    state.resources[path] = { id: b.id, kind: "storage-backend", hash: hashConfig(resource) };
+    state.resources[path] = {
+      id: b.id,
+      kind: "storage-backend",
+      hash: hashConfig({ ...resource, config }),
+    };
     console.log(pc.dim(`  + ${path}`));
   }
 }

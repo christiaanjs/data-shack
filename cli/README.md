@@ -71,7 +71,7 @@ Reads all YAML files in `data-sources/`, `transforms/`, and `catalog/`, resolves
 Plan: 1 to add, 1 to change, 1 to destroy.
 ```
 
-Exits non-zero if any secret reference cannot be resolved.
+Resources are compared by the hash of the YAML as written (with `$ENV:` references unresolved), so `plan` and `apply` need **no secret env vars** when nothing secret-bearing is being created or updated. Secrets are resolved only for resources that will be written; a plan lists any that are missing, and `apply` refuses to run until they are set. Consequence: rotating a secret's *value* without editing the YAML is not detected as a change.
 
 ### `dshack apply`
 
