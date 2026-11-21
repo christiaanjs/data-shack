@@ -16,6 +16,10 @@ function parseWatches(raw: string): string[] {
 // Safe SQL identifier: must start with a letter or underscore, then alphanumeric/underscore only.
 const SAFE_TABLE_NAME = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
 
+// Bump when adding a migration step; the constructor skips migrate() once the
+// stored version matches, avoiding schema work on every DO wake-up.
+const SCHEMA_VERSION = 2;
+
 interface CommitBody {
   table: string;
   uri: string;
@@ -46,6 +50,28 @@ export class CatalogDO implements DurableObject {
     private ctx: DurableObjectState,
     private _env: Env,
   ) {
+    // Keepalive pings are answered by the runtime without waking a hibernated DO.
+    ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
+
+    // The constructor runs on every wake-up, so the common case must be a single
+    // one-row read. Schema work only happens when the stored version is behind.
+    if (this.readSchemaVersion() < SCHEMA_VERSION) {
+      this.migrate();
+    }
+  }
+
+  private readSchemaVersion(): number {
+    try {
+      const row = this.ctx.storage.sql.exec("SELECT v FROM schema_meta WHERE k = 'version'").one();
+      return row.v as number;
+    } catch {
+      // schema_meta doesn't exist yet (pre-versioning DO) or has no row.
+      return 0;
+    }
+  }
+
+  private migrate(): void {
+    const ctx = this.ctx;
     ctx.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS tables (
         id          TEXT PRIMARY KEY,
@@ -126,6 +152,47 @@ export class CatalogDO implements DurableObject {
     } catch {
       // Column already exists — nothing to do.
     }
+
+    // ── Schema v2: indexes + latest_snapshots pointer table ────────────────
+    // `snapshots` is the full history; `latest_snapshots` holds one row per table
+    // pointing at its current snapshot, so "latest per table" is O(tables) rather
+    // than a scan of the whole history.
+    ctx.storage.transactionSync(() => {
+      ctx.storage.sql.exec(`
+        CREATE INDEX IF NOT EXISTS idx_snapshots_table_created
+          ON snapshots(table_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_commits_table ON commits(table_id);
+        CREATE INDEX IF NOT EXISTS idx_triggers_job ON triggers(job_id);
+
+        CREATE TABLE IF NOT EXISTS latest_snapshots (
+          table_id    TEXT PRIMARY KEY REFERENCES tables(id),
+          snapshot_id TEXT NOT NULL REFERENCES snapshots(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS schema_meta (
+          k TEXT PRIMARY KEY,
+          v INTEGER NOT NULL
+        );
+      `);
+
+      // Backfill from history (idempotent: only fills tables with no pointer yet).
+      ctx.storage.sql.exec(`
+        INSERT OR IGNORE INTO latest_snapshots (table_id, snapshot_id)
+        SELECT t.id, (
+          SELECT s.id FROM snapshots s
+          WHERE s.table_id = t.id
+          ORDER BY s.created_at DESC
+          LIMIT 1
+        )
+        FROM tables t
+        WHERE EXISTS (SELECT 1 FROM snapshots s WHERE s.table_id = t.id)
+      `);
+
+      ctx.storage.sql.exec(
+        "INSERT OR REPLACE INTO schema_meta (k, v) VALUES ('version', ?)",
+        SCHEMA_VERSION,
+      );
+    });
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -149,7 +216,8 @@ export class CatalogDO implements DurableObject {
 
     if (request.method === "GET" && pathname.startsWith("/snapshots/")) {
       const tableRef = decodeURIComponent(pathname.slice("/snapshots/".length));
-      return this.getSnapshots(tableRef);
+      const limitParam = Number.parseInt(url.searchParams.get("limit") ?? "", 10);
+      return this.getSnapshots(tableRef, limitParam > 0 ? limitParam : null);
     }
 
     if (request.method === "POST" && pathname === "/commit") {
@@ -310,12 +378,8 @@ export class CatalogDO implements DurableObject {
            s.format,
            s.created_at  AS snap_created_at
          FROM tables t
-         LEFT JOIN snapshots s ON s.id = (
-           SELECT id FROM snapshots
-           WHERE table_id = t.id
-           ORDER BY created_at DESC
-           LIMIT 1
-         )
+         LEFT JOIN latest_snapshots l ON l.table_id = t.id
+         LEFT JOIN snapshots s ON s.id = l.snapshot_id
          WHERE t.deleted_at IS NULL
          ORDER BY t.name`,
       )
@@ -342,7 +406,7 @@ export class CatalogDO implements DurableObject {
     return Response.json({ tables });
   }
 
-  private getSnapshots(tableRef: string): Response {
+  private getSnapshots(tableRef: string, limit: number | null = null): Response {
     // Prefer an exact name match; fall back to id lookup so callers can use either.
     let tableRows = this.ctx.storage.sql
       .exec("SELECT id FROM tables WHERE name = ? AND deleted_at IS NULL", tableRef)
@@ -358,8 +422,9 @@ export class CatalogDO implements DurableObject {
     const snapshots = this.ctx.storage.sql
       .exec(
         `SELECT id, table_id, uri, storage_backend, access_mode, format, created_at
-         FROM snapshots WHERE table_id = ? ORDER BY created_at DESC`,
+         FROM snapshots WHERE table_id = ? ORDER BY created_at DESC LIMIT ?`,
         table.id,
+        limit ?? -1,
       )
       .toArray();
     return Response.json({ snapshots });
@@ -420,6 +485,14 @@ export class CatalogDO implements DurableObject {
         now,
       );
 
+      // Point the table's "latest" at the new snapshot. Done before the trigger
+      // checks below so the 'all' policy sees this commit.
+      this.ctx.storage.sql.exec(
+        "INSERT INTO latest_snapshots (table_id, snapshot_id) VALUES (?, ?) ON CONFLICT(table_id) DO UPDATE SET snapshot_id = excluded.snapshot_id",
+        resolvedId,
+        snapshotId,
+      );
+
       this.ctx.storage.sql.exec(
         "INSERT INTO commits (id, table_id, snapshot_id, committed_at, message) VALUES (?, ?, ?, ?, ?)",
         commitId,
@@ -465,13 +538,15 @@ export class CatalogDO implements DurableObject {
         .toArray();
       for (const row of allRows) {
         const baseline = (row.last_completed_at as number | null) ?? 0;
+        // A table has a snapshot newer than baseline iff its latest one does.
         const missingRow = this.ctx.storage.sql
           .exec(
-            `SELECT COUNT(*) as cnt FROM json_each(?)
-             WHERE value NOT IN (
-               SELECT tbl.name FROM snapshots s
-               JOIN tables tbl ON s.table_id = tbl.id
-               WHERE s.created_at > ?
+            `SELECT COUNT(*) as cnt FROM json_each(?) je
+             WHERE NOT EXISTS (
+               SELECT 1 FROM tables tbl
+               JOIN latest_snapshots l ON l.table_id = tbl.id
+               JOIN snapshots s ON s.id = l.snapshot_id
+               WHERE tbl.name = je.value AND s.created_at > ?
              )`,
             row.watches,
             baseline,

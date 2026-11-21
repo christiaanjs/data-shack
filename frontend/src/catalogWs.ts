@@ -98,7 +98,8 @@ export function connectCatalogWs(config: {
       hasConnectedBefore = true;
       pingInterval = setInterval(() => {
         if (socket.readyState === WebSocket.OPEN) {
-          socket.send(JSON.stringify({ type: "ping" }));
+          // Bare string: answered by the DO's runtime auto-response without waking it.
+          socket.send("ping");
         }
       }, 25_000);
     };
