@@ -11,6 +11,9 @@ import {
 import { destroyCommand } from "./commands/destroy.js";
 import { initCommand } from "./commands/init.js";
 import { planCommand } from "./commands/plan.js";
+import { enableEnvProxy } from "./lib/proxy.js";
+
+enableEnvProxy();
 
 const program = new Command();
 

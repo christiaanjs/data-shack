@@ -4,11 +4,16 @@ import yaml from "js-yaml";
 import pc from "picocolors";
 import { ApiClient } from "../lib/api.js";
 import { loadAuth } from "../lib/auth.js";
+import { normalizeText, queryFileNames, writeSidecar } from "../lib/external-files.js";
 import { hashConfig } from "../lib/hash.js";
-import { createState } from "../lib/state.js";
+import { sanitizeConfig } from "../lib/sanitize.js";
+import { createState, saveState } from "../lib/state.js";
 import type { State } from "../lib/types.js";
 
-const DIRS = ["data-sources", "transforms", "catalog"];
+// Env vars (name → real value) for secrets replaced by $ENV refs during a pull.
+const pulledEnv: Record<string, string> = {};
+
+const DIRS = ["data-sources", "transforms", "catalog", "dashboards"];
 
 interface LoadJob {
   id: string;
@@ -50,6 +55,17 @@ interface SavedQuery {
   id: string;
   name: string;
   sql: string;
+}
+
+interface DashboardRow {
+  id: string;
+  title: string;
+  slug: string | null;
+}
+
+interface DashboardDetail extends DashboardRow {
+  artifact_source: string;
+  queries: string[];
 }
 
 interface CredentialRow {
@@ -106,8 +122,19 @@ export async function initCommand(workerUrl: string, opts: { pull?: boolean }): 
   await pullLoadJobs(api, state, cwd);
   await pullTransforms(api, state, cwd);
   await pullSavedQueries(api, state, cwd);
+  await pullDashboards(api, state, cwd);
 
+  saveState(state, cwd);
   console.log(pc.green(`\n✓ Pulled ${Object.keys(state.resources).length} resources into state.`));
+  const names = Object.keys(pulledEnv).sort();
+  if (names.length > 0) {
+    console.log(
+      pc.yellow(
+        "\nSecrets were NOT written to disk. Set these env vars before `dshack plan` / `apply`:",
+      ),
+    );
+    for (const n of names) console.log(`  ${n}`);
+  }
 }
 
 async function pullCredentials(api: ApiClient, state: State, cwd: string): Promise<void> {
@@ -125,9 +152,17 @@ async function pullCredentials(api: ApiClient, state: State, cwd: string): Promi
       type: cred.type,
       config: detail.config,
     };
+    const { config, env } = sanitizeConfig(cred.name, detail.config, {
+      maskAllVariables: cred.type === "http",
+    });
+    Object.assign(pulledEnv, env);
     const path = `data-sources/credentials/${slugify(cred.name)}.yaml`;
-    writeYaml(resolve(cwd, path), resource);
-    state.resources[path] = { id: cred.id, kind: "credential", hash: hashConfig(resource) };
+    writeYaml(resolve(cwd, path), { ...resource, config });
+    state.resources[path] = {
+      id: cred.id,
+      kind: "credential",
+      hash: hashConfig({ ...resource, config }),
+    };
     console.log(pc.dim(`  + ${path}`));
   }
 }
@@ -142,9 +177,15 @@ async function pullBackends(api: ApiClient, state: State, cwd: string): Promise<
       config: Record<string, unknown>;
     }>(`/api/storage-backends/${b.id}`);
     const resource = { kind: "storage-backend", name: b.name, type: b.type, config: detail.config };
+    const { config, env } = sanitizeConfig(b.name, detail.config ?? {});
+    Object.assign(pulledEnv, env);
     const path = `data-sources/backends/${slugify(b.name)}.yaml`;
-    writeYaml(resolve(cwd, path), resource);
-    state.resources[path] = { id: b.id, kind: "storage-backend", hash: hashConfig(resource) };
+    writeYaml(resolve(cwd, path), { ...resource, config });
+    state.resources[path] = {
+      id: b.id,
+      kind: "storage-backend",
+      hash: hashConfig({ ...resource, config }),
+    };
     console.log(pc.dim(`  + ${path}`));
   }
 }
@@ -201,7 +242,7 @@ async function pullTransforms(api: ApiClient, state: State, cwd: string): Promis
       output_uri: job.output_uri,
       format: job.format ?? "ndjson",
       requires_browser: job.requires_browser === 1,
-      sql: job.sql,
+      sql: normalizeText(job.sql),
     };
     if (job.output_backend) resource.output_backend = job.output_backend;
     if (jobTriggers.length > 0) {
@@ -212,7 +253,11 @@ async function pullTransforms(api: ApiClient, state: State, cwd: string): Promis
     }
 
     const path = `transforms/${slugify(job.name ?? job.id)}.yaml`;
-    writeYaml(resolve(cwd, path), resource);
+    // The SQL lives in a sibling .sql file so editors highlight it.
+    const { sql, ...rest } = resource;
+    const sqlFile = `${slugify(job.name ?? job.id)}.sql`;
+    writeSidecar(resolve(cwd, path), sqlFile, sql as string);
+    writeYaml(resolve(cwd, path), { ...rest, sql_file: sqlFile });
     state.resources[path] = {
       id: job.id,
       kind: "transform",
@@ -226,10 +271,44 @@ async function pullTransforms(api: ApiClient, state: State, cwd: string): Promis
 async function pullSavedQueries(api: ApiClient, state: State, cwd: string): Promise<void> {
   const { queries } = await api.get<{ queries: SavedQuery[] }>("/api/saved-queries");
   for (const q of queries) {
-    const resource = { kind: "saved-query", name: q.name, sql: q.sql };
+    const resource = { kind: "saved-query", name: q.name, sql: normalizeText(q.sql) };
     const path = `catalog/${slugify(q.name)}.yaml`;
-    writeYaml(resolve(cwd, path), resource);
+    const sqlFile = `${slugify(q.name)}.sql`;
+    writeSidecar(resolve(cwd, path), sqlFile, resource.sql);
+    writeYaml(resolve(cwd, path), { kind: resource.kind, name: resource.name, sql_file: sqlFile });
     state.resources[path] = { id: q.id, kind: "saved-query", hash: hashConfig(resource) };
+    console.log(pc.dim(`  + ${path}`));
+  }
+}
+
+async function pullDashboards(api: ApiClient, state: State, cwd: string): Promise<void> {
+  const { dashboards } = await api.get<{ dashboards: DashboardRow[] }>("/api/dashboards");
+  for (const d of dashboards) {
+    const detail = await api.get<DashboardDetail>(`/api/dashboards/${d.id}`);
+    const dir = `dashboards/${slugify(detail.slug ?? detail.title) || detail.id}`;
+    const path = `${dir}/dashboard.yaml`;
+    const queries = detail.queries.map(normalizeText);
+    const resource = {
+      kind: "dashboard",
+      title: detail.title,
+      slug: detail.slug,
+      artifact_source: normalizeText(detail.artifact_source),
+      queries,
+    };
+    const abs = resolve(cwd, path);
+    // Dashboard code is JSX (React + Recharts), queries are SQL — both get their own files.
+    writeSidecar(abs, "artifact.jsx", resource.artifact_source);
+    // Named by a leading `-- name: x` comment when present, else derived from the SQL.
+    const queryFiles = queryFileNames(queries);
+    queries.forEach((q, i) => writeSidecar(abs, queryFiles[i] as string, q));
+    writeYaml(abs, {
+      kind: "dashboard",
+      title: detail.title,
+      slug: detail.slug,
+      artifact_file: "artifact.jsx",
+      query_files: queryFiles,
+    });
+    state.resources[path] = { id: detail.id, kind: "dashboard", hash: hashConfig(resource) };
     console.log(pc.dim(`  + ${path}`));
   }
 }

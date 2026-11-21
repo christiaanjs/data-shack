@@ -12,14 +12,8 @@ export function planCommand(): void {
   const updates = changes.filter((c) => c.kind === "update");
   const deletes = changes.filter((c) => c.kind === "delete");
   const unchanged = changes.filter((c) => c.kind === "no-change");
+  // Unresolved secrets only block `apply`; a plan is still meaningful without them.
   const errors = changes.filter((c) => c.error);
-
-  if (errors.length > 0) {
-    for (const e of errors) {
-      console.error(pc.red(`! ${e.path}: ${e.error}`));
-    }
-    process.exit(1);
-  }
 
   if (creates.length === 0 && updates.length === 0 && deletes.length === 0) {
     console.log(pc.green("✓ No changes — infrastructure is up to date."));
@@ -44,4 +38,7 @@ export function planCommand(): void {
     `\nPlan: ${pc.green(`${creates.length} to add`)}, ${pc.yellow(`${updates.length} to change`)}, ${pc.red(`${deletes.length} to destroy`)}.`,
   );
   if (unchanged.length > 0) console.log(pc.dim(`(${unchanged.length} unchanged)`));
+  for (const e of errors) {
+    console.log(pc.yellow(`! ${e.path}: ${e.error} (required to apply)`));
+  }
 }

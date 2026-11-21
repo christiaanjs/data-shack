@@ -53,7 +53,11 @@ transforms/           ← transform jobs (with triggers)
 catalog/              ← saved queries
 ```
 
-Pass `--pull` to fetch all existing resources from the API and write them as YAML files. Useful for bootstrapping IaC on top of a pre-existing deployment.
+Pass `--pull` to fetch all existing resources from the API and write them as YAML files, and record them in `.dshack/state.json` so an immediate `plan` shows no changes. Useful for bootstrapping IaC on top of a pre-existing deployment.
+
+Secret values (http credential `variables`, and any config key containing `secret`, `token`, `password` or `key`) are **never written to disk**: they are replaced with `$ENV:NAME` references and the required variable names are printed. Export them before running `plan`/`apply`.
+
+**Proxies:** the CLI honours `HTTPS_PROXY`/`HTTP_PROXY`/`NO_PROXY` (Node's built-in fetch does not).
 
 ### `dshack plan`
 
@@ -67,7 +71,7 @@ Reads all YAML files in `data-sources/`, `transforms/`, and `catalog/`, resolves
 Plan: 1 to add, 1 to change, 1 to destroy.
 ```
 
-Exits non-zero if any secret reference cannot be resolved.
+Resources are compared by the hash of the YAML as written (with `$ENV:` references unresolved), so `plan` and `apply` need **no secret env vars** when nothing secret-bearing is being created or updated. Secrets are resolved only for resources that will be written; a plan lists any that are missing, and `apply` refuses to run until they are set. Consequence: rotating a secret's *value* without editing the YAML is not detected as a change.
 
 ### `dshack apply`
 
@@ -99,11 +103,27 @@ my-warehouse/
 │       └── transactions.yaml
 ├── transforms/
 │   └── enriched-sales.yaml
-└── catalog/
-    └── monthly-summary.yaml
+├── catalog/
+│   ├── monthly-summary.yaml
+│   └── monthly-summary.sql     ← SQL lives in its own file (see below)
+└── dashboards/
+    └── spending/
+        ├── dashboard.yaml
+        ├── artifact.jsx        ← React + Recharts component
+        └── monthly-totals.sql
 ```
 
-Subdirectory layout is up to you — all `.yaml` / `.yml` files under the three top-level directories are discovered recursively.
+Subdirectory layout is up to you — all `.yaml` / `.yml` files under the four top-level directories are discovered recursively.
+
+## SQL and JSX in their own files
+
+So editors can highlight them, long text fields can live next to the YAML instead of inside it. A `*_file` field replaces the inline field; paths are relative to the YAML file. `init --pull` writes this layout. Inline `sql:` / `queries:` still work, and a resource hashes the same either way. Trailing whitespace is ignored, and a missing referenced file is an error.
+
+| Kind | Inline field | File field | Extension |
+|---|---|---|---|
+| `transform`, `saved-query` | `sql` | `sql_file` | `.sql` |
+| `dashboard` | `artifact_source` | `artifact_file` | `.jsx` |
+| `dashboard` | `queries` | `query_files` (list) | `.sql` |
 
 ## Secret references
 
@@ -182,10 +202,7 @@ output_table: enriched_transactions
 output_uri: r2://main-r2/data/enriched/transactions.ndjson
 format: ndjson
 requires_browser: true          # default: true — runs SQL in DuckDB via browser session
-sql: |
-  SELECT t.*, c.name AS category_name
-  FROM transactions t
-  JOIN categories c ON t.category_id = c.id
+sql_file: enriched-transactions.sql   # or inline: sql: |
 triggers:
   - watches: [transactions, categories]
     policy: all        # fire only when both tables have new snapshots
@@ -200,14 +217,24 @@ Maps to `POST /api/saved-queries`.
 ```yaml
 kind: saved-query
 name: monthly-revenue
-sql: |
-  SELECT
-    strftime('%Y-%m', created_at / 1000, 'unixepoch') AS month,
-    SUM(amount) / 100.0 AS revenue_usd
-  FROM transactions
-  GROUP BY month
-  ORDER BY month DESC
+sql_file: monthly-revenue.sql
 ```
+
+### `kind: dashboard`
+
+Maps to `/api/dashboards`. `queries[i]` is passed to the component as `data[i]`. `slug` is optional (derived from the title on create; omit it on update to keep the current one).
+
+```yaml
+kind: dashboard
+title: Spending
+slug: spending
+artifact_file: artifact.jsx    # React component, default export, Recharts available
+query_files:
+  - monthly-totals.sql
+  - by-category.sql
+```
+
+The API has no query names (the artifact reads `data[i]` by position), so a query can name itself with a leading `-- name: monthly-totals` comment. It is part of the SQL, so it survives the round-trip. `init --pull` names each file after that marker, else after the query's main `FROM` table, else `query-N` — it never edits the SQL. The order of `query_files` sets the index.
 
 ## State file
 

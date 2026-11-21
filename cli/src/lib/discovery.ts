@@ -1,9 +1,10 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { extname, relative, resolve } from "node:path";
 import yaml from "js-yaml";
+import { inlineExternalFiles } from "./external-files.js";
 import type { Resource } from "./types.js";
 
-const RESOURCE_DIRS = ["data-sources", "transforms", "catalog"];
+const RESOURCE_DIRS = ["data-sources", "transforms", "catalog", "dashboards"];
 
 export interface ResourceFile {
   path: string;
@@ -31,13 +32,17 @@ function walk(dir: string, out: ResourceFile[], cwd: string): void {
     if (entry.isDirectory()) {
       walk(full, out, cwd);
     } else if (entry.isFile() && [".yaml", ".yml"].includes(extname(entry.name))) {
+      let parsed: Record<string, unknown> | undefined;
       try {
-        const parsed = yaml.load(readFileSync(full, "utf8")) as Record<string, unknown>;
-        if (parsed && typeof parsed.kind === "string") {
-          out.push({ path: relative(cwd, full), resource: parsed as unknown as Resource });
-        }
+        parsed = yaml.load(readFileSync(full, "utf8")) as Record<string, unknown>;
       } catch {
         // skip unparseable files
+      }
+      if (parsed && typeof parsed.kind === "string") {
+        // Missing/ambiguous file references throw rather than skip: skipping would
+        // make a tracked resource look deleted.
+        const inlined = inlineExternalFiles(parsed, full);
+        out.push({ path: relative(cwd, full), resource: inlined as unknown as Resource });
       }
     }
   }

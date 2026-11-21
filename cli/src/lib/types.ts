@@ -3,7 +3,8 @@ export type ResourceKind =
   | "storage-backend"
   | "load-job"
   | "transform"
-  | "saved-query";
+  | "saved-query"
+  | "dashboard";
 
 export interface CredentialResource {
   kind: "credential";
@@ -60,12 +61,21 @@ export interface SavedQueryResource {
   sql: string;
 }
 
+export interface DashboardResource {
+  kind: "dashboard";
+  title: string;
+  slug?: string | null;
+  artifact_source: string;
+  queries: string[];
+}
+
 export type Resource =
   | CredentialResource
   | StorageBackendResource
   | LoadJobResource
   | TransformResource
-  | SavedQueryResource;
+  | SavedQueryResource
+  | DashboardResource;
 
 export interface StateEntry {
   id: string;

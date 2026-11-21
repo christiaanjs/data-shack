@@ -1,6 +1,7 @@
 import type { ApiClient } from "./api.js";
 import type {
   CredentialResource,
+  DashboardResource,
   LoadJobResource,
   Resource,
   SavedQueryResource,
@@ -46,6 +47,8 @@ export async function createResource(
       return createTransform(api, resource);
     case "saved-query":
       return createSavedQuery(api, resource);
+    case "dashboard":
+      return createDashboard(api, resource);
   }
 }
 
@@ -68,6 +71,8 @@ export async function updateResource(
       // no PATCH endpoint — delete + recreate
       await api.delete(`/api/saved-queries/${existing.id}`);
       return createSavedQuery(api, resource);
+    case "dashboard":
+      return updateDashboard(api, resource, existing);
   }
 }
 
@@ -92,6 +97,9 @@ export async function deleteResource(api: ApiClient, existing: StateEntry): Prom
       break;
     case "saved-query":
       await api.delete(`/api/saved-queries/${existing.id}`);
+      break;
+    case "dashboard":
+      await api.delete(`/api/dashboards/${existing.id}`);
       break;
   }
 }
@@ -280,4 +288,30 @@ async function createSavedQuery(api: ApiClient, r: SavedQueryResource): Promise<
     sql: r.sql,
   });
   return { id: data.query.id, kind: "saved-query", hash: "" };
+}
+
+// ── Dashboards ─────────────────────────────────────────────────────────────
+
+async function createDashboard(api: ApiClient, r: DashboardResource): Promise<StateEntry> {
+  const data = await api.post<{ id: string }>("/api/dashboards", {
+    title: r.title,
+    ...(r.slug !== undefined ? { slug: r.slug } : {}),
+    artifact_source: r.artifact_source,
+    queries: r.queries,
+  });
+  return { id: data.id, kind: "dashboard", hash: "" };
+}
+
+async function updateDashboard(
+  api: ApiClient,
+  r: DashboardResource,
+  existing: StateEntry,
+): Promise<StateEntry> {
+  await api.patch(`/api/dashboards/${existing.id}`, {
+    title: r.title,
+    ...(r.slug !== undefined ? { slug: r.slug } : {}),
+    artifact_source: r.artifact_source,
+    queries: r.queries,
+  });
+  return { ...existing };
 }
