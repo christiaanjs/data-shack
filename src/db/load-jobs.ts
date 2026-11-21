@@ -223,6 +223,25 @@ export async function deleteLoadJob(db: D1Database, userId: string, id: string):
   return (result.meta.changes ?? 0) > 0;
 }
 
+export async function setLoadJobEnabled(
+  db: D1Database,
+  userId: string,
+  id: string,
+  enabled: boolean,
+): Promise<LoadJob | null> {
+  const result = await db
+    .prepare("UPDATE load_jobs SET enabled = ?, updated_at = ? WHERE id = ? AND user_id = ?")
+    .bind(enabled ? 1 : 0, Date.now(), id, userId)
+    .run();
+  if ((result.meta.changes ?? 0) === 0) return null;
+  return (
+    (await db
+      .prepare("SELECT * FROM load_jobs WHERE id = ? AND user_id = ?")
+      .bind(id, userId)
+      .first<LoadJob>()) ?? null
+  );
+}
+
 export async function advanceNextRunAt(
   db: D1Database,
   id: string,

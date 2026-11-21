@@ -576,8 +576,10 @@ app.get("/catalog/ws", async (c) => {
 
 app.get("/catalog/snapshots/:table", requireAuth, async (c) => {
   const table = c.req.param("table");
+  const limit = c.req.query("limit");
+  const qs = limit ? `?limit=${encodeURIComponent(limit)}` : "";
   const res = await catalogStub(c.env, c.get("userId")).fetch(
-    `http://do/snapshots/${encodeURIComponent(table)}`,
+    `http://do/snapshots/${encodeURIComponent(table)}${qs}`,
   );
   return new Response(res.body, { status: res.status, headers: res.headers });
 });
