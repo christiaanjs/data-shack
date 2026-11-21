@@ -45,9 +45,9 @@ export async function authLogin(workerUrl: string): Promise<void> {
       const error = url.searchParams.get("error");
 
       res
-        .writeHead(200, { "Content-Type": "text/html" })
+        .writeHead(200, { "Content-Type": "text/html; charset=utf-8" })
         .end(
-          "<html><body><h2>Authentication complete — you may close this tab.</h2></body></html>",
+          '<html><head><meta charset="utf-8"></head><body><h2>Authentication complete — you may close this tab.</h2></body></html>',
         );
       server.close();
 
