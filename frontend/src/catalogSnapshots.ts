@@ -26,6 +26,34 @@ const knownBackends = new Set<string>();
 const sqlString = (s: string) => `'${s.replaceAll("'", "''")}'`;
 const sqlNullable = (s: string | null) => (s === null ? "NULL" : sqlString(s));
 
+// Names that always resolve to the Worker's bound R2 bucket.
+const BUILT_IN_BACKENDS = ["r2-bound", "data-shack"];
+
+/** Names and ids of the user's current storage backends, or null if the lookup fails. */
+async function fetchReadableBackends(
+  workerBase: string,
+  getAuthHeaders: () => Promise<Record<string, string>>,
+): Promise<Set<string> | null> {
+  try {
+    const res = await fetch(`${workerBase}/api/storage-backends`, {
+      headers: await getAuthHeaders(),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as
+      | { backends?: Array<{ id: string; name: string }> }
+      | Array<{ id: string; name: string }>;
+    const list = Array.isArray(data) ? data : (data.backends ?? []);
+    const set = new Set<string>(BUILT_IN_BACKENDS);
+    for (const b of list) {
+      set.add(b.id);
+      set.add(b.name);
+    }
+    return set;
+  } catch {
+    return null;
+  }
+}
+
 /** Replaces the catalog_snapshots table with the catalog's current full history. */
 export async function loadCatalogSnapshots(
   db: AsyncDuckDB,
@@ -39,7 +67,8 @@ export async function loadCatalogSnapshots(
   const { snapshots } = (await res.json()) as {
     snapshots: Array<SnapshotInput & { table_name: string }>;
   };
-  const rows = snapshots.map((s) => toSnapshotRow(s.table_name, s));
+  const readable = await fetchReadableBackends(workerBase, getAuthHeaders);
+  const rows = snapshots.map((s) => toSnapshotRow(s.table_name, s, readable));
 
   await runQuery(db, DDL);
   knownBackends.clear();
@@ -84,8 +113,13 @@ export async function catalogSecrets(
 ): Promise<string[]> {
   const secrets: string[] = [];
   for (const backend of knownBackends) {
-    const cred = await acquireProxyCred(backend, "", workerBase, getAuthHeaders);
-    secrets.push(buildS3Secret(cred));
+    try {
+      const cred = await acquireProxyCred(backend, "", workerBase, getAuthHeaders);
+      secrets.push(buildS3Secret(cred));
+    } catch (err) {
+      // One unresolvable backend must not break every query that mentions catalog_snapshots.
+      console.warn(`[catalog] no credential for backend '${backend}'`, err);
+    }
   }
   return secrets;
 }

@@ -37,6 +37,19 @@ describe("toSnapshotRow", () => {
     expect(f("r2://b/x.json")).toBe("json");
   });
 
+  it("nulls url/backend when the backend is not in the readable set", () => {
+    const snap = { id: "s", uri: "r2://gone-backend/raw/a.json", format: "json", created_at: 1 };
+    const readable = new Set(["my-backend"]);
+    expect(toSnapshotRow("t", snap, readable)).toMatchObject({ url: null, backend: null });
+    expect(
+      toSnapshotRow("t", { ...snap, uri: "r2://my-backend/raw/a.json" }, readable),
+    ).toMatchObject({
+      url: "s3://my-backend/raw/a.json",
+    });
+    // No readable set (backend lookup failed) -> no filtering.
+    expect(toSnapshotRow("t", snap, null).url).toBe("s3://gone-backend/raw/a.json");
+  });
+
   it("leaves url/backend null for schemes DuckDB cannot read directly", () => {
     const r = toSnapshotRow("t", {
       id: "s",

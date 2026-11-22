@@ -26,14 +26,24 @@ function inferFormat(uri: string): string {
   return "json";
 }
 
-export function toSnapshotRow(tableName: string, s: SnapshotInput): SnapshotRow {
+/**
+ * `readable` (optional) is the set of backend names/ids that currently resolve.
+ * Snapshots on a backend outside it (deleted/renamed since) get url = NULL so SQL
+ * can skip them with `WHERE url IS NOT NULL`.
+ */
+export function toSnapshotRow(
+  tableName: string,
+  s: SnapshotInput,
+  readable?: Set<string> | null,
+): SnapshotRow {
   const parsed = parseStorageUri(s.uri);
+  const ok = parsed !== null && (!readable || readable.has(parsed.backend));
   return {
     table_name: tableName,
     snapshot_id: s.id,
     uri: s.uri,
-    url: parsed ? `s3://${parsed.backend}/${parsed.key}` : null,
-    backend: parsed ? parsed.backend : null,
+    url: parsed && ok ? `s3://${parsed.backend}/${parsed.key}` : null,
+    backend: parsed && ok ? parsed.backend : null,
     format: s.format ?? inferFormat(s.uri),
     created_ms: Math.trunc(s.created_at),
   };
