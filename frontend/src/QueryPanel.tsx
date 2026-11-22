@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "preact/hooks";
 import type { CatalogTableWithSnapshot } from "./catalogViews.ts";
 import { initDuckDB, runQuery } from "./duckdb.ts";
-import { resolveStorageUris } from "./resolveQuery.ts";
+import { resolveQuerySql } from "./resolveQuery.ts";
 
 interface QueryPanelProps {
   workerBase: string;
@@ -103,11 +103,11 @@ export function QueryPanel({
 
     try {
       const db = await initDuckDB();
-      const { sql: resolvedSql, preamble } = await resolveStorageUris(
-        rawSql,
+      const { sql: resolvedSql, preamble } = await resolveQuerySql(rawSql, {
+        db,
         workerBase,
         getAuthHeaders,
-      );
+      });
       const result = await runQuery(db, resolvedSql, preamble.length > 0 ? preamble : undefined);
       setQueryResult(result);
     } catch (err) {

@@ -25,7 +25,7 @@ Requires: `wrangler` (or npx), `openssl`, `jq`.
 **Always run all three checks before every commit** — CI enforces the same checks and will fail otherwise:
 
 ```bash
-npm test          # 282 vitest tests across 10 test files via @cloudflare/vitest-pool-workers
+npm test          # 320 vitest tests across 14 test files via @cloudflare/vitest-pool-workers
 npm run typecheck # tsc for worker + tsc -p test/tsconfig.json
 npm run lint      # biome check . (lint + format + import order)
 ```
@@ -129,6 +129,7 @@ Single-file auth client in `frontend/src/auth.ts` — handles DCR (Dynamic Clien
 - `frontend/src/wbIcons.tsx` — lucide-preact icon wrappers with `strokeWidth=1.6` baked in; single source for all workbench icons.
 - `frontend/src/workbench-types.ts` — `WbTab`, `WbCtx`, `WbData`, `WbTransform`, `WbJob`, `WbDashboard`, `WbCredential`, `WbBackend`, `WbTransform`, `QueryResult`, `LogEntry`, `HistoryEntry`, `SavedQuery`.
 - `frontend/src/resolveQuery.ts` — `resolveStorageUris()` scans SQL for `r2://` and `http-ds://` URIs and prepends `CREATE OR REPLACE SECRET` preamble statements before execution.
+- `frontend/src/historySql.ts` + `resolveQuerySql()` in `resolveQuery.ts` — catalog **history** access from any SQL run in the browser (transforms, workbench, MCP `run_query`). `history('table' [, since => <ts>] [, sample_hours => N])` expands to a relation over every snapshot (adds `_snapshot_id`, `_snapshot_at`); `{{watermark('table','col')}}` expands to `epoch_ms(max(col))` of that table (0 if absent); `{{existing('table','fallback_cte')}}` materialises the table's previous contents into a per-connection temp table (so a COPY may overwrite its own source) or an empty relation shaped like the fallback CTE if the table doesn't exist yet. `since` is inclusive, so incremental merges must be idempotent. Pure helpers are unit-tested in `test/history-sql.test.ts`; the I/O half (catalog fetch, proxy creds, temp-table preamble) has no automated tests. Only json/ndjson/parquet single-file snapshots are supported (no globs/http-ds).
 - `frontend/src/cmTheme.ts` — CodeMirror editor theme matching the workbench dark/light palette.
 - `frontend/src/dashboardUtils.ts` — `buildIframeHtml()` assembles the sandboxed iframe `srcdoc` (React 18 + Babel + Recharts boilerplate with the user artifact injected).
 

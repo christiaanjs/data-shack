@@ -11,7 +11,7 @@ import {
 } from "./catalogViews.ts";
 import { type CatalogCommitEvent, type CatalogConnection, connectCatalogWs } from "./catalogWs.ts";
 import { initDuckDB, runQuery } from "./duckdb.ts";
-import { resolveStorageUris } from "./resolveQuery.ts";
+import { resolveQuerySql } from "./resolveQuery.ts";
 import { type JobEvent, type SessionConnection, connectSession } from "./sessionWs.ts";
 import {
   ChartIcon,
@@ -598,11 +598,11 @@ export function WorkbenchShell() {
 
       try {
         const db = await initDuckDB();
-        const { sql: resolvedSql, preamble } = await resolveStorageUris(
-          sqlText,
-          WORKER_BASE,
+        const { sql: resolvedSql, preamble } = await resolveQuerySql(sqlText, {
+          db,
+          workerBase: WORKER_BASE,
           getAuthHeaders,
-        );
+        });
         const t0 = Date.now();
         const raw = await runQuery(db, resolvedSql, preamble.length > 0 ? preamble : undefined);
         const ms = Date.now() - t0;
