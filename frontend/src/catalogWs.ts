@@ -8,6 +8,8 @@ export interface CatalogCommitEvent {
   storage_backend: string;
   access_mode: string;
   format: string | null;
+  /** Server-side snapshot creation time (ms); absent from older workers. */
+  createdAt?: number;
 }
 
 export interface CatalogConnection {
@@ -121,6 +123,7 @@ export function connectCatalogWs(config: {
         storage_backend: msg.storage_backend as string,
         access_mode: msg.access_mode as string,
         format: (msg.format as string | null) ?? null,
+        createdAt: typeof msg.createdAt === "number" ? msg.createdAt : undefined,
       };
 
       const snapshot: CatalogSnapshot = {
@@ -130,7 +133,7 @@ export function connectCatalogWs(config: {
         storage_backend: commitEvent.storage_backend,
         access_mode: commitEvent.access_mode,
         format: commitEvent.format,
-        created_at: Date.now(),
+        created_at: commitEvent.createdAt ?? Date.now(),
       };
 
       // Capture the catalog-ready barrier NOW, before the caller folds this

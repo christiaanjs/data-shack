@@ -1,6 +1,6 @@
 import type { AsyncDuckDB } from "@duckdb/duckdb-wasm";
 import { runQuery } from "./duckdb.ts";
-import { resolveQuerySql } from "./resolveQuery.ts";
+import { resolveStorageUris } from "./resolveQuery.ts";
 
 export type JobEvent =
   | { jobId: string; status: "running" }
@@ -172,7 +172,7 @@ async function handleQuery(
   try {
     const db = await getDb();
     console.log("[sessionWs] handleQuery: db ready");
-    const { sql, preamble } = await resolveQuerySql(msg.sql, { db, workerBase, getAuthHeaders });
+    const { sql, preamble } = await resolveStorageUris(msg.sql, workerBase, getAuthHeaders);
     console.log("[sessionWs] handleQuery: URIs resolved, running query");
     const result = await runQuery(db, sql, preamble.length > 0 ? preamble : undefined);
     console.log("[sessionWs] handleQuery: query done, sending result");
@@ -226,7 +226,7 @@ async function handleTransformJob(
 
   const runOnce = async () => {
     const db = await getDb();
-    const { sql, preamble } = await resolveQuerySql(msg.sql, { db, workerBase, getAuthHeaders });
+    const { sql, preamble } = await resolveStorageUris(msg.sql, workerBase, getAuthHeaders);
     await runQuery(db, sql, preamble.length > 0 ? preamble : undefined);
   };
 
