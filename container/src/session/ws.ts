@@ -21,6 +21,8 @@ type ServerMessage =
       outputBackend: string;
       format?: string | null;
     }
+  | { type: "job_accepted"; jobId: string }
+  | { type: "job_rejected"; jobId: string }
   | { type: "job_status"; jobId: string; status: "running" | "done" | "failed"; error?: string };
 
 // Matches DuckDB errors from a catalog view that hasn't been (re)created yet.
@@ -28,6 +30,10 @@ function isStaleCatalogError(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err);
   return /catalog error|does not exist|not found/i.test(message);
 }
+
+// How long to wait for the Session DO to accept/reject a job claim before
+// running anyway (an older DO never answers).
+const CLAIM_ACK_TIMEOUT_MS = 10_000;
 
 export function connectSession(config: {
   workerBase: string;
@@ -38,6 +44,25 @@ export function connectSession(config: {
 }): PersistentWs {
   const { workerBase, tokenProvider, engine, getCatalogReady } = config;
   const getAuthHeaders = () => tokenProvider.getAuthHeaders();
+
+  // Claim acks from the Session DO, keyed by jobId. Resolves true if the claim
+  // was accepted (or never answered), false if another socket already owns it.
+  const pendingClaims = new Map<string, (accepted: boolean) => void>();
+
+  function claimJob(ws: WebSocket, jobId: string): Promise<boolean> {
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        pendingClaims.delete(jobId);
+        resolve(true);
+      }, CLAIM_ACK_TIMEOUT_MS);
+      pendingClaims.set(jobId, (accepted) => {
+        clearTimeout(timer);
+        pendingClaims.delete(jobId);
+        resolve(accepted);
+      });
+      ws.send(JSON.stringify({ type: "job_claimed", jobId }));
+    });
+  }
 
   async function handleQuery(ws: WebSocket, msg: { queryId: string; sql: string }): Promise<void> {
     logger.info(`query ${msg.queryId} start`);
@@ -64,7 +89,10 @@ export function connectSession(config: {
     ws: WebSocket,
     msg: { jobId: string; sql: string },
   ): Promise<void> {
-    ws.send(JSON.stringify({ type: "job_claimed", jobId: msg.jobId }));
+    if (!(await claimJob(ws, msg.jobId))) {
+      logger.info(`job ${msg.jobId} already claimed elsewhere — skipping`);
+      return;
+    }
 
     const runOnce = async () => {
       const { sql, preamble } = await resolveStorageUris(msg.sql, workerBase, getAuthHeaders);
@@ -107,7 +135,9 @@ export function connectSession(config: {
             return;
           }
 
-          if (msg.type === "query") {
+          if (msg.type === "job_accepted" || msg.type === "job_rejected") {
+            pendingClaims.get(msg.jobId)?.(msg.type === "job_accepted");
+          } else if (msg.type === "query") {
             await handleQuery(ws, msg);
           } else if (msg.type === "transform_job") {
             await handleTransformJob(ws, msg);
