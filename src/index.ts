@@ -545,6 +545,11 @@ app.get("/catalog/snapshots-latest", requireAuth, async (c) => {
   return new Response(res.body, { status: res.status, headers: res.headers });
 });
 
+app.get("/catalog/snapshots-all", requireAuth, async (c) => {
+  const res = await catalogStub(c.env, c.get("userId")).fetch("http://do/snapshots-all");
+  return new Response(res.body, { status: res.status, headers: res.headers });
+});
+
 // Catalog WebSocket — auth-gated upgrade forwarded to the Catalog DO.
 app.get("/catalog/ws", async (c) => {
   if (c.req.header("Upgrade") !== "websocket") {

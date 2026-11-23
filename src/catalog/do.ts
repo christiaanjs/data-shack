@@ -214,6 +214,10 @@ export class CatalogDO implements DurableObject {
       return this.getSnapshotsLatest();
     }
 
+    if (request.method === "GET" && pathname === "/snapshots-all") {
+      return this.getSnapshotsAll();
+    }
+
     if (request.method === "GET" && pathname.startsWith("/snapshots/")) {
       const tableRef = decodeURIComponent(pathname.slice("/snapshots/".length));
       const limitParam = Number.parseInt(url.searchParams.get("limit") ?? "", 10);
@@ -361,6 +365,20 @@ export class CatalogDO implements DurableObject {
       )
       .toArray();
     return Response.json({ tables: rows });
+  }
+
+  /** Every snapshot of every live table (full history), oldest first. */
+  private getSnapshotsAll(): Response {
+    const snapshots = this.ctx.storage.sql
+      .exec(
+        `SELECT t.name AS table_name, s.id, s.uri, s.storage_backend, s.access_mode, s.format, s.created_at
+         FROM snapshots s
+         JOIN tables t ON t.id = s.table_id
+         WHERE t.deleted_at IS NULL
+         ORDER BY s.created_at, s.id`,
+      )
+      .toArray();
+    return Response.json({ snapshots });
   }
 
   private getSnapshotsLatest(): Response {
@@ -574,6 +592,7 @@ export class CatalogDO implements DurableObject {
       storage_backend: storageBackend,
       access_mode: accessMode,
       format: format ?? null,
+      createdAt: now,
     });
     for (const ws of this.ctx.getWebSockets()) {
       try {

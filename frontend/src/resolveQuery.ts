@@ -1,3 +1,4 @@
+import { catalogSecrets } from "./catalogSnapshots.ts";
 import { acquireProxyCred, buildS3Secret, parseStorageUri } from "./storage.ts";
 
 // Matches all storage URIs in SQL text
@@ -20,8 +21,13 @@ export async function resolveStorageUris(
 ): Promise<ResolvedQuery> {
   const allUris = Array.from(new Set(rawSql.match(STORAGE_URI_REGEX) ?? []));
 
+  // SQL that reads catalog_snapshots.url needs S3 secrets for every backend those URLs use.
+  const catalogPreamble = /\bcatalog_snapshots\b/i.test(rawSql)
+    ? await catalogSecrets(workerBase, getAuthHeaders)
+    : [];
+
   if (allUris.length === 0) {
-    return { sql: rawSql, preamble: [] };
+    return { sql: rawSql, preamble: catalogPreamble };
   }
 
   const s3Uris = allUris.filter((u) => !u.startsWith("http-ds://"));
@@ -73,5 +79,5 @@ export async function resolveStorageUris(
     }
   }
 
-  return { sql, preamble: [...secretsByBackend.values()] };
+  return { sql, preamble: [...new Set([...secretsByBackend.values(), ...catalogPreamble])] };
 }
