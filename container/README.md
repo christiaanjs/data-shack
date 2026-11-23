@@ -147,6 +147,22 @@ The image pre-caches the DuckDB `httpfs` extension at build time
 access to `extensions.duckdb.org` — only to your Worker's origin and the
 storage backends it proxies to.
 
+## CI
+
+`.github/workflows/container-build.yml` builds this Dockerfile on every push
+to `main` and every pull request that touches `container/**`, so a broken
+image is caught before merge instead of at deploy time. For a push to `main`
+or a same-repo PR, the built image is also pushed to
+`ghcr.io/<owner>/data-shack/session-container`, tagged `main`, `pr-<number>`,
+and `sha-<short-sha>` — never `latest`, so nothing here can be mistaken for
+a production build off master. A PR from a fork still builds (skips the
+push, since forked PRs get a read-only `GITHUB_TOKEN`). This is independent
+of the Cloudflare Containers deploy path: `wrangler.toml`'s `[[containers]]`
+block points `image` at this directory's `Dockerfile` directly, so
+`wrangler deploy` builds and pushes its own copy to Cloudflare's registry —
+this workflow's GHCR image is for CI validation and manual pulls/testing,
+not something the Worker deploy currently reads from.
+
 ## Deploying
 
 See [`deploy/README.md`](./deploy/README.md) for a comparison of hosting
