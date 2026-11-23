@@ -149,8 +149,8 @@ Single-file auth client in `frontend/src/auth.ts` — handles DCR (Dynamic Clien
 
 In the "Data shack" cloud environment the `dshack` CLI (`cli/`) is pre-built and linked by the environment's setup script, and is already authenticated against **staging** (`https://data-shack-staging.grocery-store.workers.dev`). Just run `dshack plan` / `dshack apply` from a workspace directory — no login needed.
 
-- `DS_WORKER_URL` and `DS_TOKEN=proxy-injected` are set as environment variables. `DS_TOKEN` is only a placeholder: the real `dsk_` API token is a network secret, and the session proxy overwrites the `Authorization` header on requests to the staging host. Never look for, print or ask for the real token.
-- Check with `dshack auth status` (shows the worker URL) or `curl -H "Authorization: Bearer proxy-injected" $DS_WORKER_URL/me` (should return a `userId`).
+- `DS_WORKER_URL` and `DS_TOKEN` are set as environment variables. `DS_TOKEN` is a real `dsk_` API token (not a proxy placeholder), so it also works where the proxy can't help — notably the WebSocket handshake, which carries the token in `Sec-WebSocket-Protocol`, not the `Authorization` header (e.g. `container/` with `AUTH_MODE=token API_TOKEN=$DS_TOKEN`). Never print the value; to check it, show only its prefix (`${DS_TOKEN:0:4}` should be `dsk_`).
+- Check with `dshack auth status` (shows the worker URL) or `curl -H "Authorization: Bearer $DS_TOKEN" $DS_WORKER_URL/me` (should return a `userId`).
 - If `dshack` is not found, the setup script didn't run (branch has no `cli/`, or session predates it): `cd cli && npm ci && npm run build && npm link`.
 - If requests return 401, the token was revoked/expired — ask the user to create a new one (`dshack auth create-token <name>`) and update the network secret. Production is not configured; don't point the CLI at it without asking.
 - Resource secrets referenced in YAML (`$ENV:NAME`) are resolved inside the container, so they need real environment variables — the network secret doesn't cover them.
