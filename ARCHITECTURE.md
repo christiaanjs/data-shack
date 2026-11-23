@@ -12,6 +12,7 @@ flowchart TB
         ROUTES["Route handlers\n(REST · OAuth · MCP)"]
         SCHED["scheduled() — cron"]
         QUEUE_C["queue() — consumer"]
+        PROXY["S3-compatible storage proxy\n/api/storage/s3proxy\nresolves r2://backend/key → backend"]
     end
 
     subgraph DOs["Durable Objects"]
@@ -21,9 +22,13 @@ flowchart TB
 
     subgraph Storage["Storage"]
         D1[("D1")]
-        R2[("R2")]
-        KV[("KV")]
+        KV[("KV\nproxy credentials")]
         Q(["Queues"])
+    end
+
+    subgraph Backends["Storage backends (pluggable, chosen per request)"]
+        R2[("R2 bucket — r2-bound\nWorker binding")]
+        S3X[("External S3-compatible — r2-s3compat\nre-signed SigV4 request")]
     end
 
     MCP_CLIENT["MCP Client\n(e.g. Claude)"]
@@ -40,10 +45,14 @@ flowchart TB
     SPA -- "catalog WS" --> CATALOG
     SPA -- "session WS" --> SESSION
 
-    %% DuckDB ↔ Storage via proxy
-    DUCKDB -- "S3 proxy /api/storage" --> ROUTES
-    ROUTES --> R2
-    ROUTES --> KV
+    %% DuckDB ↔ storage via the S3 proxy
+    DUCKDB -- "1 · request short-lived credential" --> ROUTES
+    ROUTES -- "store with TTL" --> KV
+    DUCKDB -- "2 · S3 GET / HEAD / PUT / LIST (SigV4 with proxy credential)" --> PROXY
+    PROXY -- "validate access key" --> KV
+    PROXY -- "r2-bound" --> R2
+    PROXY -- "r2-s3compat" --> S3X
+    PROXY -- "google-sheets" --> GOOGLE
 
     %% Static hosting
     PAGES -- "serves" --> SPA
@@ -68,9 +77,9 @@ flowchart TB
     %% Scheduling & queues
     SCHED -- "enqueue due jobs" --> Q
     Q --> QUEUE_C
-    QUEUE_C -- "fetch · write result" --> R2
+    QUEUE_C -- "write result" --> Backends
     QUEUE_C --> D1
-    QUEUE_C --> GOOGLE
+    QUEUE_C -- "fetch source" --> GOOGLE
     ROUTES -- "OAuth" --> GOOGLE
 ```
 
