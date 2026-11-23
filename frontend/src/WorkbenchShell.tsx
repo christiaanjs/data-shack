@@ -26,6 +26,7 @@ import {
   SunIcon,
   TableIcon,
   TerminalIcon,
+  TokenIcon,
   TransformIcon,
   XIcon,
 } from "./wbIcons.tsx";
@@ -41,6 +42,7 @@ import type {
   WbData,
   WbJob,
   WbTab,
+  WbToken,
   WbTransform,
 } from "./workbench-types.ts";
 
@@ -141,6 +143,7 @@ export function WorkbenchShell() {
   const [dashboards, setDashboards] = useState<WbDashboard[]>([]);
   const [credentials, setCredentials] = useState<WbCredential[]>([]);
   const [backends, setBackends] = useState<WbBackend[]>([]);
+  const [tokens, setTokens] = useState<WbToken[]>([]);
 
   // Apply theme
   useEffect(() => {
@@ -260,7 +263,7 @@ export function WorkbenchShell() {
     if (!authed) return;
     try {
       const headers = await getAuthHeaders();
-      const [tsRes, jRes, dRes, cRes, bRes, sqRes] = await Promise.allSettled([
+      const [tsRes, jRes, dRes, cRes, bRes, sqRes, tokRes] = await Promise.allSettled([
         fetch(`${WORKER_BASE}/api/transform-jobs`, { headers }).then(
           (r) => r.json() as Promise<{ jobs: WbTransform[] }>,
         ),
@@ -279,6 +282,9 @@ export function WorkbenchShell() {
         fetch(`${WORKER_BASE}/api/saved-queries`, { headers }).then(
           (r) => r.json() as Promise<{ queries: SavedQuery[] }>,
         ),
+        fetch(`${WORKER_BASE}/api/tokens`, { headers }).then(
+          (r) => r.json() as Promise<{ tokens: WbToken[] }>,
+        ),
       ]);
       if (tsRes.status === "fulfilled") setTransforms(tsRes.value.jobs ?? []);
       if (jRes.status === "fulfilled") setJobs(jRes.value.jobs ?? []);
@@ -286,6 +292,7 @@ export function WorkbenchShell() {
       if (cRes.status === "fulfilled") setCredentials(cRes.value.credentials ?? []);
       if (bRes.status === "fulfilled") setBackends(bRes.value.backends ?? []);
       if (sqRes.status === "fulfilled") setSavedQueries(sqRes.value.queries ?? []);
+      if (tokRes.status === "fulfilled") setTokens(tokRes.value.tokens ?? []);
     } catch {
       // non-fatal
     }
@@ -481,7 +488,13 @@ export function WorkbenchShell() {
   // ── Tab management ────────────────────────────────────────────────────────
 
   const openTab = useCallback((kind: string, item?: unknown) => {
-    if (kind === "cred" || kind === "backend" || kind === "new-cred" || kind === "new-backend")
+    if (
+      kind === "cred" ||
+      kind === "backend" ||
+      kind === "new-cred" ||
+      kind === "new-backend" ||
+      kind === "tokens"
+    )
       setActivity("settings");
     else if (kind !== "commit") setActivity("explorer");
     setTabs((prev) => {
@@ -502,6 +515,10 @@ export function WorkbenchShell() {
         key = "commit";
         title = "Commit snapshot";
         tab = { id: uid(), kind: "commit", key, title };
+      } else if (kind === "tokens") {
+        key = "tokens";
+        title = "API Tokens";
+        tab = { id: uid(), kind: "tokens", key, title };
       } else if (kind === "new-transform") {
         key = `transform:new:${uid()}`;
         title = "New transform";
@@ -704,8 +721,9 @@ export function WorkbenchShell() {
       savedQueries,
       credentials,
       backends,
+      tokens,
     }),
-    [catalogTables, transforms, jobs, dashboards, savedQueries, credentials, backends],
+    [catalogTables, transforms, jobs, dashboards, savedQueries, credentials, backends, tokens],
   );
 
   const ctx: WbCtx = useMemo(
@@ -1050,6 +1068,8 @@ function TabIcon({ kind, size }: { kind: string; size: number }) {
       return <TransformIcon size={size} />;
     case "commit":
       return <DatabaseIcon size={size} />;
+    case "tokens":
+      return <TokenIcon size={size} />;
     default:
       return <FilesIcon size={size} />;
   }

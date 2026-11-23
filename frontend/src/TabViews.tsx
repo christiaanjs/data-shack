@@ -6,6 +6,7 @@ import { JobView } from "./JobView.tsx";
 import { ResultGrid } from "./ResultGrid.tsx";
 import type { SqlEditorHandle } from "./SqlEditor.tsx";
 import { SqlEditor } from "./SqlEditor.tsx";
+import { TokenView } from "./TokenView.tsx";
 import { TransformView } from "./TransformView.tsx";
 import type { CatalogTableWithSnapshot } from "./catalogViews.ts";
 import { WORKER_BASE, authHeaders, fmtAgo } from "./wb-api.ts";
@@ -622,6 +623,8 @@ export function TabContent({ tab, ctx }: { tab: WbTab | null; ctx: WbCtx }) {
       return <BackendView tab={tab} ctx={ctx} />;
     case "commit":
       return <CommitView ctx={ctx} />;
+    case "tokens":
+      return <TokenView ctx={ctx} />;
     default:
       return <GenericView tab={tab} ctx={ctx} />;
   }

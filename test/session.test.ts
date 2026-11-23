@@ -38,6 +38,38 @@ describe("GET /session/ws", () => {
   });
 });
 
+describe("POST /session/warm", () => {
+  it("returns 401 without auth", async () => {
+    const res = await SELF.fetch("http://localhost/session/warm", { method: "POST" });
+    expect(res.status).toBe(401);
+  });
+
+  it("returns 'unavailable' when no container is configured and no browser is connected", async () => {
+    // This test environment never has ctx.container configured (no wrangler
+    // [[containers]] binding reaches Miniflare) — this is the permanent,
+    // always-exercised case for anyone who hasn't opted into Containers.
+    const res = await SELF.fetch("http://localhost/session/warm", {
+      method: "POST",
+      headers: DEV_HEADERS,
+    });
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as { status: string };
+    expect(data.status).toBe("unavailable");
+  });
+
+  it("returns 'already-active' when a browser session is already connected", async () => {
+    const ws = await connectMockBrowser();
+    const res = await SELF.fetch("http://localhost/session/warm", {
+      method: "POST",
+      headers: DEV_HEADERS,
+    });
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as { status: string };
+    expect(data.status).toBe("already-active");
+    ws.close();
+  });
+});
+
 describe("POST /mcp - MCP server", () => {
   it("returns 401 without auth", async () => {
     const res = await SELF.fetch("http://localhost/mcp", {
@@ -93,10 +125,11 @@ describe("POST /mcp - MCP server", () => {
     });
     expect(res.status).toBe(200);
     const data = (await res.json()) as { result: { tools: Array<{ name: string }> } };
-    expect(data.result.tools).toHaveLength(22);
+    expect(data.result.tools).toHaveLength(23);
     const names = data.result.tools.map((t) => t.name);
     expect(names).toContain("get_warehouse_schema");
     expect(names).toContain("run_query");
+    expect(names).toContain("warm_session");
     expect(names).toContain("read_data");
     expect(names).toContain("list_data_sources");
     expect(names).toContain("submit_dashboard");
@@ -181,6 +214,20 @@ describe("POST /mcp - MCP server", () => {
     // Should return an error result (no active session)
     const text = JSON.stringify(data);
     expect(text).toContain("session");
+  });
+
+  it("warm_session reports unavailable when no container is configured and nothing connected", async () => {
+    const data = await mcpCall("warm_session", {});
+    const text = data.result?.content[0]?.text ?? "";
+    expect(text).toMatch(/No container is configured/i);
+  });
+
+  it("warm_session reports already-active when a browser session is connected", async () => {
+    const ws = await connectMockBrowser();
+    const data = await mcpCall("warm_session", {});
+    const text = data.result?.content[0]?.text ?? "";
+    expect(text).toMatch(/already active/i);
+    ws.close();
   });
 
   it("unknown tool returns method error", async () => {
@@ -825,6 +872,31 @@ describe("transform job dispatch via WebSocket", () => {
     expect(job?.status).toBe("running");
 
     ws.close();
+  });
+
+  it("acks a claim with job_accepted and rejects a duplicate claim with job_rejected", async () => {
+    const jobId = await createTransformJob("lifecycle_claim_ack");
+
+    await SELF.fetch(`http://localhost/api/transform-jobs/${jobId}/trigger`, {
+      method: "POST",
+      headers: DEV_HEADERS,
+    });
+
+    const ws1 = await connectMockBrowser();
+    await waitForTransformJob(ws1, jobId);
+    const ws2 = await connectMockBrowser();
+
+    const accepted = waitForWsMessage<{ jobId: string }>(ws1, "job_accepted");
+    ws1.send(JSON.stringify({ type: "job_claimed", jobId }));
+    expect((await accepted).jobId).toBe(jobId);
+
+    // A second socket claiming the same (now running) job must be told it lost.
+    const rejected = waitForWsMessage<{ jobId: string }>(ws2, "job_rejected");
+    ws2.send(JSON.stringify({ type: "job_claimed", jobId }));
+    expect((await rejected).jobId).toBe(jobId);
+
+    ws1.close();
+    ws2.close();
   });
 
   it("job_complete marks job done and commits output to catalog", async () => {

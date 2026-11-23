@@ -1,0 +1,26 @@
+{
+  "name": "data-shack-session-container",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Headless DuckDB session client for data-shack — runs the Session DO's browser-tab role in a container instead of a browser tab.",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "dev": "tsc -p tsconfig.json --watch",
+    "login": "tsc -p tsconfig.json && node dist/login.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@duckdb/node-api": "1.5.5-r.5",
+    "ws": "^8.21.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/ws": "^8.5.13",
+    "typescript": "^5.7.0"
+  }
+}

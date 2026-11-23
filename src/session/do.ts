@@ -1,4 +1,5 @@
 import type { TransformJob } from "../catalog/do.ts";
+import { apiTokenExists, insertApiToken } from "../db/api-tokens.ts";
 import type { Env } from "../types.ts";
 
 export interface QueryResult {
@@ -12,9 +13,27 @@ interface WsAttachment {
   lastPingAt: number;
 }
 
+interface StoredContainerToken {
+  id: string;
+  token: string;
+}
+
 // Sockets that haven't pinged within this window are considered stale.
 const PING_INTERVAL_MS = 25_000;
 const STALE_AFTER_MS = PING_INTERVAL_MS * 3; // 75s — 3 missed pings
+
+// How long /query and /warm wait for a woken container to connect its WS
+// before giving up — covers process boot + DuckDB/httpfs init + catalog view
+// registration + the WS handshake itself. Generous because a cold start is
+// the whole point of this path; a query to an already-live session returns
+// long before this ever matters.
+const CONTAINER_WAKE_TIMEOUT_MS = 45_000;
+
+// How long an auto-started container is kept alive after the DO stops seeing
+// activity, via the platform's own setInactivityTimeout — not a custom alarm
+// loop. This is what makes waking-on-demand cheaper than staying up 24/7:
+// memory/disk are billed only while the container is actually running.
+const CONTAINER_IDLE_TIMEOUT_MS = 10 * 60_000;
 
 type IncomingMessage =
   | { type: "result"; queryId: string; columns: string[]; rows: unknown[][] }
@@ -32,10 +51,25 @@ export class SessionDO implements DurableObject {
     { resolve: (v: QueryResult) => void; reject: (e: Error) => void; ws: WebSocket }
   >();
 
+  // Resolved as soon as ANY socket (browser or container) registers, so
+  // whichever of /query or /warm is waiting on a cold start notices the
+  // instant it's over rather than polling.
+  private containerWakeWaiters: Array<() => void> = [];
+  // Coalesces concurrent wake attempts for the same user onto one start() call.
+  private containerStarting: Promise<boolean> | null = null;
+
   constructor(
     private ctx: DurableObjectState,
     private env: Env,
-  ) {}
+  ) {
+    // A DO can be evicted and reconstructed while its container keeps running
+    // (setInactivityTimeout doesn't survive that) — re-arm it so an
+    // already-running container isn't stopped by Cloudflare's default
+    // idle-timeout before our own longer one would have applied.
+    if (this.ctx.container?.running) {
+      this.ctx.container.setInactivityTimeout(CONTAINER_IDLE_TIMEOUT_MS).catch(() => {});
+    }
+  }
 
   private catalogStub(userId: string) {
     return this.env.CATALOG.get(this.env.CATALOG.idFromName(userId));
@@ -55,6 +89,10 @@ export class SessionDO implements DurableObject {
 
     if (request.method === "POST" && pathname === "/dispatch-jobs") {
       return this.handleDispatchJobs(request);
+    }
+
+    if (request.method === "POST" && pathname === "/warm") {
+      return this.handleWarmSession(request);
     }
 
     if (request.method === "GET" && pathname === "/status") {
@@ -85,30 +123,52 @@ export class SessionDO implements DurableObject {
     // Dispatch any pending jobs to this new connection (fire and forget).
     this.ctx.waitUntil(this.dispatchPendingJobs(server, userId));
 
+    // Wake up anyone in /query or /warm waiting on a cold start — this is a
+    // live socket now, whether it's a browser tab or a container that just
+    // finished booting.
+    this.resolveContainerWakeWaiters();
+
     // Echo Sec-WebSocket-Protocol so browsers that pass the token as a subprotocol don't fail handshake.
     const protocol = request.headers.get("Sec-WebSocket-Protocol");
     const headers = protocol ? { "Sec-WebSocket-Protocol": protocol } : undefined;
     return new Response(null, { status: 101, webSocket: client, headers });
   }
 
+  private liveSocketsFor(userId: string): WebSocket[] {
+    const now = Date.now();
+    return this.ctx.getWebSockets(userId).filter((s) => {
+      const att = s.deserializeAttachment() as WsAttachment | null;
+      return att && now - att.lastPingAt < STALE_AFTER_MS;
+    });
+  }
+
   private async handleQuery(request: Request): Promise<Response> {
-    const body = (await request.json()) as { sql: string; userId: string; queryId?: string };
-    const { sql, userId, queryId: reqId } = body;
+    const body = (await request.json()) as {
+      sql: string;
+      userId: string;
+      queryId?: string;
+      workerOrigin?: string;
+    };
+    const { sql, userId, queryId: reqId, workerOrigin } = body;
 
     if (!sql || !userId)
       return Response.json({ error: "sql and userId are required" }, { status: 400 });
 
-    const sockets = this.ctx.getWebSockets(userId);
-    const now = Date.now();
-    const liveSockets = sockets.filter((s) => {
-      const att = s.deserializeAttachment() as WsAttachment | null;
-      return att && now - att.lastPingAt < STALE_AFTER_MS;
-    });
+    let liveSockets = this.liveSocketsFor(userId);
+    if (liveSockets.length === 0) {
+      // No browser tab, no already-running container — try to wake one
+      // before giving up. No-ops immediately if no container is configured
+      // for this environment, or no workerOrigin was supplied to start one.
+      const woke = workerOrigin && (await this.ensureContainerStarted(userId, workerOrigin));
+      if (woke) liveSockets = this.liveSocketsFor(userId);
+    }
     if (liveSockets.length === 0) {
       return Response.json(
         {
           error: "no_session",
-          message: "No active browser session. Open a browser tab to run queries.",
+          message: this.ctx.container
+            ? "No active session, and the container didn't come up in time. Try again, or check its logs."
+            : "No active browser session. Open a browser tab to run queries.",
         },
         { status: 503 },
       );
@@ -117,7 +177,7 @@ export class SessionDO implements DurableObject {
     const queryId = reqId ?? crypto.randomUUID();
     const ws = liveSockets[0]!;
     console.log(
-      `[SessionDO] handleQuery: found ${sockets.length} socket(s) (${liveSockets.length} live) for userId=${userId}, queryId=${queryId}, readyState=${ws.readyState}`,
+      `[SessionDO] handleQuery: found ${liveSockets.length} live socket(s) for userId=${userId}, queryId=${queryId}, readyState=${ws.readyState}`,
     );
 
     let result: QueryResult;
@@ -163,16 +223,25 @@ export class SessionDO implements DurableObject {
   }
 
   private async handleDispatchJobs(request: Request): Promise<Response> {
-    const body = (await request.json()) as { userId: string; jobIds?: string[] };
-    const { userId, jobIds } = body;
+    const body = (await request.json()) as {
+      userId: string;
+      jobIds?: string[];
+      workerOrigin?: string;
+    };
+    const { userId, jobIds, workerOrigin } = body;
     if (!userId) return Response.json({ error: "userId is required" }, { status: 400 });
 
-    const now = Date.now();
-    const liveSockets = this.ctx.getWebSockets(userId).filter((s) => {
-      const att = s.deserializeAttachment() as WsAttachment | null;
-      return att && now - att.lastPingAt < STALE_AFTER_MS;
-    });
-    if (liveSockets.length === 0) return Response.json({ dispatched: 0 });
+    const liveSockets = this.liveSocketsFor(userId);
+    if (liveSockets.length === 0) {
+      // Nothing connected to dispatch to right now. If a container is
+      // configured, try to wake one in the background — once it connects,
+      // handleUpgrade's own dispatchPendingJobs call picks up this same job,
+      // so there's nothing further to do here. Fire-and-forget: the caller
+      // (the commit relay / load-job queue consumer) doesn't wait on this,
+      // and the job stays safely 'pending' in the Catalog DO either way.
+      if (workerOrigin) this.ctx.waitUntil(this.ensureContainerStarted(userId, workerOrigin));
+      return Response.json({ dispatched: 0 });
+    }
 
     // Fetch pending jobs from Catalog DO, optionally filtered to a specific subset.
     const catalogRes = await this.catalogStub(userId).fetch("http://do/jobs/pending");
@@ -198,6 +267,149 @@ export class SessionDO implements DurableObject {
     }
 
     return Response.json({ dispatched: toDispatch.length });
+  }
+
+  /**
+   * Pre-warms the query backend without running anything — lets an MCP
+   * client or a browser tab with no local DuckDB session kick off a
+   * container cold start ahead of its first real query, so that latency
+   * overlaps with whatever the caller does next instead of landing on
+   * run_query. Never blocks on the full cold start; always responds fast.
+   */
+  private async handleWarmSession(request: Request): Promise<Response> {
+    const body = (await request.json().catch(() => ({}))) as {
+      userId?: string;
+      workerOrigin?: string;
+    };
+    const { userId, workerOrigin } = body;
+    if (!userId) return Response.json({ error: "userId is required" }, { status: 400 });
+
+    if (this.liveSocketsFor(userId).length > 0) {
+      return Response.json({ status: "already-active" });
+    }
+    if (!this.ctx.container) {
+      return Response.json({ status: "unavailable" });
+    }
+    if (!workerOrigin) {
+      return Response.json(
+        { error: "workerOrigin is required to start a container" },
+        { status: 400 },
+      );
+    }
+
+    // Fire-and-forget: the whole point is NOT to make the caller wait out
+    // the cold start here.
+    this.ctx.waitUntil(this.ensureContainerStarted(userId, workerOrigin));
+    return Response.json({ status: "starting" });
+  }
+
+  // ── Container lifecycle ────────────────────────────────────────────────
+  // Only reachable when this environment actually has a container bound to
+  // this DO class (see wrangler.toml) — ctx.container is undefined otherwise
+  // (including in this project's test suite, confirmed empirically against
+  // @cloudflare/vitest-pool-workers), so every caller above already checks
+  // or no-ops before reaching here. None of this has been exercised against
+  // real Cloudflare infra yet — see container/deploy/README.md.
+
+  private resolveContainerWakeWaiters(): void {
+    const waiters = this.containerWakeWaiters;
+    this.containerWakeWaiters = [];
+    for (const resolve of waiters) resolve();
+  }
+
+  private waitForLiveSocket(userId: string, timeoutMs: number): Promise<boolean> {
+    if (this.liveSocketsFor(userId).length > 0) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = (ok: boolean) => {
+        if (done) return;
+        done = true;
+        resolve(ok);
+      };
+      const timer = setTimeout(() => finish(this.liveSocketsFor(userId).length > 0), timeoutMs);
+      this.containerWakeWaiters.push(() => {
+        clearTimeout(timer);
+        finish(this.liveSocketsFor(userId).length > 0);
+      });
+    });
+  }
+
+  /** Mints (once) or re-mints (if revoked) the API token this user's own container
+   * authenticates with. Stored in this DO's own durable storage — never in D1 as
+   * plaintext, and scoped to exactly the one container instance this DO owns. */
+  private async ensureContainerApiToken(userId: string): Promise<string | null> {
+    const existing = await this.ctx.storage.get<StoredContainerToken>("containerApiToken");
+    if (existing && (await apiTokenExists(this.env.DB, existing.id))) {
+      return existing.token;
+    }
+    try {
+      const { token, row } = await insertApiToken(this.env.DB, {
+        userId,
+        name: "container (auto)",
+        expiresAt: null,
+      });
+      await this.ctx.storage.put<StoredContainerToken>("containerApiToken", {
+        id: row.id,
+        token,
+      });
+      return token;
+    } catch (err) {
+      console.error(`[SessionDO] failed to mint container API token for userId=${userId}:`, err);
+      return null;
+    }
+  }
+
+  /** Starts (if not already running) this user's container and waits for its
+   * own outbound WS to register, up to CONTAINER_WAKE_TIMEOUT_MS. Coalesces
+   * concurrent callers (e.g. a /warm call racing a /query call) onto one
+   * attempt. Never throws — returns false for "no live session resulted",
+   * whatever the reason (unconfigured, start() failed, timed out). */
+  private async ensureContainerStarted(userId: string, workerOrigin: string): Promise<boolean> {
+    const container = this.ctx.container;
+    if (!container) return false;
+    if (this.liveSocketsFor(userId).length > 0) return true;
+
+    if (!this.containerStarting) {
+      this.containerStarting = this.startContainerAndWait(userId, workerOrigin, container).finally(
+        () => {
+          this.containerStarting = null;
+        },
+      );
+    }
+    return this.containerStarting;
+  }
+
+  private async startContainerAndWait(
+    userId: string,
+    workerOrigin: string,
+    container: NonNullable<DurableObjectState["container"]>,
+  ): Promise<boolean> {
+    if (!container.running) {
+      const token = await this.ensureContainerApiToken(userId);
+      if (!token) return false;
+
+      try {
+        container.start({
+          enableInternet: true,
+          env: { WORKER_URL: workerOrigin, AUTH_MODE: "token", API_TOKEN: token },
+        });
+      } catch (err) {
+        console.error(`[SessionDO] container.start() failed for userId=${userId}:`, err);
+        return false;
+      }
+
+      this.ctx.waitUntil(
+        container.monitor().catch((err: unknown) => {
+          console.warn(`[SessionDO] container exited for userId=${userId}:`, err);
+        }),
+      );
+    }
+
+    // Best-effort — a failure here just means it falls back to the
+    // platform's own default idle timeout instead of ours.
+    container.setInactivityTimeout(CONTAINER_IDLE_TIMEOUT_MS).catch(() => {});
+
+    return this.waitForLiveSocket(userId, CONTAINER_WAKE_TIMEOUT_MS);
   }
 
   private async dispatchPendingJobs(ws: WebSocket, userId: string): Promise<void> {
@@ -286,8 +498,12 @@ export class SessionDO implements DurableObject {
         // doesn't reset the legitimate owner's job back to pending.
         const cleaned = inflightJobIds.filter((id) => id !== msg.jobId);
         ws.serializeAttachment({ ...attachment, inflightJobIds: cleaned });
+        // Tell the claimant it lost, so it doesn't run a duplicate of a job
+        // that is already running (or gone). Older clients ignore this.
+        ws.send(JSON.stringify({ type: "job_rejected", jobId: msg.jobId }));
         return;
       }
+      ws.send(JSON.stringify({ type: "job_accepted", jobId: msg.jobId }));
       this.broadcastJobStatus(userId, msg.jobId, "running");
       return;
     }

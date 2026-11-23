@@ -24,7 +24,30 @@ type ServerMessage =
       outputBackend: string;
       format?: string | null;
     }
+  | { type: "job_accepted"; jobId: string }
+  | { type: "job_rejected"; jobId: string }
   | { type: "job_status"; jobId: string; status: "running" | "done" | "failed"; error?: string };
+
+// Claim acks from the Session DO, keyed by jobId. Resolves true if accepted (or
+// the DO never answers — an older DO), false if another socket already owns it.
+const pendingClaims = new Map<string, (accepted: boolean) => void>();
+const CLAIM_ACK_TIMEOUT_MS = 10_000;
+const activeJobs = new Set<string>();
+
+function claimJob(ws: WebSocket, jobId: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      pendingClaims.delete(jobId);
+      resolve(true);
+    }, CLAIM_ACK_TIMEOUT_MS);
+    pendingClaims.set(jobId, (accepted) => {
+      clearTimeout(timer);
+      pendingClaims.delete(jobId);
+      resolve(accepted);
+    });
+    ws.send(JSON.stringify({ type: "job_claimed", jobId }));
+  });
+}
 
 export function connectSession(config: {
   workerBase: string;
@@ -93,7 +116,9 @@ export function connectSession(config: {
 
       console.log("[sessionWs] received message type:", msg.type);
 
-      if (msg.type === "query") {
+      if (msg.type === "job_accepted" || msg.type === "job_rejected") {
+        pendingClaims.get(msg.jobId)?.(msg.type === "job_accepted");
+      } else if (msg.type === "query") {
         await handleQuery(socket, msg, workerBase, getAuthHeaders, getDb);
       } else if (msg.type === "transform_job") {
         await handleTransformJob(socket, msg, workerBase, getAuthHeaders, getDb, getCatalogReady);
@@ -222,7 +247,27 @@ async function handleTransformJob(
   getCatalogReady: () => Promise<void>,
 ) {
   // Claim the job — Session DO will broadcast job_status: running to all connected sockets.
-  ws.send(JSON.stringify({ type: "job_claimed", jobId: msg.jobId }));
+  // The same job can be dispatched to this socket twice in quick succession;
+  // only the first may proceed (a second claim would clobber the first's ack waiter).
+  if (activeJobs.has(msg.jobId)) return;
+  activeJobs.add(msg.jobId);
+  try {
+    await runClaimedJob(ws, msg, workerBase, getAuthHeaders, getDb, getCatalogReady);
+  } finally {
+    activeJobs.delete(msg.jobId);
+  }
+}
+
+async function runClaimedJob(
+  ws: WebSocket,
+  msg: { jobId: string; sql: string },
+  workerBase: string,
+  getAuthHeaders: () => Promise<Record<string, string>>,
+  getDb: () => Promise<AsyncDuckDB>,
+  getCatalogReady: () => Promise<void>,
+) {
+  // If another socket already owns the job, skip it rather than run a duplicate.
+  if (!(await claimJob(ws, msg.jobId))) return;
 
   const runOnce = async () => {
     const db = await getDb();
