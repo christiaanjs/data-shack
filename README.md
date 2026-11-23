@@ -67,6 +67,8 @@ Data is addressed by URI, so SQL, the catalog and jobs all speak the same langua
 
 ## Getting started
 
+To run your own private instance, follow the step-by-step guide in [`docs/SELF_HOSTING.md`](docs/SELF_HOSTING.md). The outline is below.
+
 You need a Cloudflare account, [`wrangler`](https://developers.cloudflare.com/workers/wrangler/), Node 22+, `openssl` and `jq`.
 
 **1. Provision.** The bootstrap script creates the D1 database, applies migrations, walks you through creating a Google OAuth credential, generates a JWT secret and pushes all secrets to Cloudflare:
@@ -207,6 +209,7 @@ SQL and JSX live in their own files next to the YAML, secrets are `$ENV:NAME` re
 | `frontend/` | The Pages SPA (Preact + Vite): workbench IDE, DuckDB-WASM, dashboard viewer, plus Pages Functions for per-dashboard PWA manifests |
 | `cli/` | The `dshack` infrastructure-as-code CLI |
 | `scripts/` | `bootstrap.sh` environment provisioning |
+| `docs/` | Guides, such as self-hosting |
 
 The worker and frontend are independent packages with separate `node_modules`.
 
@@ -225,6 +228,7 @@ Open issues are tracked with [Beads](https://github.com/gastownhall/beads) (`bd 
 
 ## Further reading
 
+- [`docs/SELF_HOSTING.md`](docs/SELF_HOSTING.md) — standing up your own private instance on Cloudflare
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) — system diagram, components, data flows and design principles
 - [`cli/README.md`](cli/README.md) — `dshack` commands and resource schemas
 - [`CLAUDE.md`](CLAUDE.md) — implementation-level notes
