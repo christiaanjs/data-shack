@@ -35,4 +35,9 @@ USER appuser
 # unused (and safe to leave unmounted) for AUTH_MODE=dev-token.
 VOLUME ["/data"]
 
+# Bare health-check listener (src/health.ts) — not needed for a plain VPS/
+# docker-compose deployment, but some container platforms (e.g. Cloudflare
+# Containers) poll a port to decide the container finished starting.
+EXPOSE 8080
+
 ENTRYPOINT ["node", "dist/index.js"]

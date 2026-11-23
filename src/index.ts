@@ -631,7 +631,11 @@ app.post("/catalog/commit", requireAuth, async (c) => {
             await sessionStub(c.env, userId).fetch("http://do/dispatch-jobs", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ userId, jobIds: data.triggeredJobIds }),
+              body: JSON.stringify({
+                userId,
+                jobIds: data.triggeredJobIds,
+                workerOrigin: new URL(c.req.url).origin,
+              }),
             });
           } catch {
             // Best-effort: jobs remain pending and will be dispatched on next browser connect.
@@ -865,6 +869,19 @@ app.get("/session/status", requireAuth, async (c) => {
   return new Response(res.body, { status: res.status, headers: res.headers });
 });
 
+// Pre-warms a container session (if configured) without running a query —
+// lets a browser with no local DuckDB session, or an MCP client about to run
+// several queries, overlap any cold-start latency with whatever it does next.
+app.post("/session/warm", requireAuth, async (c) => {
+  const userId = c.get("userId");
+  const res = await sessionStub(c.env, userId).fetch("http://do/warm", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ userId, workerOrigin: new URL(c.req.url).origin }),
+  });
+  return new Response(res.body, { status: res.status, headers: res.headers });
+});
+
 // ── MCP server ────────────────────────────────────────────────────────────
 
 // Streamable HTTP (2025-03-26): GET establishes a server-to-client SSE channel.
@@ -937,7 +954,7 @@ app.post("/api/transform-jobs/:id/trigger", requireAuth, async (c) => {
         .fetch("http://do/dispatch-jobs", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ userId }),
+          body: JSON.stringify({ userId, workerOrigin: new URL(c.req.url).origin }),
         })
         .catch(() => {}),
     );

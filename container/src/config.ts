@@ -16,6 +16,8 @@ export interface Config {
   duckdbPath: string;
   /** Fixed extension directory (set by the Docker image at build time so httpfs loads offline). */
   duckdbExtensionDir?: string;
+  /** Port for the bare inbound HTTP health check — see src/health.ts. */
+  healthPort: number;
 }
 
 function requireEnv(name: string): string {
@@ -55,5 +57,6 @@ export function loadConfig(): Config {
     enableCatalogViews: (process.env.ENABLE_CATALOG_VIEWS ?? "true").toLowerCase() !== "false",
     duckdbPath: process.env.DUCKDB_PATH ?? ":memory:",
     duckdbExtensionDir: process.env.DUCKDB_EXTENSION_DIR,
+    healthPort: Number.parseInt(process.env.PORT ?? "8080", 10),
   };
 }

@@ -15,20 +15,30 @@ tab.
 
 ## Design notes
 
-**Persistent, not hibernating.** This process holds one WebSocket open for
-its entire lifetime, pinging every 25s (the Session DO marks a socket stale
-after 3 missed pings — `src/session/do.ts`). It does *not* try to scale to
-zero or reconnect lazily on demand. That's a deliberate choice: the DO
-already hibernates on Cloudflare's side between messages (`ctx.acceptWebSocket`),
-which is what makes a permanently-open socket from this side cheap for them —
-but there is no live socket at all while this process is down, and a query
-arriving in that window fails immediately with `no_session`
-(`src/mcp/server.ts`'s `handleRunQuery`). A scale-to-zero container platform
-(Cloud Run/Lambda-style, cold-starting on inbound HTTP) doesn't fit this
-workload, since nothing here receives inbound HTTP to trigger a cold start —
-the only inbound traffic is the WS push from the DO once a socket already
-exists. So the deployment target needs to be an always-on host, not a
-request-triggered FaaS; see `deploy/README.md`.
+**Persistent, not hibernating — but can be started and stopped from the
+outside.** Once running, this process holds one WebSocket open for its
+entire lifetime, pinging every 25s (the Session DO marks a socket stale
+after 3 missed pings — `src/session/do.ts`), and does *not* internally try
+to scale to zero or reconnect lazily on demand — it has no idea whether
+anything stopped/started it. That's still a deliberate design choice for
+*this process's own code*: on a plain VPS/VM/docker-compose deployment
+(`deploy/README.md`), it simply needs to be kept running 24/7, since
+nothing fronts it to start it back up, and a query arriving while it's down
+fails immediately with `no_session`.
+
+**On Cloudflare Containers specifically, this process doesn't manage its
+own lifecycle at all** — `src/session/do.ts`'s `SessionDO` does, externally,
+via the Durable Object Container API (`ctx.container`): it starts a
+container on demand when a query/job arrives and nothing is already
+connected, and stops it after an idle period. This container's own code is
+identical either way — it just connects and stays connected for as long as
+the process lives, same as the plain-VPS case — the only difference is
+*how long that happens to be* and *who decided to start it*. See
+`deploy/README.md`'s "Cloudflare Containers — wake-on-query" section for
+how that orchestration works, and note that it passes `AUTH_MODE=token`/
+`API_TOKEN`/`WORKER_URL` to each container instance automatically (a
+dedicated, self-provisioned, revocable token) — nothing to configure by
+hand for that path specifically.
 
 **Auth: three supported modes**, all already supported by the existing Worker
 with no server-side changes:

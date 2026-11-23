@@ -62,6 +62,14 @@ export async function deleteApiToken(db: D1Database, id: string, userId: string)
   return (result.meta.changes ?? 0) > 0;
 }
 
+/** Used by SessionDO to check whether its self-provisioned container token (stored in its own
+ * durable storage, not D1) has since been revoked via the normal Settings UI, so it knows to
+ * mint a fresh one rather than handing a dead token to a container that will just fail to connect. */
+export async function apiTokenExists(db: D1Database, id: string): Promise<boolean> {
+  const row = await db.prepare("SELECT 1 FROM api_tokens WHERE id = ?").bind(id).first();
+  return row !== null;
+}
+
 /** Returns the owning userId if the token is valid and unexpired, else null. */
 export async function verifyApiToken(db: D1Database, token: string): Promise<string | null> {
   if (!token.startsWith(API_TOKEN_PREFIX)) return null;

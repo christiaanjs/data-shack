@@ -27,6 +27,18 @@ class_name = "CatalogDO"
 name = "SESSION_DO"
 class_name = "SessionDO"
 
+# Uncomment to enable wake-on-query container sessions (see
+# container/README.md and SessionDO's "Container lifecycle" section) —
+# requires the Workers Paid plan + Containers entitlement, and Docker
+# available wherever you run `wrangler deploy`/`wrangler dev`. Until
+# uncommented, SessionDO behaves exactly as before (ctx.container is
+# undefined, every container code path no-ops).
+# [[containers]]
+# class_name = "SessionDO"
+# image = "./container/Dockerfile"
+# instance_type = "standard-1"  # DuckDB wants more than the "lite"/"basic" default — verify against real usage
+# max_instances = 50            # one per concurrently-active user; tune to your usage
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["CatalogDO"]
@@ -84,6 +96,16 @@ class_name = "CatalogDO"
 [[env.staging.durable_objects.bindings]]
 name = "SESSION_DO"
 class_name = "SessionDO"
+
+# See the commented [[containers]] block above the root migrations — same
+# idea, scoped to staging. Wrangler environments don't inherit array-type
+# config from root (same reason durable_objects.bindings is duplicated
+# above), so this needs its own [[env.staging.containers]] entry too.
+# [[env.staging.containers]]
+# class_name = "SessionDO"
+# image = "./container/Dockerfile"
+# instance_type = "standard-1"
+# max_instances = 20
 
 [[env.staging.queues.producers]]
 binding = "LOAD_JOB_QUEUE"

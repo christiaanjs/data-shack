@@ -5,6 +5,7 @@ import type { TokenProvider } from "./auth/tokenProvider.js";
 import { connectCatalogWs } from "./catalog/ws.js";
 import { loadConfig } from "./config.js";
 import { DuckDBEngine } from "./duckdb/engine.js";
+import { startHealthServer } from "./health.js";
 import { createLogger } from "./logger.js";
 import { connectSession } from "./session/ws.js";
 
@@ -25,6 +26,11 @@ function buildTokenProvider(config: ReturnType<typeof loadConfig>): TokenProvide
 async function main(): Promise<void> {
   const config = loadConfig();
   logger.info(`starting — worker=${config.workerBase} authMode=${config.authMode}`);
+
+  // Started before anything else so a Cloudflare Containers readiness probe
+  // (if the platform requires one for this container's start() to resolve)
+  // succeeds immediately, rather than waiting on DuckDB/WS setup below.
+  const health = startHealthServer(config.healthPort);
 
   const tokenProvider = buildTokenProvider(config);
 
@@ -55,6 +61,7 @@ async function main(): Promise<void> {
   const shutdown = (signal: string) => {
     logger.info(`received ${signal}, shutting down`);
     session.close();
+    health.close();
     process.exit(0);
   };
   process.on("SIGTERM", () => shutdown("SIGTERM"));

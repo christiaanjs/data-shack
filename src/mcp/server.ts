@@ -84,7 +84,7 @@ const TOOLS: Tool[] = [
   {
     name: "run_query",
     description:
-      "Execute a DuckDB SQL query against warehouse data. Requires an active browser tab to be open. Use catalog table names directly (e.g. SELECT * FROM transactions LIMIT 10) — views are pre-registered from snapshot URIs.",
+      "Execute a DuckDB SQL query against warehouse data. Requires an active query session: a browser tab with the DuckDB session enabled, or (if configured) a headless session container, which this call will try to wake on demand. Call warm_session first if you're about to run several queries and want to avoid paying a cold-start on the first one. Use catalog table names directly (e.g. SELECT * FROM transactions LIMIT 10) — views are pre-registered from snapshot URIs.",
     inputSchema: {
       type: "object",
       properties: {
@@ -98,6 +98,12 @@ const TOOLS: Tool[] = [
       },
       required: ["sql"],
     },
+  },
+  {
+    name: "warm_session",
+    description:
+      "Pre-warm the query backend before running queries, so any cold-start latency overlaps with your own planning instead of landing on your first run_query call. No-op if a browser tab or already-running container session is connected. Safe to call speculatively — it only reports status, never fails.",
+    inputSchema: { type: "object", properties: {}, required: [] },
   },
   {
     name: "list_data_sources",
@@ -520,6 +526,7 @@ export async function mcpHandler(
   }
 
   const useSSE = request.headers.get("Accept")?.includes("text/event-stream") ?? false;
+  const workerOrigin = new URL(request.url).origin;
   const respond = (result: unknown) => {
     const payload = jsonRpcOk(id, result);
     return useSSE ? sseResponse(payload) : Response.json(payload);
@@ -558,7 +565,11 @@ export async function mcpHandler(
         return respondError(-32602, "sql is required");
       }
       const fmt = typeof args.format === "string" ? args.format : "table";
-      return handleRunQuery(respond, respondError, sql, fmt, userId, sessionStub);
+      return handleRunQuery(respond, respondError, sql, fmt, userId, workerOrigin, sessionStub);
+    }
+
+    if (toolName === "warm_session") {
+      return handleWarmSession(respond, userId, workerOrigin, sessionStub);
     }
 
     if (toolName === "list_data_sources") {
@@ -768,12 +779,13 @@ async function handleRunQuery(
   sql: string,
   fmt: string,
   userId: string,
+  workerOrigin: string,
   sessionStub: ReturnType<DurableObjectNamespace["get"]>,
 ): Promise<Response> {
   const queryRes = await sessionStub.fetch("http://do/query", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ sql, userId }),
+    body: JSON.stringify({ sql, userId, workerOrigin }),
   });
 
   if (queryRes.status === 503) {
@@ -834,6 +846,33 @@ async function handleRunQuery(
   if (truncated) lines.push(`\n(truncated to ${MAX_RESULT_ROWS} rows)`);
 
   return respond({ content: [{ type: "text", text: lines.join("\n") }] });
+}
+
+async function handleWarmSession(
+  respond: (r: unknown) => Response,
+  userId: string,
+  workerOrigin: string,
+  sessionStub: ReturnType<DurableObjectNamespace["get"]>,
+): Promise<Response> {
+  const res = await sessionStub.fetch("http://do/warm", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ userId, workerOrigin }),
+  });
+  const data = (await res.json().catch(() => ({}))) as { status?: string; error?: string };
+
+  const text =
+    {
+      "already-active": "A session is already active — go ahead and run queries.",
+      starting:
+        "Starting a container session in the background — give it a few seconds before your first query.",
+      unavailable:
+        "No container is configured for this deployment, and no browser tab is connected. Open a browser tab with the DuckDB session enabled, or run_query directly to see the exact error.",
+    }[data.status ?? ""] ??
+    data.error ??
+    "Could not determine session status.";
+
+  return respond({ content: [{ type: "text", text }] });
 }
 
 async function handleListDataSources(
