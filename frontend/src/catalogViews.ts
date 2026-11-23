@@ -1,4 +1,5 @@
 import type { AsyncDuckDB } from "@duckdb/duckdb-wasm";
+import { addCatalogSnapshot, loadCatalogSnapshots } from "./catalogSnapshots.ts";
 import { runQuery } from "./duckdb.ts";
 import { acquireProxyCred, buildS3Secret, parseStorageUri } from "./storage.ts";
 
@@ -67,6 +68,14 @@ export async function registerCatalogViews(
   const res = await fetch(`${workerBase}/catalog/snapshots-latest`, { headers });
   if (!res.ok) throw new Error(`Catalog fetch failed: ${res.status}`);
   const { tables } = (await res.json()) as { tables: CatalogTableWithSnapshot[] };
+
+  // Expose full snapshot history as the catalog_snapshots table. Best effort:
+  // the per-table views below don't depend on it.
+  try {
+    await loadCatalogSnapshots(db, workerBase, getAuthHeaders);
+  } catch (err) {
+    console.warn("[catalog] catalog_snapshots load failed", err);
+  }
 
   if (tables.length === 0) return { tables, failed: [] };
 
@@ -159,6 +168,11 @@ export async function refreshSingleView(
   workerBase: string,
   getAuthHeaders: () => Promise<Record<string, string>>,
 ): Promise<void> {
+  try {
+    await addCatalogSnapshot(db, tableName, snapshot);
+  } catch (err) {
+    console.warn("[catalog] catalog_snapshots update failed", err);
+  }
   const failed: string[] = [];
   await registerView(db, tableName, snapshot, workerBase, getAuthHeaders, new Map(), failed);
   if (failed.length > 0) {

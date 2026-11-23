@@ -108,6 +108,51 @@ describe("POST /catalog/commit", () => {
   });
 });
 
+describe("GET /catalog/snapshots-all", () => {
+  const commit = (table: string, uri: string) =>
+    SELF.fetch("http://localhost/catalog/commit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+      body: JSON.stringify({ table, uri, storageBackend: "primary-r2", format: "json" }),
+    });
+
+  it("returns 401 without auth", async () => {
+    const res = await SELF.fetch("http://localhost/catalog/snapshots-all");
+    expect(res.status).toBe(401);
+  });
+
+  it("returns every snapshot of live tables, not just the latest", async () => {
+    await commit("sa_table", "r2://bucket/sa_table/v1.json");
+    await commit("sa_table", "r2://bucket/sa_table/v2.json");
+    await commit("sa_gone", "r2://bucket/sa_gone/v1.json");
+    await SELF.fetch("http://localhost/catalog/tables/sa_gone", {
+      method: "DELETE",
+      headers: DEV_HEADERS,
+    });
+
+    const res = await SELF.fetch("http://localhost/catalog/snapshots-all", {
+      headers: DEV_HEADERS,
+    });
+    expect(res.status).toBe(200);
+    const { snapshots } = (await res.json()) as {
+      snapshots: Array<{
+        table_name: string;
+        uri: string;
+        format: string | null;
+        created_at: number;
+      }>;
+    };
+    const mine = snapshots.filter((s) => s.table_name === "sa_table");
+    expect(mine.map((s) => s.uri)).toEqual([
+      "r2://bucket/sa_table/v1.json",
+      "r2://bucket/sa_table/v2.json",
+    ]);
+    expect(mine[0]?.format).toBe("json");
+    expect(typeof mine[0]?.created_at).toBe("number");
+    expect(snapshots.some((s) => s.table_name === "sa_gone")).toBe(false);
+  });
+});
+
 describe("GET /catalog/snapshots-latest", () => {
   it("returns 401 without auth", async () => {
     const res = await SELF.fetch("http://localhost/catalog/snapshots-latest");
@@ -257,6 +302,7 @@ describe("GET /catalog/ws", () => {
     expect(msg.uri).toBe("r2://bucket/ws_broadcast_test/file.ndjson");
     expect(msg.storage_backend).toBe("primary-r2");
     expect(msg.format).toBe("ndjson");
+    expect(typeof (msg as { createdAt?: number }).createdAt).toBe("number");
     ws.close();
   });
 });
