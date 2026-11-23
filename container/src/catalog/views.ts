@@ -201,7 +201,8 @@ async function registerView(
       await engine.runQuery(
         `CREATE OR REPLACE VIEW "${safeId}" AS SELECT * FROM ${readerFn(snapshot.uri, snapshot.format)}('${tokenUrl}')`,
       );
-    } catch {
+    } catch (err) {
+      logger.warn(`view "${tableName}" (http-ds) failed`, err);
       failed.push(tableName);
     }
     return;
@@ -218,7 +219,8 @@ async function registerView(
     try {
       const cred = await acquireProxyCred(backend, "", workerBase, getAuthHeaders);
       secretsByBackend.set(backend, buildS3Secret(cred));
-    } catch {
+    } catch (err) {
+      logger.warn(`proxy credential for backend "${backend}" failed`, err);
       failed.push(tableName);
       return;
     }
@@ -238,7 +240,8 @@ async function registerView(
     await engine.runQuery(`CREATE OR REPLACE VIEW "${safeId}" AS SELECT * FROM ${readExpr}`, [
       preamble,
     ]);
-  } catch {
+  } catch (err) {
+    logger.warn(`view "${tableName}" failed`, err);
     failed.push(tableName);
   }
 }

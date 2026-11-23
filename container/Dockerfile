@@ -20,6 +20,13 @@ WORKDIR /app
 ENV NODE_ENV=production \
     DUCKDB_EXTENSION_DIR=/opt/duckdb-extensions
 
+# node:22-slim has no system CA bundle; DuckDB's httpfs uses it (not Node's
+# built-in roots), so without this every https:// read fails with
+# "Problem with the SSL CA cert".
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 
