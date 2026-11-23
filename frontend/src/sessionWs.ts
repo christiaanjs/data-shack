@@ -32,6 +32,7 @@ type ServerMessage =
 // the DO never answers — an older DO), false if another socket already owns it.
 const pendingClaims = new Map<string, (accepted: boolean) => void>();
 const CLAIM_ACK_TIMEOUT_MS = 10_000;
+const activeJobs = new Set<string>();
 
 function claimJob(ws: WebSocket, jobId: string): Promise<boolean> {
   return new Promise((resolve) => {
@@ -246,6 +247,25 @@ async function handleTransformJob(
   getCatalogReady: () => Promise<void>,
 ) {
   // Claim the job — Session DO will broadcast job_status: running to all connected sockets.
+  // The same job can be dispatched to this socket twice in quick succession;
+  // only the first may proceed (a second claim would clobber the first's ack waiter).
+  if (activeJobs.has(msg.jobId)) return;
+  activeJobs.add(msg.jobId);
+  try {
+    await runClaimedJob(ws, msg, workerBase, getAuthHeaders, getDb, getCatalogReady);
+  } finally {
+    activeJobs.delete(msg.jobId);
+  }
+}
+
+async function runClaimedJob(
+  ws: WebSocket,
+  msg: { jobId: string; sql: string },
+  workerBase: string,
+  getAuthHeaders: () => Promise<Record<string, string>>,
+  getDb: () => Promise<AsyncDuckDB>,
+  getCatalogReady: () => Promise<void>,
+) {
   // If another socket already owns the job, skip it rather than run a duplicate.
   if (!(await claimJob(ws, msg.jobId))) return;
 

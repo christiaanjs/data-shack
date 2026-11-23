@@ -48,6 +48,11 @@ export function connectSession(config: {
   // Claim acks from the Session DO, keyed by jobId. Resolves true if the claim
   // was accepted (or never answered), false if another socket already owns it.
   const pendingClaims = new Map<string, (accepted: boolean) => void>();
+  // Jobs this socket is currently claiming or running. The same job can be
+  // dispatched to us more than once in quick succession (connect-time dispatch
+  // plus a commit-triggered one); only the first may proceed, otherwise the
+  // second claim would clobber the first's ack waiter in pendingClaims.
+  const activeJobs = new Set<string>();
 
   function claimJob(ws: WebSocket, jobId: string): Promise<boolean> {
     return new Promise((resolve) => {
@@ -89,6 +94,19 @@ export function connectSession(config: {
     ws: WebSocket,
     msg: { jobId: string; sql: string },
   ): Promise<void> {
+    if (activeJobs.has(msg.jobId)) {
+      logger.info(`job ${msg.jobId} already running on this socket — skipping duplicate dispatch`);
+      return;
+    }
+    activeJobs.add(msg.jobId);
+    try {
+      await runClaimedJob(ws, msg);
+    } finally {
+      activeJobs.delete(msg.jobId);
+    }
+  }
+
+  async function runClaimedJob(ws: WebSocket, msg: { jobId: string; sql: string }): Promise<void> {
     if (!(await claimJob(ws, msg.jobId))) {
       logger.info(`job ${msg.jobId} already claimed elsewhere — skipping`);
       return;
