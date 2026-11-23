@@ -39,7 +39,7 @@ export function TokenView({ ctx }: { ctx: WbCtx }) {
       const res = await fetch(`${WORKER_BASE}/api/tokens`, {
         method: "POST",
         headers,
-        body: JSON.stringify({ name: name.trim(), expiresInDays: expiryDays }),
+        body: JSON.stringify({ name: name.trim(), expires_in_days: expiryDays }),
       });
       if (!res.ok) {
         const d = (await res.json().catch(() => ({}))) as { error?: string };
@@ -218,6 +218,7 @@ export function TokenView({ ctx }: { ctx: WbCtx }) {
               <thead>
                 <tr>
                   <th>Name</th>
+                  <th>Token</th>
                   <th>Created</th>
                   <th>Last used</th>
                   <th>Expires</th>
@@ -229,6 +230,9 @@ export function TokenView({ ctx }: { ctx: WbCtx }) {
                   <tr key={t.id}>
                     <td class="font-mono" style={{ fontWeight: 600 }}>
                       {t.name}
+                    </td>
+                    <td class="font-mono" style={dimStyle}>
+                      {t.token_prefix}…
                     </td>
                     <td>{fmtAgo(t.created_at)}</td>
                     <td>{t.last_used_at ? fmtAgo(t.last_used_at) : "never"}</td>

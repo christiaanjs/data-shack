@@ -16,6 +16,8 @@ export interface CatalogCommitEvent {
   storage_backend: string;
   access_mode: string;
   format: string | null;
+  /** Server-side snapshot creation time (ms); absent from older workers. */
+  createdAt?: number;
 }
 
 export interface CatalogConnection extends PersistentWs {
@@ -50,6 +52,8 @@ export function connectCatalogWs(config: {
     "/catalog/ws",
     tokenProvider,
     {
+      // Bare string: answered by the DO's runtime auto-response without waking it.
+      pingPayload: "ping",
       onOpen: (_ws, isReconnect) => {
         // On (re)connect, do a full resync: on first connect there are no
         // views yet; on reconnect, commits broadcast while the socket was
@@ -73,6 +77,7 @@ export function connectCatalogWs(config: {
           storage_backend: msg.storage_backend as string,
           access_mode: msg.access_mode as string,
           format: (msg.format as string | null) ?? null,
+          createdAt: typeof msg.createdAt === "number" ? msg.createdAt : undefined,
         };
         const snapshot: CatalogSnapshot = {
           id: event.snapshotId,
@@ -81,7 +86,7 @@ export function connectCatalogWs(config: {
           storage_backend: event.storage_backend,
           access_mode: event.access_mode,
           format: event.format,
-          created_at: Date.now(),
+          created_at: event.createdAt ?? Date.now(),
         };
 
         const thisRefresh = refreshChain.then(async () => {

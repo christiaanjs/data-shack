@@ -2,7 +2,11 @@
 // parity with the browser client (SELECT * FROM my_table instead of raw
 // storage URIs) is optional — see config.enableCatalogViews.
 import type { DuckDBEngine } from "../duckdb/engine.js";
+import { createLogger } from "../logger.js";
 import { acquireProxyCred, buildS3Secret, parseStorageUri } from "../storage.js";
+import { addCatalogSnapshot, loadCatalogSnapshots } from "./snapshots.js";
+
+const logger = createLogger("catalog-views");
 
 export interface CatalogTable {
   id: string;
@@ -61,6 +65,15 @@ export async function registerCatalogViews(
   getAuthHeaders: () => Promise<Record<string, string>>,
 ): Promise<RegisterResult> {
   const tables = await fetchCatalogMetadata(workerBase, getAuthHeaders);
+
+  // Expose full snapshot history as the catalog_snapshots table. Best effort:
+  // the per-table views below don't depend on it.
+  try {
+    await loadCatalogSnapshots(engine, workerBase, getAuthHeaders);
+  } catch (err) {
+    logger.warn("catalog_snapshots load failed", err);
+  }
+
   if (tables.length === 0) return { tables, failed: [] };
 
   const withSnaps = tables.filter(
@@ -140,6 +153,11 @@ export async function refreshSingleView(
   workerBase: string,
   getAuthHeaders: () => Promise<Record<string, string>>,
 ): Promise<void> {
+  try {
+    await addCatalogSnapshot(engine, tableName, snapshot);
+  } catch (err) {
+    logger.warn("catalog_snapshots update failed", err);
+  }
   const failed: string[] = [];
   await registerView(engine, tableName, snapshot, workerBase, getAuthHeaders, new Map(), failed);
   if (failed.length > 0) {

@@ -95,6 +95,7 @@ export interface WbBackend {
 export interface WbToken {
   id: string;
   name: string;
+  token_prefix: string;
   created_at: number;
   last_used_at: number | null;
   expires_at: number | null;

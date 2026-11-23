@@ -10,6 +10,14 @@ export interface PersistentWsHandlers {
   onOpen?: (ws: WebSocket, isReconnect: boolean) => void;
   onMessage: (data: string, ws: WebSocket) => void;
   onClose?: () => void;
+  /**
+   * Keepalive payload sent every PING_INTERVAL_MS. Defaults to the Session
+   * DO's JSON protocol (`{"type":"ping"}`, handled in webSocketMessage).
+   * The Catalog DO instead auto-responds to the bare string "ping" at the
+   * runtime level (`ctx.setWebSocketAutoResponse`) without waking the DO —
+   * pass `"ping"` for that connection.
+   */
+  pingPayload?: string;
 }
 
 export interface PersistentWs {
@@ -65,7 +73,9 @@ export function connectPersistentWs(
       handlers.onOpen?.(socket, everConnected);
       everConnected = true;
       pingInterval = setInterval(() => {
-        if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "ping" }));
+        if (socket.readyState === WebSocket.OPEN) {
+          socket.send(handlers.pingPayload ?? JSON.stringify({ type: "ping" }));
+        }
       }, PING_INTERVAL_MS);
     });
 

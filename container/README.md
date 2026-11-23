@@ -33,23 +33,25 @@ request-triggered FaaS; see `deploy/README.md`.
 **Auth: three supported modes**, all already supported by the existing Worker
 with no server-side changes:
 
-- **`AUTH_MODE=token`** (recommended) — a personal access token you create
-  yourself from the Workbench UI: Settings → API Tokens → New token (or
-  `POST /api/tokens`). It's a real, revocable, optionally-expiring credential
-  scoped to your own user — no shared secret, no interactive OAuth dance, no
-  rotating file to persist. The Worker recognizes the `dspat_` prefix and
-  checks it against the `personal_access_tokens` table directly
-  (`src/auth/middleware.ts`), independent of `ENABLE_DEV_AUTH`/`ENABLE_OAUTH`.
-  Revoke it from the same UI page the moment you decommission a container.
+- **`AUTH_MODE=token`** (recommended) — an API token you create yourself:
+  the `dshack` CLI (`dshack auth create-token <name>`), the Workbench UI
+  (Settings → API Tokens → New token), or `POST /api/tokens` directly — all
+  mint the same kind of credential. It's a real, revocable,
+  optionally-expiring token scoped to your own user — no shared secret, no
+  interactive OAuth dance, no rotating file to persist. The Worker
+  recognizes the `dsk_` prefix and checks it against the `api_tokens` table
+  directly (`src/auth/middleware.ts`), independent of
+  `ENABLE_DEV_AUTH`/`ENABLE_OAUTH`. Revoke it from the same place the moment
+  you decommission a container. Note it cannot itself mint further tokens
+  (`POST /api/tokens` returns 403 for an api-token-authenticated caller).
 - **`AUTH_MODE=dev-token`** (simplest, but a shared secret) — a static
   token matching the Worker's `ENABLE_DEV_AUTH` bypass
   (`src/auth/middleware.ts`). No expiry, no refresh logic. Give this
   container its own `DEV_TOKEN`/`DEV_USER_ID` secret pair on the Worker —
   don't reuse your local-dev or CI secret — since it's effectively a
   long-lived bearer credential for whatever `DEV_USER_ID` you configure, and
-  unlike a personal access token it can't be revoked individually (only by
-  rotating the Worker's `DEV_TOKEN` secret, which invalidates every client
-  using it).
+  unlike an API token it can't be revoked individually (only by rotating
+  the Worker's `DEV_TOKEN` secret, which invalidates every client using it).
 - **`AUTH_MODE=oauth-refresh`** — proper per-user OAuth via a full DCR +
   PKCE login, for cases where a personal access token isn't suitable (e.g.
   you want the container to act as a distinct Google identity rather than a
@@ -64,16 +66,26 @@ with no server-side changes:
   exactly one container per credential file (a second replica sharing the
   file will race the rotation and lock the other out).
 
+**`catalog_snapshots` table.** When catalog views are enabled, SQL also sees
+a `catalog_snapshots(table_name, snapshot_id, uri, url, backend, format,
+created_at)` table exposing every historical snapshot of every table (not
+just the latest, like the per-table views) — mirrors
+`frontend/src/catalogSnapshots.ts`. `url` is a directly-readable `s3://...`
+URL, NULL for `http-ds://` snapshots or ones on a since-deleted backend.
+Since `@duckdb/node-api` has no virtual-file registration API like
+duckdb-wasm's `registerFileText()`, rows are loaded via a plain bulk
+`INSERT` instead (`src/catalog/snapshots.ts`).
+
 ## Configuration
 
 | Env var | Required | Default | Meaning |
 |---|---|---|---|
 | `WORKER_URL` | yes | — | Worker origin, e.g. `https://data-shack.example.workers.dev` |
 | `AUTH_MODE` | no | `dev-token` | `token`, `dev-token`, or `oauth-refresh` |
-| `API_TOKEN` | if `AUTH_MODE=token` | — | A personal access token from Settings → API Tokens in the Workbench UI |
+| `API_TOKEN` | if `AUTH_MODE=token` | — | An API token from `dshack auth create-token`, the Workbench UI, or `POST /api/tokens` |
 | `DEV_TOKEN` | if `AUTH_MODE=dev-token` | — | Must match the Worker's `DEV_TOKEN` secret |
 | `AUTH_CREDENTIALS_PATH` | if `AUTH_MODE=oauth-refresh` | `/data/credentials.json` | Path to the file produced by `npm run login` |
-| `ENABLE_CATALOG_VIEWS` | no | `true` | Also connect to `/catalog/ws` and register `CREATE VIEW` per catalog table, so SQL can reference tables by name. Set `false` to skip if you only ever query raw `r2://`/`http-ds://` URIs directly. |
+| `ENABLE_CATALOG_VIEWS` | no | `true` | Also connect to `/catalog/ws` and register `CREATE VIEW` per catalog table, so SQL can reference tables by name, and load the full snapshot history as a `catalog_snapshots` table (see below). Set `false` to skip if you only ever query raw `r2://`/`http-ds://` URIs directly. |
 | `DUCKDB_PATH` | no | `:memory:` | DuckDB database file, or `:memory:` |
 | `DUCKDB_EXTENSION_DIR` | no | — | Fixed extension cache dir; set by the Docker image, leave unset locally |
 | `LOG_LEVEL` | no | `info` | `debug`\|`info`\|`warn`\|`error` |
@@ -85,7 +97,7 @@ npm install
 npm run typecheck
 
 # token mode — create a token in the Workbench UI first (Settings → API Tokens)
-WORKER_URL=http://localhost:8787 AUTH_MODE=token API_TOKEN=dspat_... \
+WORKER_URL=http://localhost:8787 AUTH_MODE=token API_TOKEN=dsk_... \
   npm run build && npm start
 
 # dev-token mode
@@ -106,7 +118,7 @@ docker build -t data-shack-session-client .
 docker run --rm \
   -e WORKER_URL=https://your-worker.example.workers.dev \
   -e AUTH_MODE=token \
-  -e API_TOKEN=dspat_... \
+  -e API_TOKEN=dsk_... \
   data-shack-session-client
 
 # oauth-refresh mode needs a writable volume for the rotating refresh token:
@@ -127,6 +139,6 @@ storage backends it proxies to.
 
 ## Deploying
 
-See [`deploy/README.md`](./deploy/README.md) for a comparison of free-tier
-hosting options and Terraform for the recommended one (an Oracle Cloud
-Always Free VM).
+See [`deploy/README.md`](./deploy/README.md) for a comparison of hosting
+options, including a researched (but not yet implemented) feasibility
+write-up for running this on Cloudflare Containers (Workers paid plan).

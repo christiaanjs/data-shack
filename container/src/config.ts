@@ -6,8 +6,8 @@ export interface Config {
   authMode: AuthMode;
   /** dev-token mode: the shared secret matching the Worker's DEV_TOKEN. */
   devToken?: string;
-  /** token mode: a personal access token minted from the Workbench UI (Settings → API Tokens). */
-  patToken?: string;
+  /** token mode: an API token minted via `dshack auth create-token`, the Workbench UI, or POST /api/tokens. */
+  apiToken?: string;
   /** oauth-refresh mode: path to the JSON credential file produced by `npm run login`. */
   credentialsPath: string;
   /** Whether to also connect to /catalog/ws and register DuckDB views per catalog table. */
@@ -38,11 +38,11 @@ export function loadConfig(): Config {
     throw new Error("AUTH_MODE=dev-token requires DEV_TOKEN to be set");
   }
 
-  const patToken = process.env.API_TOKEN;
-  if (authMode === "token" && !patToken) {
+  const apiToken = process.env.API_TOKEN;
+  if (authMode === "token" && !apiToken) {
     throw new Error(
-      "AUTH_MODE=token requires API_TOKEN to be set — create one in the Workbench UI " +
-        "(Settings → API Tokens) or POST /api/tokens",
+      "AUTH_MODE=token requires API_TOKEN to be set — create one with `dshack auth create-token`, " +
+        "in the Workbench UI (Settings → API Tokens), or POST /api/tokens",
     );
   }
 
@@ -50,7 +50,7 @@ export function loadConfig(): Config {
     workerBase,
     authMode,
     devToken,
-    patToken,
+    apiToken,
     credentialsPath: process.env.AUTH_CREDENTIALS_PATH ?? "/data/credentials.json",
     enableCatalogViews: (process.env.ENABLE_CATALOG_VIEWS ?? "true").toLowerCase() !== "false",
     duckdbPath: process.env.DUCKDB_PATH ?? ":memory:",
