@@ -874,6 +874,31 @@ describe("transform job dispatch via WebSocket", () => {
     ws.close();
   });
 
+  it("acks a claim with job_accepted and rejects a duplicate claim with job_rejected", async () => {
+    const jobId = await createTransformJob("lifecycle_claim_ack");
+
+    await SELF.fetch(`http://localhost/api/transform-jobs/${jobId}/trigger`, {
+      method: "POST",
+      headers: DEV_HEADERS,
+    });
+
+    const ws1 = await connectMockBrowser();
+    await waitForTransformJob(ws1, jobId);
+    const ws2 = await connectMockBrowser();
+
+    const accepted = waitForWsMessage<{ jobId: string }>(ws1, "job_accepted");
+    ws1.send(JSON.stringify({ type: "job_claimed", jobId }));
+    expect((await accepted).jobId).toBe(jobId);
+
+    // A second socket claiming the same (now running) job must be told it lost.
+    const rejected = waitForWsMessage<{ jobId: string }>(ws2, "job_rejected");
+    ws2.send(JSON.stringify({ type: "job_claimed", jobId }));
+    expect((await rejected).jobId).toBe(jobId);
+
+    ws1.close();
+    ws2.close();
+  });
+
   it("job_complete marks job done and commits output to catalog", async () => {
     const jobId = await createTransformJob("lifecycle_complete");
 

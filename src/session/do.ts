@@ -498,8 +498,12 @@ export class SessionDO implements DurableObject {
         // doesn't reset the legitimate owner's job back to pending.
         const cleaned = inflightJobIds.filter((id) => id !== msg.jobId);
         ws.serializeAttachment({ ...attachment, inflightJobIds: cleaned });
+        // Tell the claimant it lost, so it doesn't run a duplicate of a job
+        // that is already running (or gone). Older clients ignore this.
+        ws.send(JSON.stringify({ type: "job_rejected", jobId: msg.jobId }));
         return;
       }
+      ws.send(JSON.stringify({ type: "job_accepted", jobId: msg.jobId }));
       this.broadcastJobStatus(userId, msg.jobId, "running");
       return;
     }

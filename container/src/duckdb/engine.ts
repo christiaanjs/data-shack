@@ -41,6 +41,13 @@ function serializeValue(v: unknown): unknown {
 
 export class DuckDBEngine {
   private instance: DuckDBInstance | null = null;
+  // Preamble statements are CREATE OR REPLACE SECRET, and secrets are
+  // instance-global: two connections replacing the same secret at once fail
+  // with a "Catalog write-write conflict". Node DuckDB runs connections truly
+  // in parallel (duckdb-wasm's single worker thread serialises them, which is
+  // why the browser client never sees this), so chain the preambles. The
+  // queries themselves still run concurrently.
+  private preambleChain: Promise<unknown> = Promise.resolve();
 
   constructor(
     private readonly dbPath: string,
@@ -76,8 +83,12 @@ export class DuckDBEngine {
     if (!this.instance) throw new Error("DuckDBEngine not initialized");
     const conn = await this.instance.connect();
     try {
-      if (preamble) {
-        for (const stmt of preamble) await conn.run(stmt);
+      if (preamble && preamble.length > 0) {
+        const run = this.preambleChain.then(async () => {
+          for (const stmt of preamble) await conn.run(stmt);
+        });
+        this.preambleChain = run.catch(() => undefined);
+        await run;
       }
       const reader = await conn.runAndReadAll(sql);
       const columns = reader.columnNames();
