@@ -23,6 +23,8 @@ export function TransformView({ tab, ctx }: { tab: WbTab; ctx: WbCtx }) {
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saveOk, setSaveOk] = useState(false);
+  const [triggering, setTriggering] = useState(false);
+  const [runMsg, setRunMsg] = useState<string | null>(null);
 
   // Trigger editing
   const [watches, setWatches] = useState<string[]>([]);
@@ -58,6 +60,31 @@ export function TransformView({ tab, ctx }: { tab: WbTab; ctx: WbCtx }) {
       )
       .catch(() => {});
   }, [trId]);
+
+  // Queue the saved job to run for real (output written + committed), unlike Dry run, which
+  // only executes the editor's SQL here and writes nothing.
+  async function runNow() {
+    if (!tr) return;
+    setTriggering(true);
+    setRunMsg(null);
+    try {
+      const res = await fetch(`${WORKER_BASE}/api/transform-jobs/${tr.id}/trigger`, {
+        method: "POST",
+        headers: await authHeaders(),
+      });
+      if (res.ok) {
+        setRunMsg("Queued");
+        ctx.refreshData();
+      } else {
+        const data = (await res.json().catch(() => ({}))) as { error?: string };
+        setRunMsg(data.error ?? `Error ${res.status}`);
+      }
+    } catch {
+      setRunMsg("Request failed");
+    } finally {
+      setTriggering(false);
+    }
+  }
 
   const statusStr = tr?.status ?? "draft";
   const statusClass = statusStr === "draft" ? "idle" : statusStr;
@@ -199,6 +226,23 @@ export function TransformView({ tab, ctx }: { tab: WbTab; ctx: WbCtx }) {
           {running ? <span class="loading loading-xs" /> : <PlayIcon size={13} />}
           Dry run
         </button>
+        {runMsg && <span class="wb-tr-hint">{runMsg}</span>}
+        {!isNew && (
+          <button
+            type="button"
+            class="btn btn-outline btn-sm"
+            onClick={() => runNow().catch(() => {})}
+            disabled={triggering || tr?.status === "running" || tr?.status === "pending"}
+            title={
+              tr?.status === "running" || tr?.status === "pending"
+                ? "Already queued or running"
+                : "Run the saved job now (writes its output). Unsaved edits are not included."
+            }
+          >
+            {triggering && <span class="loading loading-xs" />}
+            {triggering ? "Queuing…" : "Run now"}
+          </button>
+        )}
         <button type="button" class="btn btn-primary btn-sm" onClick={save} disabled={saving}>
           {saving ? <span class="loading loading-xs" /> : <SaveIcon size={13} />}
           {isNew ? "Create" : "Save"}
