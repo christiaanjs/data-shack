@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import { BackendView } from "./BackendView.tsx";
+import { ConfirmDialog, useEscape } from "./ConfirmDialog.tsx";
 import { CredView } from "./CredView.tsx";
 import { DashboardEditView } from "./DashboardEditView.tsx";
 import { JobView } from "./JobView.tsx";
@@ -18,6 +19,7 @@ import {
   SearchIcon,
   TableIcon,
   TerminalIcon,
+  TrashIcon,
 } from "./wbIcons.tsx";
 import type { QueryResult, WbCtx, WbTab } from "./workbench-types.ts";
 
@@ -29,6 +31,19 @@ export function SqlTabView({ tab, ctx }: { tab: WbTab; ctx: WbCtx }) {
   const [running, setRunning] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveName, setSaveName] = useState(tab.title !== "Untitled" ? tab.title : "");
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteErr, setDeleteErr] = useState<string | null>(null);
+
+  async function deleteSaved() {
+    if (!tab.savedId) return;
+    setDeleting(true);
+    setDeleteErr(null);
+    const err = await ctx.deleteSavedQuery(tab.savedId);
+    setDeleting(false);
+    if (err) setDeleteErr(err);
+    else setConfirmDelete(false);
+  }
 
   async function run() {
     const s = edRef.current ? edRef.current.getDoc() : (tab.sql ?? "");
@@ -91,6 +106,20 @@ export function SqlTabView({ tab, ctx }: { tab: WbTab; ctx: WbCtx }) {
             </button>
           </span>
         )}
+        {tab.savedId && (
+          <button
+            type="button"
+            class="btn btn-ghost btn-sm"
+            onClick={() => {
+              setDeleteErr(null);
+              setConfirmDelete(true);
+            }}
+            title="Delete this saved query"
+          >
+            <TrashIcon size={13} />
+            Delete
+          </button>
+        )}
         <span style={{ flex: 1 }} />
         {!ctx.session.enabled && (
           <span
@@ -109,6 +138,16 @@ export function SqlTabView({ tab, ctx }: { tab: WbTab; ctx: WbCtx }) {
         )}
         <span class="wb-sql-name">{tab.title}.sql</span>
       </div>
+      {confirmDelete && (
+        <ConfirmDialog
+          title={`Delete saved query "${tab.title}"?`}
+          message="The saved query is removed from the sidebar. This tab keeps its SQL, but the saved copy can't be recovered."
+          busy={deleting}
+          error={deleteErr}
+          onConfirm={() => void deleteSaved()}
+          onCancel={() => setConfirmDelete(false)}
+        />
+      )}
       <div class="wb-sql-split">
         <div class="wb-sql-editor">
           <SqlEditor
@@ -139,7 +178,19 @@ interface SnapshotEntry {
   created_at: number;
 }
 
-export function TableDetailView({ item: t, ctx }: { item: CatalogTableWithSnapshot; ctx: WbCtx }) {
+export function TableDetailView({
+  item: t,
+  tabId,
+  ctx,
+}: {
+  item: CatalogTableWithSnapshot;
+  tabId: string;
+  ctx: WbCtx;
+}) {
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteErr, setDeleteErr] = useState<string | null>(null);
+  const [editingSnap, setEditingSnap] = useState<SnapshotEntry | null>(null);
   const [schema, setSchema] = useState<Array<[string, string]> | null>(null);
   const [snapshots, setSnapshots] = useState<SnapshotEntry[] | null>(null);
   const [preview, setPreview] = useState<QueryResult | null>(null);
@@ -189,6 +240,52 @@ export function TableDetailView({ item: t, ctx }: { item: CatalogTableWithSnapsh
       .catch(() => {});
   }, [t.name, ctx.session.enabled, t.latestSnapshot, refreshKey]);
 
+  // Removes the table from the catalog (a soft delete: the files in storage are untouched).
+  async function deleteTable() {
+    setDeleting(true);
+    setDeleteErr(null);
+    try {
+      const res = await fetch(`${WORKER_BASE}/catalog/tables/${encodeURIComponent(t.name)}`, {
+        method: "DELETE",
+        headers: await authHeaders(),
+      });
+      if (!res.ok && res.status !== 404) {
+        throw new Error((await res.text()) || `Delete failed (${res.status})`);
+      }
+      ctx.refreshCatalog();
+      ctx.closeTab(tabId);
+    } catch (err) {
+      setDeleteErr(err instanceof Error ? err.message : "Delete failed");
+      setDeleting(false);
+    }
+  }
+
+  const deleteButton = (
+    <button
+      type="button"
+      class="btn btn-ghost btn-sm"
+      title="Remove this table from the catalog"
+      onClick={() => {
+        setDeleteErr(null);
+        setConfirmDelete(true);
+      }}
+    >
+      <TrashIcon size={13} />
+      Delete
+    </button>
+  );
+  const deleteDialog = confirmDelete && (
+    <ConfirmDialog
+      title={`Remove table "${t.name}" from the catalog?`}
+      message="Queries and transforms that read this table will no longer find it. The files in storage are not deleted."
+      confirmLabel="Remove table"
+      busy={deleting}
+      error={deleteErr}
+      onConfirm={() => void deleteTable()}
+      onCancel={() => setConfirmDelete(false)}
+    />
+  );
+
   const snap = t.latestSnapshot;
 
   if (!snap) {
@@ -203,7 +300,9 @@ export function TableDetailView({ item: t, ctx }: { item: CatalogTableWithSnapsh
             <h1 class="wb-doc-title">{t.name}</h1>
             <p class="wb-doc-sub">View unavailable — no snapshot found.</p>
           </div>
+          <div class="wb-doc-actions">{deleteButton}</div>
         </div>
+        {deleteDialog}
         <div class="alert alert-warning">
           <span>
             No snapshot committed for <code class="font-mono">{t.name}</code>. Re-run its load job
@@ -248,12 +347,25 @@ export function TableDetailView({ item: t, ctx }: { item: CatalogTableWithSnapsh
           <button type="button" class="btn btn-ghost btn-sm" title="Reload" onClick={reload}>
             <RefreshIcon size={13} />
           </button>
+          {deleteButton}
           <button type="button" class="btn btn-primary btn-sm" onClick={queryTable}>
             <PlayIcon size={13} />
             Query table
           </button>
         </div>
       </div>
+      {deleteDialog}
+      {editingSnap && (
+        <EditSnapshotDialog
+          snapshot={editingSnap}
+          onClose={() => setEditingSnap(null)}
+          onSaved={() => {
+            setEditingSnap(null);
+            reload();
+            ctx.refreshCatalog();
+          }}
+        />
+      )}
 
       <div class="wb-stat-row">
         {[
@@ -348,7 +460,20 @@ export function TableDetailView({ item: t, ctx }: { item: CatalogTableWithSnapsh
                   </div>
                   <div class="wb-tl-uri">{s.uri}</div>
                 </div>
-                <div class="wb-tl-meta">{fmtAgo(s.created_at)}</div>
+                <div class="wb-tl-meta">
+                  {fmtAgo(s.created_at)}
+                  {s.id && (
+                    <button
+                      type="button"
+                      class="btn btn-ghost btn-xs"
+                      style={{ marginLeft: 6 }}
+                      title="Edit this snapshot's URI or format"
+                      onClick={() => setEditingSnap(s)}
+                    >
+                      Edit
+                    </button>
+                  )}
+                </div>
               </div>
             ))}
           </div>
@@ -402,6 +527,114 @@ export function TableDetailView({ item: t, ctx }: { item: CatalogTableWithSnapsh
         </div>
       )}
     </div>
+  );
+}
+
+// ── Edit snapshot ──────────────────────────────────────────────────────────────
+
+const SNAPSHOT_FORMATS = [
+  { value: "", label: "Auto — infer from URI extension" },
+  { value: "ndjson", label: "NDJSON / JSON Lines (.ndjson, .jsonl)" },
+  { value: "json", label: "JSON array (.json)" },
+  { value: "parquet", label: "Parquet (.parquet)" },
+  { value: "csv", label: "CSV (.csv)" },
+];
+
+function EditSnapshotDialog({
+  snapshot,
+  onClose,
+  onSaved,
+}: {
+  snapshot: SnapshotEntry;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [uri, setUri] = useState(snapshot.uri);
+  const [format, setFormat] = useState(snapshot.format ?? "");
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  useEscape(onClose, !saving);
+
+  async function save() {
+    setSaving(true);
+    setErr(null);
+    try {
+      const res = await fetch(
+        `${WORKER_BASE}/catalog/snapshots/${encodeURIComponent(snapshot.id)}`,
+        {
+          method: "PATCH",
+          headers: { ...(await authHeaders()), "Content-Type": "application/json" },
+          body: JSON.stringify({ uri: uri.trim(), format: format || null }),
+        },
+      );
+      if (!res.ok) throw new Error((await res.text()) || `Update failed (${res.status})`);
+      onSaved();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Update failed");
+      setSaving(false);
+    }
+  }
+
+  return (
+    <dialog open class="modal modal-open" aria-label="Edit snapshot">
+      <div class="modal-box space-y-3">
+        <h3 class="font-bold text-lg">Edit snapshot</h3>
+        <p class="text-sm" style={{ opacity: 0.7 }}>
+          Changes where this snapshot reads from. If it is the current snapshot, queries on the
+          table use the new location straight away.
+        </p>
+        <fieldset class="fieldset">
+          <legend class="fieldset-legend">URI</legend>
+          <input
+            type="text"
+            class="input input-sm font-mono w-full"
+            value={uri}
+            onInput={(e) => setUri((e.target as HTMLInputElement).value)}
+          />
+        </fieldset>
+        <fieldset class="fieldset">
+          <legend class="fieldset-legend">Format</legend>
+          <select
+            class="select select-sm w-full"
+            value={format}
+            onChange={(e) => setFormat((e.target as HTMLSelectElement).value)}
+          >
+            {SNAPSHOT_FORMATS.map((f) => (
+              <option key={f.value} value={f.value}>
+                {f.label}
+              </option>
+            ))}
+          </select>
+        </fieldset>
+        {err && (
+          <div role="alert" class="alert alert-error py-2 text-sm">
+            <span>{err}</span>
+          </div>
+        )}
+        <div class="modal-action">
+          <button type="button" class="btn btn-sm" onClick={onClose} disabled={saving}>
+            Cancel
+          </button>
+          <button
+            type="button"
+            class="btn btn-sm btn-primary"
+            onClick={() => void save()}
+            disabled={saving || !uri.trim()}
+          >
+            {saving && <span class="loading loading-xs" />}
+            Save
+          </button>
+        </div>
+      </div>
+      <button
+        type="button"
+        class="modal-backdrop"
+        onClick={() => {
+          if (!saving) onClose();
+        }}
+        aria-label="Close dialog"
+      />
+    </dialog>
   );
 }
 
@@ -620,7 +853,9 @@ export function TabContent({ tab, ctx }: { tab: WbTab | null; ctx: WbCtx }) {
     case "sql":
       return <SqlTabView tab={tab} ctx={ctx} />;
     case "table":
-      return <TableDetailView item={tab.item as CatalogTableWithSnapshot} ctx={ctx} />;
+      return (
+        <TableDetailView item={tab.item as CatalogTableWithSnapshot} tabId={tab.id} ctx={ctx} />
+      );
     case "transform":
       return <TransformView tab={tab} ctx={ctx} />;
     case "job":

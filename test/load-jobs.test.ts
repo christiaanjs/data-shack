@@ -301,6 +301,104 @@ describe("PATCH /api/load-jobs/:id", () => {
     });
     expect(res.status).toBe(404);
   });
+
+  describe("date_range_config / pagination_config", () => {
+    const dateRange = {
+      param_from: "start",
+      param_to: "end",
+      format: "iso_date",
+      lookback_days: 7,
+    };
+    const pagination = {
+      type: "cursor",
+      cursor_param: "cursor",
+      cursor_path: "cursor.next",
+      data_path: "items",
+    };
+
+    async function createConfiguredJob() {
+      const credId = await createCredential();
+      const sbId = await createBackend();
+      const base = { name: "Configured", credential_id: credId, storage_backend_id: sbId };
+      const createRes = await SELF.fetch("http://localhost/api/load-jobs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+        body: JSON.stringify({
+          ...base,
+          table_name: "configured_tbl",
+          format: "ndjson",
+          date_range_config: dateRange,
+          pagination_config: pagination,
+        }),
+      });
+      const { id } = (await createRes.json()) as { id: string };
+      return { id, base };
+    }
+
+    const patch = (id: string, body: Record<string, unknown>) =>
+      SELF.fetch(`http://localhost/api/load-jobs/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", ...DEV_HEADERS },
+        body: JSON.stringify(body),
+      });
+
+    type JobRow = { date_range_config: string | null; pagination_config: string | null };
+
+    it("keeps both configs when they are omitted from the PATCH body", async () => {
+      const { id, base } = await createConfiguredJob();
+
+      const res = await patch(id, { ...base, table_name: "configured_tbl", name: "Renamed" });
+
+      expect(res.status).toBe(200);
+      const job = (await res.json()) as JobRow;
+      expect(JSON.parse(job.date_range_config ?? "null")).toEqual(dateRange);
+      expect(JSON.parse(job.pagination_config ?? "null")).toEqual(pagination);
+    });
+
+    it("clears a config when it is explicitly null", async () => {
+      const { id, base } = await createConfiguredJob();
+
+      const res = await patch(id, {
+        ...base,
+        table_name: "configured_tbl",
+        date_range_config: null,
+        pagination_config: null,
+      });
+
+      expect(res.status).toBe(200);
+      const job = (await res.json()) as JobRow;
+      expect(job.date_range_config).toBeNull();
+      expect(job.pagination_config).toBeNull();
+    });
+
+    it("replaces a config when a new value is sent", async () => {
+      const { id, base } = await createConfiguredJob();
+
+      const res = await patch(id, {
+        ...base,
+        table_name: "configured_tbl",
+        date_range_config: { ...dateRange, lookback_days: 30 },
+      });
+
+      expect(res.status).toBe(200);
+      const job = (await res.json()) as JobRow;
+      expect(JSON.parse(job.date_range_config ?? "null")).toEqual({
+        ...dateRange,
+        lookback_days: 30,
+      });
+      // Untouched: pagination was omitted.
+      expect(JSON.parse(job.pagination_config ?? "null")).toEqual(pagination);
+    });
+
+    it("rejects a non-JSON format while a preserved pagination config is in place", async () => {
+      const { id, base } = await createConfiguredJob();
+
+      const res = await patch(id, { ...base, table_name: "configured_tbl", format: "csv" });
+
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toMatch(/pagination_config requires/);
+    });
+  });
 });
 
 // ── DELETE /api/load-jobs/:id ─────────────────────────────────────────────
@@ -550,7 +648,7 @@ describe("load job ETL config", () => {
     expect(res.status).toBe(400);
   });
 
-  it("PATCH clears configs when omitted", async () => {
+  it("PATCH clears configs when they are explicitly null", async () => {
     const credId = await createCredential();
     const sbId = await createBackend();
     const createRes = await SELF.fetch("http://localhost/api/load-jobs", {
@@ -579,7 +677,9 @@ describe("load job ETL config", () => {
         credential_id: credId,
         storage_backend_id: sbId,
         table_name: "clr_tbl",
-        // no date_range_config → should be cleared to null
+        // explicit null clears; omitting the field would keep the stored value
+        date_range_config: null,
+        pagination_config: null,
       }),
     });
     expect(patchRes.status).toBe(200);

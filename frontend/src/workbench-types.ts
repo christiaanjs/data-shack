@@ -139,4 +139,8 @@ export interface WbCtx {
   toggleDock: () => void;
   openPalette: () => void;
   refreshData: () => void;
+  /** Re-reads the catalog table list (after a table is deleted or a snapshot is edited). */
+  refreshCatalog: () => void;
+  /** Deletes a saved query. Resolves to an error message, or null on success. */
+  deleteSavedQuery: (id: string) => Promise<string | null>;
 }
