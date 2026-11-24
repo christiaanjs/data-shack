@@ -306,6 +306,57 @@ export function WorkbenchShell() {
     loadExplorerData().catch(() => {});
   }, [loadExplorerData]);
 
+  // ── Live transform status ──────────────────────────────────────────────────
+  // The transform list is fetched on mount, so without this a transform keeps showing the
+  // status it had when the page loaded. Three feeds keep it current: job_status events from
+  // this tab's session socket, catalog commits (a job's output commits when it finishes), and
+  // a short poll while any job is running or pending (covers jobs run by the container when
+  // this tab has no session socket of its own).
+  const refreshTransforms = useCallback(async () => {
+    if (!authed) return;
+    try {
+      const res = await fetch(`${WORKER_BASE}/api/transform-jobs`, {
+        headers: await getAuthHeaders(),
+      });
+      if (!res.ok) return;
+      const data = (await res.json()) as { jobs?: WbTransform[] };
+      if (data.jobs) setTransforms(data.jobs);
+    } catch {
+      // non-fatal: the list just stays as it was
+    }
+  }, [authed]);
+  const refreshTransformsRef = useRef(refreshTransforms);
+  refreshTransformsRef.current = refreshTransforms;
+
+  useEffect(() => {
+    jobEventListenerRef.current = (ev) => {
+      setTransforms((prev) =>
+        prev.map((t) => {
+          if (t.id !== ev.jobId) return t;
+          if (ev.status === "running") return { ...t, status: "running" };
+          if (ev.status === "done") {
+            return { ...t, status: "done", last_completed_at: Date.now(), last_error: null };
+          }
+          return { ...t, status: "failed", last_error: ev.error };
+        }),
+      );
+      // Reconcile with the server's record once a job settles.
+      if (ev.status !== "running") void refreshTransformsRef.current();
+    };
+    return () => {
+      jobEventListenerRef.current = null;
+    };
+  }, []);
+
+  const hasActiveTransform = transforms.some(
+    (t) => t.status === "running" || t.status === "pending",
+  );
+  useEffect(() => {
+    if (!hasActiveTransform) return;
+    const timer = setInterval(() => void refreshTransforms(), 5_000);
+    return () => clearInterval(timer);
+  }, [hasActiveTransform, refreshTransforms]);
+
   // ── Catalog ─────────────────────────────────────────────────────────────────
 
   const runCatalogInit = useCallback(async () => {
@@ -382,6 +433,7 @@ export function WorkbenchShell() {
     // before any views exist.
     catalogReadyRef.current = Promise.all([catalogReadyRef.current, refreshPromise]).then(() => {});
     dashboardCommitListenerRef.current?.(event);
+    void refreshTransformsRef.current();
   }, []);
 
   // Full catalog re-sync after a WebSocket reconnect: commits broadcast while
