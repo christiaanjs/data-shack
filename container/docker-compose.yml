@@ -10,8 +10,10 @@ services:
       AUTH_CREDENTIALS_PATH: /data/credentials.json
       ENABLE_CATALOG_VIEWS: ${ENABLE_CATALOG_VIEWS:-true}
       LOG_LEVEL: ${LOG_LEVEL:-info}
-    # Only needed for AUTH_MODE=oauth-refresh: mount the credentials.json
-    # produced locally by `npm run login` so refreshed tokens persist across
-    # restarts. Harmless to leave mounted (and empty) in dev-token mode.
+    # Only needed for AUTH_MODE=oauth-refresh: a writable directory holding the
+    # credentials.json produced by `npm run login -- --out data/credentials.json`,
+    # so refreshed tokens persist across restarts. Mount the directory, not the
+    # file: rotation replaces the file by rename, which a file bind mount refuses.
+    # The image runs as UID 10001, so `sudo chown 10001 data` first.
     volumes:
-      - ./credentials.json:/data/credentials.json
+      - ./data:/data

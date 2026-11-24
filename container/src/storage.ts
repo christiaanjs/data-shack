@@ -50,8 +50,10 @@ export async function acquireProxyCred(
   return cred;
 }
 
+// The secret name hex-encodes the bucket (injective, unlike replacing non-alphanumerics,
+// where `sales-prod` and `sales_prod` would collide) so multiple backends can coexist.
 export function buildS3Secret(cred: ProxyCred): string {
-  const secretName = `_ds_${cred.bucket.replace(/[^a-zA-Z0-9]/g, "_")}`;
+  const secretName = `_ds_${Buffer.from(cred.bucket, "utf8").toString("hex")}`;
   return (
     `CREATE OR REPLACE SECRET ${secretName} ` +
     `(TYPE s3, ENDPOINT '${cred.endpoint}', ` +

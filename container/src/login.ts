@@ -150,7 +150,7 @@ async function main(): Promise<void> {
   );
 
   console.log(`\nSaved refresh-token credential to ${out}`);
-  console.log(`Access token (valid ${result.expiresIn}s, not persisted): ${result.accessToken}`);
+  console.log(`Login succeeded (access token valid ${result.expiresIn}s; not shown or saved).`);
   console.log(
     `\nMount ${out} into the container at the path given by AUTH_CREDENTIALS_PATH (default /data/credentials.json) with AUTH_MODE=oauth-refresh.`,
   );
