@@ -8,6 +8,7 @@ import type { DuckDBEngine } from "../duckdb/engine.js";
 import { createLogger } from "../logger.js";
 import { resolveStorageUris } from "../resolveQuery.js";
 import { type PersistentWs, connectPersistentWs } from "../wsClient.js";
+import { copyWroteNothing, emptyOutputSql } from "./emptyOutput.js";
 
 const logger = createLogger("session-ws");
 
@@ -93,7 +94,7 @@ export function connectSession(config: {
 
   async function handleTransformJob(
     ws: WebSocket,
-    msg: { jobId: string; sql: string; outputUri?: string },
+    msg: { jobId: string; sql: string; outputUri?: string; format?: string | null },
   ): Promise<void> {
     if (activeJobs.has(msg.jobId)) {
       logger.info(`job ${msg.jobId} already running on this socket — skipping duplicate dispatch`);
@@ -107,9 +108,28 @@ export function connectSession(config: {
     }
   }
 
+  // COPY ... TO writes no file for an empty result, so the previous output would
+  // otherwise survive. Overwrite it with an explicitly empty one.
+  async function clearStaleOutput(
+    jobId: string,
+    outputUri: string,
+    format: string | null | undefined,
+  ): Promise<void> {
+    const emptySql = emptyOutputSql(outputUri, format);
+    if (!emptySql) {
+      logger.warn(
+        `job ${jobId} produced 0 rows but ${outputUri} (format=${format ?? "?"}) can't be emptied automatically; the previous output is left in place`,
+      );
+      return;
+    }
+    const { sql, preamble } = await resolveStorageUris(emptySql, workerBase, getAuthHeaders);
+    await engine.runQuery(sql, preamble.length > 0 ? preamble : undefined);
+    logger.info(`job ${jobId} produced 0 rows — overwrote ${outputUri} with an empty result`);
+  }
+
   async function runClaimedJob(
     ws: WebSocket,
-    msg: { jobId: string; sql: string; outputUri?: string },
+    msg: { jobId: string; sql: string; outputUri?: string; format?: string | null },
   ): Promise<void> {
     if (!(await claimJob(ws, msg.jobId))) {
       logger.info(`job ${msg.jobId} already claimed elsewhere — skipping`);
@@ -145,6 +165,9 @@ export function connectSession(config: {
         await new Promise((r) => setTimeout(r, 2000));
         await getCatalogReady();
         result = await runOnce();
+      }
+      if (msg.outputUri && copyWroteNothing(result)) {
+        await clearStaleOutput(msg.jobId, msg.outputUri, msg.format);
       }
       ws.send(JSON.stringify({ type: "job_complete", jobId: msg.jobId }));
       logger.info(
