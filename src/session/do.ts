@@ -1,3 +1,4 @@
+import { commitToCatalog } from "../catalog/commit.ts";
 import type { TransformJob } from "../catalog/do.ts";
 import { apiTokenExists, insertApiToken } from "../db/api-tokens.ts";
 import type { Env } from "../types.ts";
@@ -35,6 +36,23 @@ const CONTAINER_WAKE_TIMEOUT_MS = 45_000;
 // loop. This is what makes waking-on-demand cheaper than staying up 24/7:
 // memory/disk are billed only while the container is actually running.
 const CONTAINER_IDLE_TIMEOUT_MS = 10 * 60_000;
+
+// Circuit breaker for AUTOMATIC wakes (queued/committed jobs, re-wake after an
+// exit). After this many consecutive failed wakes — start() failing, no socket
+// within the wake timeout, or a container dying within CONTAINER_SHORT_LIVED_MS
+// of starting — automatic wakes are suppressed for the cooldown, so a broken
+// container isn't restarted (and billed) over and over for the same pending
+// jobs. Explicit /query and /warm calls bypass the breaker (a person is
+// waiting and asked for it); a success closes it again.
+const WAKE_FAILURE_THRESHOLD = 3;
+const WAKE_COOLDOWN_MS = 15 * 60_000;
+const CONTAINER_SHORT_LIVED_MS = 60_000;
+
+interface WakeBreakerState {
+  failures: number;
+  openUntil: number;
+  lastError: string;
+}
 
 type IncomingMessage =
   | { type: "result"; queryId: string; columns: string[]; rows: unknown[][] }
@@ -164,7 +182,7 @@ export class SessionDO implements DurableObject {
       // No browser tab, no already-running container — try to wake one
       // before giving up. No-ops immediately if no container is configured
       // for this environment, or no workerOrigin was supplied to start one.
-      const woke = workerOrigin && (await this.ensureContainerStarted(userId, workerOrigin));
+      const woke = await this.ensureContainerStarted(userId, workerOrigin, "query");
       if (woke) liveSockets = this.liveSocketsFor(userId);
     }
     if (liveSockets.length === 0) {
@@ -235,6 +253,7 @@ export class SessionDO implements DurableObject {
     };
     const { userId, jobIds, workerOrigin } = body;
     if (!userId) return Response.json({ error: "userId is required" }, { status: 400 });
+    if (this.containerWakeEnabled(userId)) await this.rememberWorkerOrigin(workerOrigin);
 
     const liveSockets = this.liveSocketsFor(userId);
     if (liveSockets.length === 0) {
@@ -244,7 +263,7 @@ export class SessionDO implements DurableObject {
       // so there's nothing further to do here. Fire-and-forget: the caller
       // (the commit relay / load-job queue consumer) doesn't wait on this,
       // and the job stays safely 'pending' in the Catalog DO either way.
-      if (workerOrigin) this.ctx.waitUntil(this.ensureContainerStarted(userId, workerOrigin));
+      this.ctx.waitUntil(this.ensureContainerStarted(userId, workerOrigin, "dispatch-jobs", true));
       return Response.json({ dispatched: 0 });
     }
 
@@ -304,7 +323,7 @@ export class SessionDO implements DurableObject {
 
     // Fire-and-forget: the whole point is NOT to make the caller wait out
     // the cold start here.
-    this.ctx.waitUntil(this.ensureContainerStarted(userId, workerOrigin));
+    this.ctx.waitUntil(this.ensureContainerStarted(userId, workerOrigin, "warm"));
     return Response.json({ status: "starting" });
   }
 
@@ -369,22 +388,100 @@ export class SessionDO implements DurableObject {
     }
   }
 
+  private async rememberWorkerOrigin(workerOrigin: string | undefined): Promise<void> {
+    if (!workerOrigin) return;
+    const known = await this.ctx.storage.get<string>("workerOrigin");
+    if (known !== workerOrigin) await this.ctx.storage.put("workerOrigin", workerOrigin);
+  }
+
+  private async getBreaker(): Promise<WakeBreakerState> {
+    return (
+      (await this.ctx.storage.get<WakeBreakerState>("wakeBreaker")) ?? {
+        failures: 0,
+        openUntil: 0,
+        lastError: "",
+      }
+    );
+  }
+
+  private async recordWakeResult(userId: string, ok: boolean, detail: string): Promise<void> {
+    const state = await this.getBreaker();
+    if (ok) {
+      if (state.failures > 0) {
+        console.log(
+          `[SessionDO] wake breaker closed for userId=${userId} after success: ${detail}`,
+        );
+      }
+      await this.ctx.storage.put<WakeBreakerState>("wakeBreaker", {
+        failures: 0,
+        openUntil: 0,
+        lastError: "",
+      });
+      return;
+    }
+    const failures = state.failures + 1;
+    const openUntil =
+      failures >= WAKE_FAILURE_THRESHOLD ? Date.now() + WAKE_COOLDOWN_MS : state.openUntil;
+    console.warn(
+      `[SessionDO] wake failure ${failures}/${WAKE_FAILURE_THRESHOLD} for userId=${userId}: ${detail}${
+        failures >= WAKE_FAILURE_THRESHOLD
+          ? ` — breaker OPEN, automatic wakes suppressed until ${new Date(openUntil).toISOString()}`
+          : ""
+      }`,
+    );
+    await this.ctx.storage.put<WakeBreakerState>("wakeBreaker", {
+      failures,
+      openUntil,
+      lastError: detail,
+    });
+  }
+
   /** Starts (if not already running) this user's container and waits for its
    * own outbound WS to register, up to CONTAINER_WAKE_TIMEOUT_MS. Coalesces
    * concurrent callers (e.g. a /warm call racing a /query call) onto one
    * attempt. Never throws — returns false for "no live session resulted",
-   * whatever the reason (unconfigured, start() failed, timed out). */
-  private async ensureContainerStarted(userId: string, workerOrigin: string): Promise<boolean> {
+   * whatever the reason (unconfigured, start() failed, timed out, breaker open).
+   *
+   * `reason` is only for logs. `automatic` wakes (job dispatch, re-wake after
+   * an exit) honor the circuit breaker; explicit ones (query/warm) don't.
+   * `workerOrigin` falls back to the last one this DO saw, so callers with no
+   * request in hand (the load-job queue consumer) can still wake a container. */
+  private async ensureContainerStarted(
+    userId: string,
+    workerOrigin: string | undefined,
+    reason: string,
+    automatic = false,
+  ): Promise<boolean> {
     const container = this.ctx.container;
     if (!container || !isContainerOwner(this.env, userId)) return false;
+    await this.rememberWorkerOrigin(workerOrigin);
     if (this.liveSocketsFor(userId).length > 0) return true;
 
-    if (!this.containerStarting) {
-      this.containerStarting = this.startContainerAndWait(userId, workerOrigin, container).finally(
-        () => {
-          this.containerStarting = null;
-        },
+    const origin = workerOrigin ?? (await this.ctx.storage.get<string>("workerOrigin"));
+    if (!origin) {
+      console.warn(
+        `[SessionDO] wake (${reason}) skipped for userId=${userId}: no workerOrigin known`,
       );
+      return false;
+    }
+
+    if (automatic) {
+      const breaker = await this.getBreaker();
+      if (breaker.openUntil > Date.now()) {
+        console.warn(
+          `[SessionDO] wake (${reason}) suppressed for userId=${userId}: breaker open until ${new Date(breaker.openUntil).toISOString()} (last error: ${breaker.lastError})`,
+        );
+        return false;
+      }
+    }
+
+    if (!this.containerStarting) {
+      console.log(
+        `[SessionDO] wake (${reason}) starting for userId=${userId}, container.running=${container.running}`,
+      );
+      this.containerStarting = this.startContainerAndWait(userId, origin, container).finally(() => {
+        this.containerStarting = null;
+      });
     }
     return this.containerStarting;
   }
@@ -394,9 +491,13 @@ export class SessionDO implements DurableObject {
     workerOrigin: string,
     container: NonNullable<DurableObjectState["container"]>,
   ): Promise<boolean> {
+    const t0 = Date.now();
     if (!container.running) {
       const token = await this.ensureContainerApiToken(userId);
-      if (!token) return false;
+      if (!token) {
+        await this.recordWakeResult(userId, false, "could not mint container API token");
+        return false;
+      }
 
       try {
         container.start({
@@ -405,13 +506,21 @@ export class SessionDO implements DurableObject {
         });
       } catch (err) {
         console.error(`[SessionDO] container.start() failed for userId=${userId}:`, err);
+        await this.recordWakeResult(userId, false, `container.start() threw: ${String(err)}`);
         return false;
       }
+      await this.ctx.storage.put("containerStartedAt", Date.now());
 
       this.ctx.waitUntil(
-        container.monitor().catch((err: unknown) => {
-          console.warn(`[SessionDO] container exited for userId=${userId}:`, err);
-        }),
+        container
+          .monitor()
+          .then(
+            () => this.onContainerExit(userId, undefined),
+            (err: unknown) => this.onContainerExit(userId, err),
+          )
+          .catch((err: unknown) => {
+            console.error(`[SessionDO] onContainerExit failed for userId=${userId}:`, err);
+          }),
       );
     }
 
@@ -419,7 +528,74 @@ export class SessionDO implements DurableObject {
     // platform's own default idle timeout instead of ours.
     container.setInactivityTimeout(CONTAINER_IDLE_TIMEOUT_MS).catch(() => {});
 
-    return this.waitForLiveSocket(userId, CONTAINER_WAKE_TIMEOUT_MS);
+    const connected = await this.waitForLiveSocket(userId, CONTAINER_WAKE_TIMEOUT_MS);
+    const elapsed = Date.now() - t0;
+    if (connected) {
+      console.log(
+        `[SessionDO] wake succeeded for userId=${userId}: socket live after ${elapsed}ms`,
+      );
+      await this.recordWakeResult(userId, true, `socket live after ${elapsed}ms`);
+    } else {
+      await this.recordWakeResult(
+        userId,
+        false,
+        `no socket within ${CONTAINER_WAKE_TIMEOUT_MS}ms (container.running=${container.running})`,
+      );
+    }
+    return connected;
+  }
+
+  /** Called when the container's process ends (idle timeout, rollout, crash).
+   * If transform jobs are still waiting (e.g. the exit orphaned running ones),
+   * wake it again — subject to the circuit breaker, and a container that
+   * died right after starting counts as a failed wake, so a crash loop can't
+   * restart forever. */
+  private async onContainerExit(userId: string, err: unknown): Promise<void> {
+    const startedAt = (await this.ctx.storage.get<number>("containerStartedAt")) ?? 0;
+    const uptimeMs = startedAt ? Date.now() - startedAt : -1;
+    console.warn(
+      `[SessionDO] container exited for userId=${userId} after ${uptimeMs >= 0 ? `${Math.round(uptimeMs / 1000)}s` : "unknown uptime"}${err ? `: ${String(err)}` : ""}`,
+    );
+    if (uptimeMs >= 0 && uptimeMs < CONTAINER_SHORT_LIVED_MS) {
+      await this.recordWakeResult(
+        userId,
+        false,
+        `container exited ${Math.round(uptimeMs / 1000)}s after starting`,
+      );
+    }
+    await this.rewakeForPendingJobs(userId, "container-exit");
+  }
+
+  private async rewakeForPendingJobs(userId: string, reason: string): Promise<void> {
+    try {
+      // Jobs a dead socket left 'running' go back to 'pending' first.
+      const now = Date.now();
+      const claimedJobIds = this.ctx.getWebSockets(userId).flatMap((s) => {
+        const att = s.deserializeAttachment() as WsAttachment | null;
+        if (!att || now - att.lastPingAt >= STALE_AFTER_MS) return [];
+        return att.inflightJobIds;
+      });
+      await this.catalogStub(userId).fetch("http://do/jobs/reset-orphaned", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ claimedJobIds }),
+      });
+
+      const res = await this.catalogStub(userId).fetch("http://do/jobs/pending");
+      if (!res.ok) return;
+      const { jobs } = (await res.json()) as { jobs: TransformJob[] };
+      if (jobs.length === 0) {
+        console.log(`[SessionDO] ${reason}: no pending jobs, not re-waking userId=${userId}`);
+        return;
+      }
+      console.log(
+        `[SessionDO] ${reason}: ${jobs.length} pending job(s) (${jobs.map((j) => j.name ?? j.id).join(", ")}), re-waking userId=${userId}`,
+      );
+      // handleUpgrade's dispatchPendingJobs hands them over once it connects.
+      await this.ensureContainerStarted(userId, undefined, reason, true);
+    } catch (err) {
+      console.error(`[SessionDO] ${reason}: re-wake check failed for userId=${userId}:`, err);
+    }
   }
 
   private async dispatchPendingJobs(ws: WebSocket, userId: string): Promise<void> {
@@ -534,28 +710,19 @@ export class SessionDO implements DurableObject {
       );
       if (job) {
         // Commit the transform output to the catalog.
-        const commitRes = await this.catalogStub(userId).fetch("http://do/commit", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            table: job.output_table,
-            uri: job.output_uri,
-            storageBackend: job.output_backend,
-            format: job.format ?? undefined,
-            message: `Transform job: ${job.name ?? job.id}`,
-          }),
+        const commit = await commitToCatalog(this.catalogStub(userId), {
+          table: job.output_table,
+          uri: job.output_uri,
+          storageBackend: job.output_backend,
+          format: job.format ?? undefined,
+          message: `Transform job: ${job.name ?? job.id}`,
         });
         console.log(
-          `[SessionDO] job_complete: commit of ${job.output_table} -> ${commitRes.status} jobId=${msg.jobId}`,
+          `[SessionDO] job_complete: commit of ${job.output_table} -> ${commit.status} jobId=${msg.jobId}`,
         );
-        if (commitRes.ok) {
-          const { triggeredJobIds } = (await commitRes.json()) as {
-            triggeredJobIds?: string[];
-          };
-          // Dispatch any newly triggered jobs to connected browsers.
-          if (triggeredJobIds && triggeredJobIds.length > 0) {
-            await this.dispatchPendingJobs(ws, userId);
-          }
+        // Dispatch any newly triggered jobs to connected sockets.
+        if (commit.ok && commit.triggeredJobIds.length > 0) {
+          await this.dispatchPendingJobs(ws, userId);
         }
       }
 
