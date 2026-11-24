@@ -1,4 +1,4 @@
-import { readFile, rename, writeFile } from "node:fs/promises";
+import { readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { createLogger } from "../logger.js";
 import type { TokenProvider } from "./tokenProvider.js";
 
@@ -61,9 +61,20 @@ export class OAuthRefreshTokenProvider implements TokenProvider {
   private async persistRefreshToken(): Promise<void> {
     if (!this.clientId || !this.refreshToken) return;
     const payload: CredentialFile = { clientId: this.clientId, refreshToken: this.refreshToken };
+    const body = `${JSON.stringify(payload, null, 2)}\n`;
     const tmpPath = `${this.credentialsPath}.tmp-${process.pid}`;
-    await writeFile(tmpPath, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 });
-    await rename(tmpPath, this.credentialsPath); // atomic on the same filesystem
+    try {
+      await writeFile(tmpPath, body, { mode: 0o600 });
+      await rename(tmpPath, this.credentialsPath); // atomic on the same filesystem
+    } catch (err) {
+      // The server has already rotated the refresh token, so losing this write
+      // would lock us out at the next restart. A single-file bind mount can't be
+      // replaced by rename (EBUSY) — write it in place instead. Mounting the
+      // parent directory (see README) avoids this path.
+      logger.warn(`atomic credential write failed (${(err as Error).message}); writing in place`);
+      await unlink(tmpPath).catch(() => {});
+      await writeFile(this.credentialsPath, body, { mode: 0o600 });
+    }
   }
 
   private isExpiringSoon(): boolean {

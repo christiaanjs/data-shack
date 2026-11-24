@@ -20,6 +20,10 @@ export interface CatalogCommitEvent {
   createdAt?: number;
 }
 
+// Shorter than the Session DO's 30 s query timeout, so a stalled initial sync
+// degrades to the old behaviour (run without views) rather than a timeout.
+const FIRST_SYNC_GIVE_UP_MS = 20_000;
+
 export interface CatalogConnection extends PersistentWs {
   /** Resolves once every view refresh in flight at call time has settled. */
   getCatalogReady(): Promise<void>;
@@ -37,6 +41,16 @@ export function connectCatalogWs(config: {
   // Chain-accumulates so concurrent commits never clobber each other's view refresh.
   let refreshChain: Promise<void> = Promise.resolve();
 
+  // Pending until the first full sync finishes, so a query that arrives on the
+  // session socket before this socket has even opened waits for the initial
+  // views instead of failing with a missing table. Gives up after a while so a
+  // catalog socket that never connects can't stall queries forever.
+  let markFirstSyncDone: () => void = () => {};
+  const firstSync = new Promise<void>((resolve) => {
+    markFirstSyncDone = resolve;
+    setTimeout(resolve, FIRST_SYNC_GIVE_UP_MS).unref();
+  });
+
   async function fullResync(): Promise<void> {
     try {
       const { failed } = await registerCatalogViews(engine, workerBase, getAuthHeaders);
@@ -44,6 +58,8 @@ export function connectCatalogWs(config: {
       else logger.info("catalog views registered");
     } catch (err) {
       logger.error("catalog view registration failed", err);
+    } finally {
+      markFirstSyncDone();
     }
   }
 
@@ -110,6 +126,6 @@ export function connectCatalogWs(config: {
 
   return {
     ...persistent,
-    getCatalogReady: () => refreshChain,
+    getCatalogReady: () => Promise.all([firstSync, refreshChain]).then(() => {}),
   };
 }

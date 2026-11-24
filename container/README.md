@@ -115,9 +115,9 @@ WORKER_URL=http://localhost:8787 AUTH_MODE=dev-token DEV_TOKEN=some-local-secret
   npm run build && npm start
 
 # oauth-refresh mode — one-time login, then run
-WORKER_URL=https://your-worker.example.workers.dev npm run login   # writes ./credentials.json
+WORKER_URL=https://your-worker.example.workers.dev npm run login -- --out data/credentials.json
 WORKER_URL=https://your-worker.example.workers.dev AUTH_MODE=oauth-refresh \
-  AUTH_CREDENTIALS_PATH=./credentials.json npm run build && npm start
+  AUTH_CREDENTIALS_PATH=./data/credentials.json npm run build && npm start
 ```
 
 ## Docker
@@ -131,11 +131,14 @@ docker run --rm \
   -e API_TOKEN=dsk_... \
   data-shack-session-client
 
-# oauth-refresh mode needs a writable volume for the rotating refresh token:
+# oauth-refresh mode needs a writable directory for the rotating refresh token.
+# Mount the directory (not the file): rotation replaces the file by rename, which
+# a single-file bind mount refuses. The image runs as UID 10001.
+mkdir -p data && sudo chown 10001 data   # after `npm run login -- --out data/credentials.json`
 docker run --rm \
   -e WORKER_URL=https://your-worker.example.workers.dev \
   -e AUTH_MODE=oauth-refresh \
-  -v "$(pwd)/credentials.json:/data/credentials.json" \
+  -v "$(pwd)/data:/data" \
   data-shack-session-client
 ```
 

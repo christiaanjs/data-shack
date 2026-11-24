@@ -53,7 +53,7 @@ export function SqlTabView({ tab, ctx }: { tab: WbTab; ctx: WbCtx }) {
       <div class="wb-sql-toolbar">
         <button
           type="button"
-          class={`btn btn-primary btn-sm${!ctx.session.enabled || running ? " btn-disabled" : ""}`}
+          class={`btn btn-primary btn-sm${!ctx.session.canRun || running ? " btn-disabled" : ""}`}
           onClick={run}
         >
           {running ? <span class="loading loading-xs" /> : <PlayIcon size={13} />}
@@ -93,8 +93,18 @@ export function SqlTabView({ tab, ctx }: { tab: WbTab; ctx: WbCtx }) {
         )}
         <span style={{ flex: 1 }} />
         {!ctx.session.enabled && (
-          <span style={{ fontSize: 11.5, color: "var(--color-warning)" }}>
-            DuckDB disabled — enable in the title bar
+          <span
+            style={{
+              fontSize: 11.5,
+              color: ctx.session.canRun ? undefined : "var(--color-warning)",
+              opacity: ctx.session.canRun ? 0.7 : 1,
+            }}
+          >
+            {ctx.session.remoteSessions > 0
+              ? "Runs on the connected remote session"
+              : ctx.session.remoteWakeable
+                ? "Runs on a container (started on demand)"
+                : "DuckDB disabled — enable in the title bar"}
           </span>
         )}
         <span class="wb-sql-name">{tab.title}.sql</span>

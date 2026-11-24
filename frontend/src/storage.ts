@@ -48,9 +48,10 @@ export async function acquireProxyCred(
 }
 
 // Returns a DuckDB CREATE OR REPLACE SECRET statement for the given credential.
-// The secret name uses the bucket (sanitised) so multiple backends can coexist.
+// The secret name hex-encodes the bucket (injective, unlike replacing non-alphanumerics,
+// where `sales-prod` and `sales_prod` would collide) so multiple backends can coexist.
 export function buildS3Secret(cred: ProxyCred): string {
-  const secretName = `_ds_${cred.bucket.replace(/[^a-zA-Z0-9]/g, "_")}`;
+  const secretName = `_ds_${Array.from(new TextEncoder().encode(cred.bucket), (b) => b.toString(16).padStart(2, "0")).join("")}`;
   return (
     `CREATE OR REPLACE SECRET ${secretName} ` +
     `(TYPE s3, ENDPOINT '${cred.endpoint}', ` +

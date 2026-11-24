@@ -869,6 +869,24 @@ app.get("/session/status", requireAuth, async (c) => {
   return new Response(res.body, { status: res.status, headers: res.headers });
 });
 
+// Runs SQL on whichever session is connected (a browser tab or a container,
+// waking the owner's container if none is) — for clients with no DuckDB of
+// their own, e.g. the workbench with its local session switched off. Same
+// relay the MCP run_query tool uses.
+app.post("/api/query", requireAuth, async (c) => {
+  const userId = c.get("userId");
+  const body = (await c.req.json().catch(() => null)) as { sql?: unknown } | null;
+  if (!body || typeof body.sql !== "string" || !body.sql.trim()) {
+    return c.json({ error: "invalid_request", message: "sql is required" }, 400);
+  }
+  const res = await sessionStub(c.env, userId).fetch("http://do/query", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sql: body.sql, userId, workerOrigin: new URL(c.req.url).origin }),
+  });
+  return new Response(res.body, { status: res.status, headers: res.headers });
+});
+
 // Pre-warms a container session (if configured) without running a query —
 // lets a browser with no local DuckDB session, or an MCP client about to run
 // several queries, overlap any cold-start latency with whatever it does next.

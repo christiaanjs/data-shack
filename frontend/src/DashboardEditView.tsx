@@ -258,10 +258,10 @@ export function DashboardEditView({ tab, ctx }: { tab: WbTab; ctx: WbCtx }) {
         )}
         <button
           type="button"
-          class={`btn btn-ghost btn-sm${running || !ctx.session.enabled ? " btn-disabled" : ""}`}
+          class={`btn btn-ghost btn-sm${running || !ctx.session.canRun ? " btn-disabled" : ""}`}
           onClick={runPreview}
-          disabled={running || !ctx.session.enabled}
-          title={!ctx.session.enabled ? "Enable DuckDB to preview" : "Preview dashboard"}
+          disabled={running || !ctx.session.canRun}
+          title={!ctx.session.canRun ? "Enable DuckDB to preview" : "Preview dashboard"}
         >
           {running ? <span class="loading loading-xs" /> : null}
           Preview
