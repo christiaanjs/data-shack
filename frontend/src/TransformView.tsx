@@ -194,7 +194,7 @@ export function TransformView({ tab, ctx }: { tab: WbTab; ctx: WbCtx }) {
           type="button"
           class="btn btn-ghost btn-sm"
           onClick={dryRun}
-          disabled={!ctx.session.enabled || running}
+          disabled={!ctx.session.canRun || running}
         >
           {running ? <span class="loading loading-xs" /> : <PlayIcon size={13} />}
           Dry run

@@ -94,6 +94,10 @@ export function WorkbenchShell() {
   const [callbackError, setCallbackError] = useState<string | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
   const [sessionConnected, setSessionConnected] = useState(false);
+  // Sessions held by something else (another tab, a container) and whether the
+  // Worker could start a container on demand — only tracked while the local
+  // session is off, since that is when queries go to the Worker instead.
+  const [remote, setRemote] = useState({ sessions: 0, wakeable: false });
 
   const [theme, setTheme] = useLocalStorage("wb_theme", "light");
 
@@ -456,6 +460,40 @@ export function WorkbenchShell() {
     }
   }, [authed, sessionEnabled, runCatalogInit]);
 
+  // ── Remote session status (only while the local session is off) ───────────
+  useEffect(() => {
+    if (!authed || sessionEnabled) {
+      setRemote({ sessions: 0, wakeable: false });
+      return;
+    }
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const res = await fetch(`${WORKER_BASE}/session/status`, {
+          headers: await getAuthHeaders(),
+        });
+        if (!res.ok || cancelled) return;
+        const d = (await res.json()) as { sessionCount?: number; containerWakeable?: boolean };
+        if (!cancelled) {
+          setRemote({ sessions: d.sessionCount ?? 0, wakeable: d.containerWakeable ?? false });
+        }
+      } catch {
+        // Non-fatal: the indicator just stays as it was.
+      }
+    };
+    poll();
+    const timer = setInterval(poll, 20_000);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") poll();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [authed, sessionEnabled]);
+
   // ── Effect C: DuckDB + session WebSocket ───────────────────────────────────
   useEffect(() => {
     if (!authed || !sessionEnabled) {
@@ -604,12 +642,50 @@ export function WorkbenchShell() {
       const when = nowClock();
 
       if (!sessionEnabledRef.current) {
-        const result: QueryResult = {
-          columns: [],
-          rows: [],
-          error: "DuckDB session is disabled — enable the toggle in the title bar.",
-        };
-        setLog((l) => [...l.slice(-199), { id: entryId, sql: sqlText, source, result, when }]);
+        // Local DuckDB is off: run on whichever session the Worker can reach
+        // (another tab, or a container it wakes on demand).
+        const t0 = Date.now();
+        let result: QueryResult;
+        try {
+          const res = await fetch(`${WORKER_BASE}/api/query`, {
+            method: "POST",
+            headers: { ...(await getAuthHeaders()), "Content-Type": "application/json" },
+            body: JSON.stringify({ sql: sqlText }),
+          });
+          const d = (await res.json().catch(() => ({}))) as {
+            columns?: string[];
+            rows?: unknown[][];
+            message?: string;
+            error?: string;
+          };
+          result =
+            res.ok && d.columns && d.rows
+              ? { columns: d.columns, rows: d.rows, ms: Date.now() - t0 }
+              : {
+                  columns: [],
+                  rows: [],
+                  error: d.message ?? d.error ?? `Query failed (${res.status})`,
+                };
+        } catch (err) {
+          result = {
+            columns: [],
+            rows: [],
+            error: err instanceof Error ? err.message : String(err),
+          };
+        }
+        setLog((l) => [
+          ...l.slice(-199),
+          { id: entryId, sql: sqlText, source: `${source} · remote`, ms: result.ms, result, when },
+        ]);
+        if (!result.error) {
+          setHistory((h) => {
+            if (h[0]?.sql.trim() === sqlText.trim()) return h;
+            return [{ sql: sqlText, rows: result.rows.length, when: "just now" }, ...h].slice(
+              0,
+              50,
+            );
+          });
+        }
         return result;
       }
 
@@ -730,7 +806,13 @@ export function WorkbenchShell() {
     () => ({
       data,
       schema,
-      session: { enabled: sessionEnabled, connected: sessionConnected },
+      session: {
+        enabled: sessionEnabled,
+        connected: sessionConnected,
+        remoteSessions: remote.sessions,
+        remoteWakeable: remote.wakeable,
+        canRun: sessionEnabled || remote.sessions > 0 || remote.wakeable,
+      },
       theme,
       execute,
       openTab,
@@ -751,6 +833,7 @@ export function WorkbenchShell() {
       schema,
       sessionEnabled,
       sessionConnected,
+      remote,
       theme,
       execute,
       openTab,
@@ -837,14 +920,18 @@ export function WorkbenchShell() {
                 ? "New data committed"
                 : sessionConnected
                   ? "Browser session active"
-                  : "No session"
+                  : remote.sessions > 0
+                    ? "Remote session active"
+                    : "No session"
             }
           >
             <span
               class={`wb-dot${hasNewData ? " wb-dot-warning" : ""}`}
               style={hasNewData ? undefined : { background: "transparent" }}
             />
-            <span class={`wb-dot wb-dot-${sessionConnected ? "success" : "idle"}`} />
+            <span
+              class={`wb-dot wb-dot-${sessionConnected || remote.sessions > 0 ? "success" : "idle"}`}
+            />
           </span>
           <label class="wb-toggle-label" title="Enable DuckDB session">
             <span>DuckDB</span>
@@ -1019,8 +1106,18 @@ export function WorkbenchShell() {
           {/* Status bar */}
           <div class="wb-statusbar">
             <span class="wb-status-item">
-              <span class={`wb-dot wb-dot-${sessionConnected ? "success" : "idle"}`} />
-              {sessionConnected ? "session active" : sessionEnabled ? "connecting…" : "session off"}
+              <span
+                class={`wb-dot wb-dot-${sessionConnected || remote.sessions > 0 ? "success" : "idle"}`}
+              />
+              {sessionConnected
+                ? "session active"
+                : sessionEnabled
+                  ? "connecting…"
+                  : remote.sessions > 0
+                    ? "remote session"
+                    : remote.wakeable
+                      ? "session off · remote on demand"
+                      : "session off"}
             </span>
             <span class="wb-status-item mono">
               {catalogTables.length} table{catalogTables.length === 1 ? "" : "s"}

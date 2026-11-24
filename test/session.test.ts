@@ -22,6 +22,37 @@ describe("GET /session/status", () => {
     const data = (await res.json()) as { sessionCount: number };
     expect(data.sessionCount).toBe(0);
   });
+
+  it("reports no wakeable container when none is configured", async () => {
+    const res = await SELF.fetch("http://localhost/session/status", { headers: DEV_HEADERS });
+    const data = (await res.json()) as { containerWakeable: boolean };
+    expect(data.containerWakeable).toBe(false);
+  });
+});
+
+describe("POST /api/query", () => {
+  const post = (body: unknown, headers: Record<string, string> = DEV_HEADERS) =>
+    SELF.fetch("http://localhost/api/query", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...headers },
+      body: JSON.stringify(body),
+    });
+
+  it("returns 401 without auth", async () => {
+    expect((await post({ sql: "select 1" }, {})).status).toBe(401);
+  });
+
+  it("returns 400 when sql is missing or blank", async () => {
+    expect((await post({})).status).toBe(400);
+    expect((await post({ sql: "   " })).status).toBe(400);
+  });
+
+  it("returns 503 no_session when nothing is connected and no container is configured", async () => {
+    const res = await post({ sql: "select 1" });
+    expect(res.status).toBe(503);
+    const data = (await res.json()) as { error: string };
+    expect(data.error).toBe("no_session");
+  });
 });
 
 describe("GET /session/ws", () => {

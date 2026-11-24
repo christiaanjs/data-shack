@@ -102,7 +102,9 @@ export function ConsoleDock({
                 <div class="wb-con-out" style={{ paddingLeft: 14 }}>
                   {ctx.session.enabled
                     ? "DuckDB-WASM session ready. Type SQL below or run a query from any tab."
-                    : "Enable the DuckDB toggle to run queries."}
+                    : ctx.session.canRun
+                      ? "Local DuckDB is off — queries run on a remote session."
+                      : "Enable the DuckDB toggle to run queries."}
                 </div>
               )}
               {log.map((e) => (
@@ -126,9 +128,9 @@ export function ConsoleDock({
                 spellcheck={false}
                 onChange={(e) => setInput((e.target as HTMLInputElement).value)}
                 onKeyDown={onKey}
-                disabled={!ctx.session.enabled}
+                disabled={!ctx.session.canRun}
               />
-              {!ctx.session.enabled && (
+              {!ctx.session.canRun && (
                 <span class="wb-con-hint" style={{ color: "var(--color-warning)" }}>
                   session disabled
                 </span>

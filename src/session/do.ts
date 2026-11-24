@@ -101,7 +101,11 @@ export class SessionDO implements DurableObject {
       const count = userId
         ? this.ctx.getWebSockets(userId).length
         : this.ctx.getWebSockets().length;
-      return Response.json({ sessionCount: count });
+      return Response.json({
+        sessionCount: count,
+        // Whether a query with nothing connected would wake a container for this user.
+        containerWakeable: !!userId && this.containerWakeEnabled(userId),
+      });
     }
 
     return new Response("Not Found", { status: 404 });

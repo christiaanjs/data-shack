@@ -115,7 +115,16 @@ export interface WbData {
 export interface WbCtx {
   data: WbData;
   schema: Record<string, string[]>;
-  session: { enabled: boolean; connected: boolean };
+  session: {
+    enabled: boolean;
+    connected: boolean;
+    /** Sessions held by something else while the local one is off (another tab, a container). */
+    remoteSessions: number;
+    /** The Worker can start a container on demand when nothing is connected. */
+    remoteWakeable: boolean;
+    /** Queries can run: locally, on a remote session, or on a container the Worker can wake. */
+    canRun: boolean;
+  };
   theme: string;
   execute: (sql: string, opts?: { source?: string }) => Promise<QueryResult>;
   openTab: (kind: string, item?: unknown) => void;
