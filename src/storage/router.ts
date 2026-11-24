@@ -85,6 +85,60 @@ function buildListXml(
   return `<?xml version="1.0" encoding="UTF-8"?><ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Name>${escXml(bucket)}</Name><Prefix>${escXml(prefix)}</Prefix><KeyCount>${objects.length}</KeyCount><MaxKeys>1000</MaxKeys><IsTruncated>false</IsTruncated>${contents}</ListBucketResult>`;
 }
 
+/** How long buffered Google Sheets multipart parts live in KV before expiring. */
+const GSHEETS_MPU_TTL_SECONDS = 3600;
+
+/**
+ * Converts an uploaded body (JSON array or NDJSON from DuckDB COPY TO, else CSV) into
+ * Sheets `values` rows: a header row of the first object's keys, then one row per object.
+ * An empty result yields no rows.
+ */
+function sheetRowsFromBody(bodyText: string): string[][] {
+  const trimmed = bodyText.trimStart();
+  if (trimmed.startsWith("[") || trimmed.startsWith("{")) {
+    const objects: Record<string, unknown>[] = [];
+    if (trimmed.startsWith("[")) {
+      objects.push(...(JSON.parse(bodyText) as Record<string, unknown>[]));
+    } else {
+      for (const line of bodyText.split("\n")) {
+        const l = line.trim();
+        if (l) objects.push(JSON.parse(l) as Record<string, unknown>);
+      }
+    }
+    if (objects.length === 0) return [];
+    const hdrs = Object.keys(objects[0]!);
+    return [hdrs, ...objects.map((obj) => hdrs.map((h) => String(obj[h] ?? "")))];
+  }
+  // CSV fallback (handle CRLF line endings)
+  return bodyText
+    .split("\n")
+    .map((line) => line.replace(/\r$/, ""))
+    .filter((line) => line.trim() !== "")
+    .map((line) => {
+      const cells: string[] = [];
+      let cur = "";
+      let inQuote = false;
+      for (let i = 0; i < line.length; i++) {
+        const ch = line[i]!;
+        if (ch === '"') {
+          if (inQuote && line[i + 1] === '"') {
+            cur += '"';
+            i++;
+          } else {
+            inQuote = !inQuote;
+          }
+        } else if (ch === "," && !inQuote) {
+          cells.push(cur);
+          cur = "";
+        } else {
+          cur += ch;
+        }
+      }
+      cells.push(cur);
+      return cells;
+    });
+}
+
 function parseCompleteMultipartXml(xml: string): Array<{ partNumber: number; etag: string }> {
   const parts: Array<{ partNumber: number; etag: string }> = [];
   const partRe = /<Part>([\s\S]*?)<\/Part>/gi;
@@ -112,7 +166,7 @@ function addCorsHeaders(headers: Headers): void {
   );
 }
 
-function corsError(status: 400 | 401 | 403 | 502, message: string): Response {
+function corsError(status: 400 | 401 | 403 | 404 | 502, message: string): Response {
   const h = new Headers({ "Content-Type": "text/plain" });
   addCorsHeaders(h);
   return new Response(message, { status, headers: h });
@@ -430,74 +484,126 @@ storageRouter.on(["GET", "HEAD", "PUT", "POST", "DELETE", "OPTIONS"], "/s3proxy/
     const keyBase = key.includes(".") ? key.slice(0, key.lastIndexOf(".")) : key;
     const sheetName = keyBase || sheetsCfg.sheetName || "Sheet1";
 
-    if (method === "PUT") {
-      // Accept JSON array or NDJSON (DuckDB COPY TO FORMAT JSON/NDJSON), fall back to CSV.
-      const bodyText = await c.req.text();
-      const trimmed = bodyText.trimStart();
+    const quotedSheet = `'${sheetName.replaceAll("'", "''")}'`;
+    const sheetsValuesBase = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(sheetsCfg.spreadsheetId)}/values`;
+    const sheetsAuth = {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+    };
+
+    // Replaces the sheet's contents with the uploaded body. Rows below the new data are
+    // cleared too, so a shrinking (or empty) result doesn't leave the old rows behind.
+    const writeSheet = async (bodyText: string): Promise<Response | null> => {
       let rows: string[][];
-
-      if (trimmed.startsWith("[") || trimmed.startsWith("{")) {
-        // JSON array or NDJSON from DuckDB COPY TO (FORMAT JSON) or (FORMAT NDJSON)
-        const objects: Record<string, unknown>[] = [];
-        if (trimmed.startsWith("[")) {
-          const arr = JSON.parse(bodyText) as Record<string, unknown>[];
-          objects.push(...arr);
-        } else {
-          for (const line of bodyText.split("\n")) {
-            const l = line.trim();
-            if (l) objects.push(JSON.parse(l) as Record<string, unknown>);
-          }
-        }
-        if (objects.length === 0) {
-          rows = [];
-        } else {
-          const hdrs = Object.keys(objects[0]!);
-          rows = [hdrs, ...objects.map((obj) => hdrs.map((h) => String(obj[h] ?? "")))];
-        }
-      } else {
-        // CSV fallback (handle CRLF line endings)
-        rows = bodyText
-          .split("\n")
-          .map((line) => line.replace(/\r$/, ""))
-          .filter((line) => line.trim() !== "")
-          .map((line) => {
-            const cells: string[] = [];
-            let cur = "";
-            let inQuote = false;
-            for (let i = 0; i < line.length; i++) {
-              const ch = line[i]!;
-              if (ch === '"') {
-                if (inQuote && line[i + 1] === '"') {
-                  cur += '"';
-                  i++;
-                } else {
-                  inQuote = !inQuote;
-                }
-              } else if (ch === "," && !inQuote) {
-                cells.push(cur);
-                cur = "";
-              } else {
-                cur += ch;
-              }
-            }
-            cells.push(cur);
-            return cells;
-          });
+      try {
+        rows = sheetRowsFromBody(bodyText);
+      } catch {
+        return corsError(400, "Body is not valid JSON, NDJSON or CSV");
       }
-
-      const sheetsUrl = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(sheetsCfg.spreadsheetId)}/values/${encodeURIComponent(sheetName)}?valueInputOption=USER_ENTERED`;
-      const sheetsRes = await fetch(sheetsUrl, {
-        method: "PUT",
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ values: rows }),
+      if (rows.length > 0) {
+        const putRes = await fetch(
+          `${sheetsValuesBase}/${encodeURIComponent(sheetName)}?valueInputOption=USER_ENTERED`,
+          { method: "PUT", headers: sheetsAuth, body: JSON.stringify({ values: rows }) },
+        );
+        if (!putRes.ok) return corsError(502, `Sheets API error: ${await putRes.text()}`);
+      }
+      const clearRange = `${quotedSheet}!A${rows.length + 1}:ZZ`;
+      const clearRes = await fetch(`${sheetsValuesBase}/${encodeURIComponent(clearRange)}:clear`, {
+        method: "POST",
+        headers: sheetsAuth,
+        body: "{}",
       });
-      if (!sheetsRes.ok) {
-        const msg = await sheetsRes.text();
-        return corsError(502, `Sheets API error: ${msg}`);
+      if (!clearRes.ok) return corsError(502, `Sheets API error: ${await clearRes.text()}`);
+      return null;
+    };
+
+    // ── Multipart upload (DuckDB COPY TO), buffered in KV until complete ──
+    // The Sheets API has no streaming write, so parts are held (briefly) in KV and the
+    // whole body is written on complete. An upload with no parts clears the sheet.
+    const mpuUploadId = reqUrl.searchParams.get("uploadId");
+    const mpuMetaKey = (id: string) => `gsmpu:${id}`;
+    const mpuPartKey = (id: string, n: number) => `gsmpu:${id}:${n}`;
+    const kv = c.env.PROXY_CREDS_KV;
+    const loadUpload = async (id: string) => {
+      const meta = await kv.get<{ userId: string; backendId: string; key: string }>(
+        mpuMetaKey(id),
+        "json",
+      );
+      return meta && meta.userId === userId && meta.backendId === backendId && meta.key === key
+        ? meta
+        : null;
+    };
+    const dropUpload = async (id: string) => {
+      const listed = await kv.list({ prefix: mpuMetaKey(id) });
+      await Promise.all(listed.keys.map((k) => kv.delete(k.name)));
+    };
+    const noSuchUpload = () => corsError(404, "NoSuchUpload");
+    const xmlResponse = (xml: string) => {
+      const h = new Headers({ "Content-Type": "application/xml" });
+      addCorsHeaders(h);
+      return new Response(xml, { headers: h });
+    };
+
+    if (method === "POST" && reqUrl.searchParams.has("uploads")) {
+      const id = crypto.randomUUID();
+      await kv.put(mpuMetaKey(id), JSON.stringify({ userId, backendId, key }), {
+        expirationTtl: GSHEETS_MPU_TTL_SECONDS,
+      });
+      return xmlResponse(
+        `<?xml version="1.0" encoding="UTF-8"?><InitiateMultipartUploadResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Bucket>${escXml(bucket)}</Bucket><Key>${escXml(key)}</Key><UploadId>${escXml(id)}</UploadId></InitiateMultipartUploadResult>`,
+      );
+    }
+
+    if (method === "PUT" && mpuUploadId && reqUrl.searchParams.has("partNumber")) {
+      if (!(await loadUpload(mpuUploadId))) return noSuchUpload();
+      const partNumber = Number(reqUrl.searchParams.get("partNumber"));
+      if (!Number.isInteger(partNumber) || partNumber < 1) {
+        return corsError(400, "Invalid partNumber");
       }
+      await kv.put(mpuPartKey(mpuUploadId, partNumber), await c.req.arrayBuffer(), {
+        expirationTtl: GSHEETS_MPU_TTL_SECONDS,
+      });
+      const h = new Headers();
+      h.set("ETag", `"gsheets-part-${partNumber}"`);
+      addCorsHeaders(h);
+      return new Response(null, { status: 200, headers: h });
+    }
+
+    if (method === "POST" && mpuUploadId) {
+      if (!(await loadUpload(mpuUploadId))) return noSuchUpload();
+      const parts = parseCompleteMultipartXml(await c.req.text()).sort(
+        (a, b) => a.partNumber - b.partNumber,
+      );
+      const chunks: Uint8Array[] = [];
+      for (const part of parts) {
+        const buf = await kv.get(mpuPartKey(mpuUploadId, part.partNumber), "arrayBuffer");
+        if (!buf) return corsError(400, `InvalidPart: ${part.partNumber}`);
+        chunks.push(new Uint8Array(buf));
+      }
+      const body = new Uint8Array(chunks.reduce((n, ch) => n + ch.length, 0));
+      let offset = 0;
+      for (const ch of chunks) {
+        body.set(ch, offset);
+        offset += ch.length;
+      }
+      const failure = await writeSheet(new TextDecoder().decode(body));
+      if (failure) return failure;
+      await dropUpload(mpuUploadId);
+      return xmlResponse(
+        `<?xml version="1.0" encoding="UTF-8"?><CompleteMultipartUploadResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Bucket>${escXml(bucket)}</Bucket><Key>${escXml(key)}</Key><ETag>"gsheets"</ETag></CompleteMultipartUploadResult>`,
+      );
+    }
+
+    if (method === "DELETE" && mpuUploadId) {
+      await dropUpload(mpuUploadId);
+      const h = new Headers();
+      addCorsHeaders(h);
+      return new Response(null, { status: 204, headers: h });
+    }
+
+    if (method === "PUT") {
+      const failure = await writeSheet(await c.req.text());
+      if (failure) return failure;
       const putHeaders = new Headers();
       putHeaders.set("ETag", '"gsheets"');
       addCorsHeaders(putHeaders);
