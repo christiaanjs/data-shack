@@ -510,9 +510,13 @@ export class SessionDO implements DurableObject {
         ws.serializeAttachment({ ...attachment, inflightJobIds: cleaned });
         // Tell the claimant it lost, so it doesn't run a duplicate of a job
         // that is already running (or gone). Older clients ignore this.
+        console.log(
+          `[SessionDO] job_claimed: REJECTED jobId=${msg.jobId} (status=${claimRes.status})`,
+        );
         ws.send(JSON.stringify({ type: "job_rejected", jobId: msg.jobId }));
         return;
       }
+      console.log(`[SessionDO] job_claimed: accepted jobId=${msg.jobId} userId=${userId}`);
       ws.send(JSON.stringify({ type: "job_accepted", jobId: msg.jobId }));
       this.broadcastJobStatus(userId, msg.jobId, "running");
       return;
@@ -525,6 +529,9 @@ export class SessionDO implements DurableObject {
 
       // Mark job done in catalog DO, which may trigger further jobs.
       const job = await this.getJobSpec(userId, msg.jobId);
+      console.log(
+        `[SessionDO] job_complete: jobId=${msg.jobId} table=${job?.output_table ?? "?"} uri=${job?.output_uri ?? "?"}`,
+      );
       if (job) {
         // Commit the transform output to the catalog.
         const commitRes = await this.catalogStub(userId).fetch("http://do/commit", {
@@ -538,6 +545,9 @@ export class SessionDO implements DurableObject {
             message: `Transform job: ${job.name ?? job.id}`,
           }),
         });
+        console.log(
+          `[SessionDO] job_complete: commit of ${job.output_table} -> ${commitRes.status} jobId=${msg.jobId}`,
+        );
         if (commitRes.ok) {
           const { triggeredJobIds } = (await commitRes.json()) as {
             triggeredJobIds?: string[];
@@ -558,6 +568,7 @@ export class SessionDO implements DurableObject {
 
     if (msg.type === "job_error") {
       const { userId, inflightJobIds } = attachment;
+      console.warn(`[SessionDO] job_error: jobId=${msg.jobId} error=${msg.error}`);
       const updated = inflightJobIds.filter((id) => id !== msg.jobId);
       ws.serializeAttachment({ ...attachment, inflightJobIds: updated });
 
