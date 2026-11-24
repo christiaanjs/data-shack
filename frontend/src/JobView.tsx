@@ -19,12 +19,49 @@ interface LoadJobFull {
   last_error: string | null;
   source_type: string;
   source_config: string | null;
+  date_range_config: string | null;
+  pagination_config: string | null;
 }
 
 interface JvLookup {
   id: string;
   name: string;
   type: string;
+}
+
+function configSummaryRows(job: LoadJobFull): [string, string][] {
+  const rows: [string, string][] = [];
+  const dr = parseConfig<{
+    param_from: string;
+    param_to: string;
+    format: string;
+    lookback_days: number;
+  }>(job.date_range_config);
+  if (dr) {
+    rows.push([
+      "Date range",
+      `${dr.param_from} → ${dr.param_to} (${dr.format}), last ${dr.lookback_days} days`,
+    ]);
+  }
+  const pag = parseConfig<{ cursor_param: string; cursor_path: string; data_path?: string }>(
+    job.pagination_config,
+  );
+  if (pag) {
+    rows.push([
+      "Pagination",
+      `cursor: ${pag.cursor_param} ← ${pag.cursor_path}${pag.data_path ? `, data: ${pag.data_path}` : ""}`,
+    ]);
+  }
+  return rows;
+}
+
+function parseConfig<T>(raw: string | null | undefined): T | null {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return null;
+  }
 }
 
 export function JobView({ tab }: { tab: WbTab; ctx: WbCtx }) {
@@ -58,6 +95,16 @@ export function JobView({ tab }: { tab: WbTab; ctx: WbCtx }) {
   const [fRange, setFRange] = useState("");
   const [fFormat, setFFormat] = useState("ndjson");
   const [fCron, setFCron] = useState("0 * * * *");
+  // HTTP-only request shaping: date-range windowing and cursor pagination.
+  const [fDrOn, setFDrOn] = useState(false);
+  const [fDrFrom, setFDrFrom] = useState("start");
+  const [fDrTo, setFDrTo] = useState("end");
+  const [fDrFormat, setFDrFormat] = useState("iso_date");
+  const [fDrLookback, setFDrLookback] = useState("7");
+  const [fPagOn, setFPagOn] = useState(false);
+  const [fPagCursorParam, setFPagCursorParam] = useState("cursor");
+  const [fPagCursorPath, setFPagCursorPath] = useState("cursor.next");
+  const [fPagDataPath, setFPagDataPath] = useState("");
 
   useEffect(() => {
     const load = async () => {
@@ -103,6 +150,24 @@ export function JobView({ tab }: { tab: WbTab; ctx: WbCtx }) {
     setFTablePath(j.table_path ?? "");
     setFFormat(j.format ?? "ndjson");
     setFCron(j.cron_schedule ?? "0 * * * *");
+    const dr = parseConfig<{
+      param_from: string;
+      param_to: string;
+      format: string;
+      lookback_days: number;
+    }>(j.date_range_config);
+    setFDrOn(dr !== null);
+    setFDrFrom(dr?.param_from ?? "start");
+    setFDrTo(dr?.param_to ?? "end");
+    setFDrFormat(dr?.format ?? "iso_date");
+    setFDrLookback(String(dr?.lookback_days ?? 7));
+    const pag = parseConfig<{ cursor_param: string; cursor_path: string; data_path?: string }>(
+      j.pagination_config,
+    );
+    setFPagOn(pag !== null);
+    setFPagCursorParam(pag?.cursor_param ?? "cursor");
+    setFPagCursorPath(pag?.cursor_path ?? "cursor.next");
+    setFPagDataPath(pag?.data_path ?? "");
     const srcType = (j.source_type ?? "http") as "http" | "google-sheets";
     setFSrcType(srcType);
     if (srcType === "http") {
@@ -168,7 +233,27 @@ export function JobView({ tab }: { tab: WbTab; ctx: WbCtx }) {
                 ...(fRange ? { range: fRange } : {}),
               },
             }
-          : { http_path: fPath, http_method: fMethod }),
+          : {
+              http_path: fPath,
+              http_method: fMethod,
+              // Always sent for HTTP jobs so unchecking a box clears the stored config.
+              date_range_config: fDrOn
+                ? {
+                    param_from: fDrFrom,
+                    param_to: fDrTo,
+                    format: fDrFormat,
+                    lookback_days: Number(fDrLookback),
+                  }
+                : null,
+              pagination_config: fPagOn
+                ? {
+                    type: "cursor",
+                    cursor_param: fPagCursorParam,
+                    cursor_path: fPagCursorPath,
+                    ...(fPagDataPath ? { data_path: fPagDataPath } : {}),
+                  }
+                : null,
+            }),
       };
       const res = await fetch(url, {
         method: isEdit ? "PATCH" : "POST",
@@ -227,6 +312,7 @@ export function JobView({ tab }: { tab: WbTab; ctx: WbCtx }) {
         ["Backend", backendName],
         ["Format", job.format],
         ["Schedule (cron)", job.cron_schedule],
+        ...configSummaryRows(job),
       ]
     : [];
 
@@ -318,6 +404,119 @@ export function JobView({ tab }: { tab: WbTab; ctx: WbCtx }) {
               <option value="POST">POST</option>
             </select>
           </fieldset>
+          <div class="wb-panel" style={{ gridColumn: "1 / -1", padding: 12 }}>
+            <label class="flex items-center gap-2 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                class="checkbox checkbox-sm"
+                checked={fDrOn}
+                onChange={(e) => setFDrOn((e.target as HTMLInputElement).checked)}
+              />
+              <span class="text-sm font-medium">Date range windowing</span>
+            </label>
+            {fDrOn && (
+              <div class="wb-form-grid" style={{ marginTop: 10 }}>
+                <fieldset class="fieldset">
+                  <legend class="fieldset-legend">From param</legend>
+                  <input
+                    type="text"
+                    required
+                    class="input input-sm font-mono w-full"
+                    value={fDrFrom}
+                    onInput={(e) => setFDrFrom((e.target as HTMLInputElement).value)}
+                    placeholder="start_date"
+                  />
+                </fieldset>
+                <fieldset class="fieldset">
+                  <legend class="fieldset-legend">To param</legend>
+                  <input
+                    type="text"
+                    required
+                    class="input input-sm font-mono w-full"
+                    value={fDrTo}
+                    onInput={(e) => setFDrTo((e.target as HTMLInputElement).value)}
+                    placeholder="end_date"
+                  />
+                </fieldset>
+                <fieldset class="fieldset">
+                  <legend class="fieldset-legend">Date format</legend>
+                  <select
+                    class="select select-sm w-full"
+                    value={fDrFormat}
+                    onChange={(e) => setFDrFormat((e.target as HTMLSelectElement).value)}
+                  >
+                    <option value="iso">iso (full ISO 8601)</option>
+                    <option value="iso_date">iso_date (YYYY-MM-DD)</option>
+                    <option value="unix">unix (seconds)</option>
+                    <option value="unix_ms">unix_ms (milliseconds)</option>
+                  </select>
+                </fieldset>
+                <fieldset class="fieldset">
+                  <legend class="fieldset-legend">Lookback days</legend>
+                  <input
+                    type="number"
+                    required
+                    min="1"
+                    class="input input-sm w-full"
+                    value={fDrLookback}
+                    onInput={(e) => setFDrLookback((e.target as HTMLInputElement).value)}
+                  />
+                </fieldset>
+              </div>
+            )}
+          </div>
+          <div class="wb-panel" style={{ gridColumn: "1 / -1", padding: 12 }}>
+            <label class="flex items-center gap-2 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                class="checkbox checkbox-sm"
+                checked={fPagOn}
+                onChange={(e) => {
+                  const on = (e.target as HTMLInputElement).checked;
+                  setFPagOn(on);
+                  // Pagination streams multi-page output, which needs a JSON-ish format.
+                  if (on && fFormat !== "json" && fFormat !== "ndjson") setFFormat("ndjson");
+                }}
+              />
+              <span class="text-sm font-medium">Cursor pagination</span>
+            </label>
+            {fPagOn && (
+              <div class="wb-form-grid" style={{ marginTop: 10 }}>
+                <fieldset class="fieldset">
+                  <legend class="fieldset-legend">Cursor param</legend>
+                  <input
+                    type="text"
+                    required
+                    class="input input-sm font-mono w-full"
+                    value={fPagCursorParam}
+                    onInput={(e) => setFPagCursorParam((e.target as HTMLInputElement).value)}
+                    placeholder="cursor"
+                  />
+                </fieldset>
+                <fieldset class="fieldset">
+                  <legend class="fieldset-legend">Cursor path</legend>
+                  <input
+                    type="text"
+                    required
+                    class="input input-sm font-mono w-full"
+                    value={fPagCursorPath}
+                    onInput={(e) => setFPagCursorPath((e.target as HTMLInputElement).value)}
+                    placeholder="cursor.next"
+                  />
+                </fieldset>
+                <fieldset class="fieldset" style={{ gridColumn: "1 / -1" }}>
+                  <legend class="fieldset-legend">Data path (optional)</legend>
+                  <input
+                    type="text"
+                    class="input input-sm font-mono w-full"
+                    value={fPagDataPath}
+                    onInput={(e) => setFPagDataPath((e.target as HTMLInputElement).value)}
+                    placeholder="items"
+                  />
+                </fieldset>
+              </div>
+            )}
+          </div>
         </>
       ) : (
         <>
@@ -379,8 +578,12 @@ export function JobView({ tab }: { tab: WbTab; ctx: WbCtx }) {
         >
           <option value="ndjson">ndjson</option>
           <option value="json">json</option>
-          <option value="parquet">parquet</option>
-          <option value="csv">csv</option>
+          <option value="parquet" disabled={fPagOn}>
+            parquet{fPagOn ? " (unavailable with pagination)" : ""}
+          </option>
+          <option value="csv" disabled={fPagOn}>
+            csv{fPagOn ? " (unavailable with pagination)" : ""}
+          </option>
         </select>
       </fieldset>
       <fieldset class="fieldset" style={{ gridColumn: "1 / -1" }}>

@@ -777,6 +777,22 @@ app.patch("/api/load-jobs/:id", requireAuth, async (c) => {
   const existingJob = await getLoadJob(c.env.DB, c.get("userId"), c.req.param("id"));
   if (!existingJob) return new Response("Not Found", { status: 404 });
 
+  // An omitted date_range_config / pagination_config keeps the stored value (clients that
+  // don't know about them, like older UIs, must not wipe them on every save); an explicit
+  // null clears it.
+  const nextDateRangeConfig =
+    body.date_range_config === undefined ? existingJob.date_range_config : patchDateRangeConfig;
+  const nextPaginationConfig =
+    body.pagination_config === undefined ? existingJob.pagination_config : patchPaginationConfig;
+  if (
+    body.pagination_config === undefined &&
+    nextPaginationConfig !== null &&
+    typeof body.format === "string" &&
+    !["json", "ndjson"].includes(body.format)
+  ) {
+    return c.json({ error: "pagination_config requires output format json or ndjson" }, 400);
+  }
+
   let updated: Awaited<ReturnType<typeof updateLoadJob>>;
   try {
     updated = await updateLoadJob(c.env.DB, c.get("userId"), c.req.param("id"), {
@@ -789,8 +805,8 @@ app.patch("/api/load-jobs/:id", requireAuth, async (c) => {
       http_method: typeof body.http_method === "string" ? body.http_method : "GET",
       format: typeof body.format === "string" ? body.format : "ndjson",
       cron_schedule: typeof body.cron_schedule === "string" ? body.cron_schedule : "0 * * * *",
-      date_range_config: patchDateRangeConfig,
-      pagination_config: patchPaginationConfig,
+      date_range_config: nextDateRangeConfig,
+      pagination_config: nextPaginationConfig,
       source_type:
         typeof body.source_type === "string" ? body.source_type : existingJob.source_type,
       source_config:
