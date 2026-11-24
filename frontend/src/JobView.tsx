@@ -1,6 +1,7 @@
 import { useEffect, useState } from "preact/hooks";
+import { ConfirmDialog } from "./ConfirmDialog.tsx";
 import { WORKER_BASE, authHeaders, fmtAgo } from "./wb-api.ts";
-import { JobIcon, SaveIcon, SettingsIcon } from "./wbIcons.tsx";
+import { JobIcon, SaveIcon, SettingsIcon, TrashIcon } from "./wbIcons.tsx";
 import type { WbCtx, WbTab } from "./workbench-types.ts";
 
 interface LoadJobFull {
@@ -64,7 +65,7 @@ function parseConfig<T>(raw: string | null | undefined): T | null {
   }
 }
 
-export function JobView({ tab }: { tab: WbTab; ctx: WbCtx }) {
+export function JobView({ tab, ctx }: { tab: WbTab; ctx: WbCtx }) {
   const initial = tab.item as { id?: string } | null;
   const jobId = initial?.id ?? null;
   const isNew = !jobId;
@@ -80,6 +81,9 @@ export function JobView({ tab }: { tab: WbTab; ctx: WbCtx }) {
   const [saving, setSaving] = useState(false);
   const [saveErr, setSaveErr] = useState<string | null>(null);
   const [saveOk, setSaveOk] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteErr, setDeleteErr] = useState<string | null>(null);
 
   // Form fields
   const [fName, setFName] = useState("");
@@ -204,6 +208,27 @@ export function JobView({ tab }: { tab: WbTab; ctx: WbCtx }) {
       setRunMsg("Request failed");
     } finally {
       setRunning(false);
+    }
+  }
+
+  async function deleteJob() {
+    if (!job) return;
+    setDeleting(true);
+    setDeleteErr(null);
+    try {
+      const res = await fetch(`${WORKER_BASE}/api/load-jobs/${job.id}`, {
+        method: "DELETE",
+        headers: await authHeaders(),
+      });
+      if (!res.ok && res.status !== 404) {
+        const d = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(d.error ?? `Delete failed (${res.status})`);
+      }
+      ctx.refreshData();
+      ctx.closeTab(tab.id);
+    } catch (err) {
+      setDeleteErr(err instanceof Error ? err.message : "Delete failed");
+      setDeleting(false);
     }
   }
 
@@ -667,6 +692,18 @@ export function JobView({ tab }: { tab: WbTab; ctx: WbCtx }) {
                 {running && <span class="loading loading-xs" />}
                 {running ? "Running…" : "Run now"}
               </button>
+              <button
+                type="button"
+                class="btn btn-ghost btn-sm"
+                onClick={() => {
+                  setDeleteErr(null);
+                  setConfirmDelete(true);
+                }}
+                title="Delete this load job"
+              >
+                <TrashIcon size={13} />
+                Delete
+              </button>
             </>
           )}
           {mode === "edit" && (
@@ -748,6 +785,18 @@ export function JobView({ tab }: { tab: WbTab; ctx: WbCtx }) {
             </table>
           </div>
         </div>
+      )}
+
+      {confirmDelete && job && (
+        <ConfirmDialog
+          title={`Delete load job "${job.name}"?`}
+          message="The job stops running on its schedule and cannot be restored. Data it has already loaded stays in storage and in the catalog."
+          confirmLabel="Delete job"
+          busy={deleting}
+          error={deleteErr}
+          onConfirm={() => void deleteJob()}
+          onCancel={() => setConfirmDelete(false)}
+        />
       )}
 
       {/* Create / edit: form */}

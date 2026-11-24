@@ -1,9 +1,18 @@
 import { useEffect, useRef, useState } from "preact/hooks";
+import { ConfirmDialog } from "./ConfirmDialog.tsx";
 import { ResultGrid } from "./ResultGrid.tsx";
 import type { SqlEditorHandle } from "./SqlEditor.tsx";
 import { SqlEditor } from "./SqlEditor.tsx";
 import { WORKER_BASE, authHeaders, fmtAgo } from "./wb-api.ts";
-import { PlayIcon, PlusIcon, SaveIcon, TableIcon, TransformIcon, XIcon } from "./wbIcons.tsx";
+import {
+  PlayIcon,
+  PlusIcon,
+  SaveIcon,
+  TableIcon,
+  TransformIcon,
+  TrashIcon,
+  XIcon,
+} from "./wbIcons.tsx";
 import type { QueryResult, WbCtx, WbTab, WbTransform } from "./workbench-types.ts";
 
 interface TrTrigger {
@@ -24,6 +33,9 @@ export function TransformView({ tab, ctx }: { tab: WbTab; ctx: WbCtx }) {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saveOk, setSaveOk] = useState(false);
   const [triggering, setTriggering] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteErr, setDeleteErr] = useState<string | null>(null);
   const [runMsg, setRunMsg] = useState<string | null>(null);
 
   // Trigger editing
@@ -60,6 +72,27 @@ export function TransformView({ tab, ctx }: { tab: WbTab; ctx: WbCtx }) {
       )
       .catch(() => {});
   }, [trId]);
+
+  // Deletes the job and its triggers. The output table and its files are left in place.
+  async function deleteTransform() {
+    if (!tr) return;
+    setDeleting(true);
+    setDeleteErr(null);
+    try {
+      const res = await fetch(`${WORKER_BASE}/api/transform-jobs/${tr.id}`, {
+        method: "DELETE",
+        headers: await authHeaders(),
+      });
+      if (!res.ok && res.status !== 404) {
+        throw new Error((await res.text()) || `Delete failed (${res.status})`);
+      }
+      ctx.refreshData();
+      ctx.closeTab(tab.id);
+    } catch (err) {
+      setDeleteErr(err instanceof Error ? err.message : "Delete failed");
+      setDeleting(false);
+    }
+  }
 
   // Queue the saved job to run for real (output written + committed), unlike Dry run, which
   // only executes the editor's SQL here and writes nothing.
@@ -187,6 +220,22 @@ export function TransformView({ tab, ctx }: { tab: WbTab; ctx: WbCtx }) {
 
   return (
     <div class="wb-sql">
+      {confirmDelete && tr && (
+        <ConfirmDialog
+          title={`Delete transform "${tr.name ?? tr.output_table}"?`}
+          message={
+            <>
+              The transform and its triggers are deleted and it will no longer run. The output table{" "}
+              <code class="font-mono">{tr.output_table}</code> and its files are kept.
+            </>
+          }
+          confirmLabel="Delete transform"
+          busy={deleting}
+          error={deleteErr}
+          onConfirm={() => void deleteTransform()}
+          onCancel={() => setConfirmDelete(false)}
+        />
+      )}
       <div class="wb-sql-toolbar" style={{ gap: 10 }}>
         <span class="wb-doc-kicker" style={{ textTransform: "none", letterSpacing: 0 }}>
           <TransformIcon size={13} />
@@ -227,6 +276,20 @@ export function TransformView({ tab, ctx }: { tab: WbTab; ctx: WbCtx }) {
           Dry run
         </button>
         {runMsg && <span class="wb-tr-hint">{runMsg}</span>}
+        {!isNew && (
+          <button
+            type="button"
+            class="btn btn-ghost btn-sm"
+            title="Delete this transform"
+            onClick={() => {
+              setDeleteErr(null);
+              setConfirmDelete(true);
+            }}
+          >
+            <TrashIcon size={13} />
+            Delete
+          </button>
+        )}
         {!isNew && (
           <button
             type="button"

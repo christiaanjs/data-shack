@@ -794,6 +794,27 @@ export function WorkbenchShell() {
     }
   }, []);
 
+  const deleteSavedQuery = useCallback(async (id: string): Promise<string | null> => {
+    try {
+      const res = await fetch(`${WORKER_BASE}/api/saved-queries/${encodeURIComponent(id)}`, {
+        method: "DELETE",
+        headers: await getAuthHeaders(),
+      });
+      if (!res.ok && res.status !== 404) {
+        const d = (await res.json().catch(() => ({}))) as { error?: string };
+        return d.error ?? `Delete failed (${res.status})`;
+      }
+      setSavedQueries((prev) => prev.filter((q) => q.id !== id));
+      // An open tab keeps its SQL but is no longer a saved query.
+      setTabs((prev) =>
+        prev.map((t) => (t.savedId === id ? { ...t, savedId: undefined, key: `sql:${uid()}` } : t)),
+      );
+      return null;
+    } catch (err) {
+      return err instanceof Error ? err.message : "Delete failed";
+    }
+  }, []);
+
   // ── Commit table ──────────────────────────────────────────────────────────
 
   const commitTable = useCallback(({ name, uri }: { name: string; uri: string }) => {
@@ -879,6 +900,8 @@ export function WorkbenchShell() {
       toggleDock,
       openPalette,
       refreshData: loadExplorerData,
+      refreshCatalog: () => void resyncCatalog(),
+      deleteSavedQuery,
     }),
     [
       data,
@@ -900,6 +923,8 @@ export function WorkbenchShell() {
       toggleDock,
       openPalette,
       loadExplorerData,
+      resyncCatalog,
+      deleteSavedQuery,
     ],
   );
 
