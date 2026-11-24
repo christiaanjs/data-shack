@@ -22,4 +22,6 @@ export interface Env {
   ALLOW_ORIGIN_SUBDOMAINS: string;
   DEFAULT_OAUTH_PROVIDER?: string;
   MAX_PAGINATION_PAGES?: string;
+  /** User id allowed to wake the Worker-owned container (wake-on-query). Unset = nobody. */
+  CONTAINER_OWNER_USER_ID?: string;
 }

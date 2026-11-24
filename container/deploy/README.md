@@ -76,7 +76,7 @@ while it's actually running.
   Cloudflare account, no Miniflare container emulation — see the next
   paragraph).
 
-**Turning it on**: uncomment the `[[containers]]` block in `wrangler.toml`
+**Turning it on**: set `CONTAINER_OWNER_USER_ID` to the one user id (see `GET /me`) whose container may be woken — every other user's `SessionDO` ignores the binding, and with the var unset nobody's is woken, so the feature costs nothing for anyone but that user — and uncomment the `[[containers]]` block in `wrangler.toml`
 (and its `[env.staging.containers]` counterpart, if wanted there too) —
 commented out by default since adding it makes `wrangler deploy`/`wrangler
 dev` require Docker and a Containers-entitled Workers Paid plan, which

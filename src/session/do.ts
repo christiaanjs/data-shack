@@ -1,6 +1,7 @@
 import type { TransformJob } from "../catalog/do.ts";
 import { apiTokenExists, insertApiToken } from "../db/api-tokens.ts";
 import type { Env } from "../types.ts";
+import { isContainerOwner } from "./container-owner.ts";
 
 export interface QueryResult {
   columns: string[];
@@ -166,7 +167,7 @@ export class SessionDO implements DurableObject {
       return Response.json(
         {
           error: "no_session",
-          message: this.ctx.container
+          message: this.containerWakeEnabled(userId)
             ? "No active session, and the container didn't come up in time. Try again, or check its logs."
             : "No active browser session. Open a browser tab to run queries.",
         },
@@ -287,7 +288,7 @@ export class SessionDO implements DurableObject {
     if (this.liveSocketsFor(userId).length > 0) {
       return Response.json({ status: "already-active" });
     }
-    if (!this.ctx.container) {
+    if (!this.containerWakeEnabled(userId)) {
       return Response.json({ status: "unavailable" });
     }
     if (!workerOrigin) {
@@ -310,6 +311,11 @@ export class SessionDO implements DurableObject {
   // @cloudflare/vitest-pool-workers), so every caller above already checks
   // or no-ops before reaching here. None of this has been exercised against
   // real Cloudflare infra yet — see container/deploy/README.md.
+
+  /** True only when a container is bound AND this user is the configured owner. */
+  private containerWakeEnabled(userId: string): boolean {
+    return !!this.ctx.container && isContainerOwner(this.env, userId);
+  }
 
   private resolveContainerWakeWaiters(): void {
     const waiters = this.containerWakeWaiters;
@@ -366,7 +372,7 @@ export class SessionDO implements DurableObject {
    * whatever the reason (unconfigured, start() failed, timed out). */
   private async ensureContainerStarted(userId: string, workerOrigin: string): Promise<boolean> {
     const container = this.ctx.container;
-    if (!container) return false;
+    if (!container || !isContainerOwner(this.env, userId)) return false;
     if (this.liveSocketsFor(userId).length > 0) return true;
 
     if (!this.containerStarting) {

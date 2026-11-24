@@ -33,6 +33,10 @@ class_name = "SessionDO"
 # available wherever you run `wrangler deploy`/`wrangler dev`. Until
 # uncommented, SessionDO behaves exactly as before (ctx.container is
 # undefined, every container code path no-ops).
+#
+# Wake-on-query is for ONE user only: also set CONTAINER_OWNER_USER_ID (a user id,
+# see GET /me) in [vars] / [env.staging.vars]. Other users never wake a container,
+# and with it unset nobody does.
 # [[containers]]
 # class_name = "SessionDO"
 # image = "./container/Dockerfile"
