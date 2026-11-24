@@ -4,6 +4,7 @@ import { createMiddleware } from "hono/factory";
 import { Hono } from "hono/tiny";
 import { authenticate } from "./auth/middleware.ts";
 import { oauthRouter } from "./auth/oauth.ts";
+import { commitToCatalog, dispatchTriggeredJobs } from "./catalog/commit.ts";
 import { CatalogDO } from "./catalog/do.ts";
 export { CatalogDO };
 import { SessionDO } from "./session/do.ts";
@@ -616,35 +617,14 @@ app.delete("/catalog/tables/:table", requireAuth, async (c) => {
 app.post("/catalog/commit", requireAuth, async (c) => {
   const body = await c.req.json();
   const userId = c.get("userId");
-  const res = await catalogStub(c.env, userId).fetch("http://do/commit", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (res.ok) {
-    const cloned = res.clone();
-    c.executionCtx.waitUntil(
-      (async () => {
-        const data = (await cloned.json()) as { triggeredJobIds?: string[] };
-        if (data.triggeredJobIds && data.triggeredJobIds.length > 0) {
-          try {
-            await sessionStub(c.env, userId).fetch("http://do/dispatch-jobs", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                userId,
-                jobIds: data.triggeredJobIds,
-                workerOrigin: new URL(c.req.url).origin,
-              }),
-            });
-          } catch {
-            // Best-effort: jobs remain pending and will be dispatched on next browser connect.
-          }
-        }
-      })(),
-    );
+  const commit = await commitToCatalog(catalogStub(c.env, userId), body);
+  if (!commit.ok) {
+    return new Response(commit.error, { status: commit.status });
   }
-  return new Response(res.body, { status: res.status, headers: res.headers });
+  c.executionCtx.waitUntil(
+    dispatchTriggeredJobs(c.env, userId, commit.triggeredJobIds, new URL(c.req.url).origin),
+  );
+  return c.json(commit.data ?? {}, commit.status as 200);
 });
 
 // ── Load jobs endpoints ───────────────────────────────────────────────────
@@ -1329,18 +1309,8 @@ export default {
         }
         const nextRunAt = new Cron(job.cron_schedule).nextRun()?.getTime() ?? null;
         await updateLoadJobOutcome(env.DB, job.id, Date.now(), nextRunAt);
-        // Dispatch any triggered transform jobs to the connected browser session.
-        if (triggeredJobIds.length > 0) {
-          try {
-            await sessionStub(env, job.user_id).fetch("http://do/dispatch-jobs", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ userId: job.user_id }),
-            });
-          } catch {
-            // Best-effort; jobs remain pending and dispatch on next browser connect.
-          }
-        }
+        // Hand triggered transform jobs to the session DO (live socket, or wake the container).
+        await dispatchTriggeredJobs(env, job.user_id, triggeredJobIds);
         msg.ack();
       }),
     );

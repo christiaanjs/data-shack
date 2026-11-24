@@ -1,3 +1,4 @@
+import { commitToCatalog } from "../catalog/commit.ts";
 import { decryptConfig } from "../crypto.ts";
 import type { LoadJob } from "../db/load-jobs.ts";
 import { getCredentialConfig, getStorageBackendConfig } from "../db/settings.ts";
@@ -440,24 +441,15 @@ export async function runHttpLoadJob(
 
   // 6. Commit to catalog DO
   const stub = env.CATALOG.get(env.CATALOG.idFromName(job.user_id));
-  const commitRes = await stub.fetch(
-    new Request("http://internal/commit", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        table: job.table_name,
-        uri,
-        storageBackend: job.storage_backend_id,
-        format: job.format,
-        message: `Load job: ${job.name}`,
-      }),
-    }),
-  );
-  if (!commitRes.ok) {
-    const text = await commitRes.text();
-    throw new Error(`Catalog commit failed: ${commitRes.status} ${text}`);
+  const commit = await commitToCatalog(stub, {
+    table: job.table_name,
+    uri,
+    storageBackend: job.storage_backend_id,
+    format: job.format,
+    message: `Load job: ${job.name}`,
+  });
+  if (!commit.ok) {
+    throw new Error(`Catalog commit failed: ${commit.status} ${commit.error}`);
   }
-
-  const commitData = (await commitRes.json()) as { triggeredJobIds?: string[] };
-  return { uri, triggeredJobIds: commitData.triggeredJobIds ?? [] };
+  return { uri, triggeredJobIds: commit.triggeredJobIds };
 }
