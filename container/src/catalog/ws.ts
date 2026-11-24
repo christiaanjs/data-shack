@@ -105,6 +105,9 @@ export function connectCatalogWs(config: {
           created_at: event.createdAt ?? Date.now(),
         };
 
+        logger.info(
+          `commit received: table=${event.table} snapshot=${event.snapshotId} uri=${event.uri}`,
+        );
         const thisRefresh = refreshChain.then(async () => {
           try {
             await refreshSingleView(engine, event.table, snapshot, workerBase, getAuthHeaders);

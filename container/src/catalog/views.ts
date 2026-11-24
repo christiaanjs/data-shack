@@ -43,6 +43,31 @@ export function inferFormat(uri: string): string {
   return "json";
 }
 
+/** What each catalog view currently points at, so job logs can say which snapshot a query read. */
+export interface ViewState {
+  snapshotId: string;
+  uri: string;
+  registeredAt: number;
+}
+const viewState = new Map<string, ViewState>();
+
+/** Views (by name) referenced in `sql`, with the snapshot each currently points at. */
+export function describeViewsUsedBy(sql: string): Array<ViewState & { name: string }> {
+  const lower = sql.toLowerCase();
+  const out: Array<ViewState & { name: string }> = [];
+  for (const [name, state] of viewState) {
+    if (new RegExp(`\\b${name.toLowerCase().replace(/[^a-z0-9_]/g, "\\$&")}\\b`).test(lower)) {
+      out.push({ name, ...state });
+    }
+  }
+  return out;
+}
+
+function recordView(name: string, snapshot: CatalogSnapshot): void {
+  viewState.set(name, { snapshotId: snapshot.id, uri: snapshot.uri, registeredAt: Date.now() });
+  logger.info(`view "${name}" -> snapshot ${snapshot.id} (${snapshot.uri})`);
+}
+
 export interface RegisterResult {
   tables: CatalogTableWithSnapshot[];
   failed: string[];
@@ -201,6 +226,7 @@ async function registerView(
       await engine.runQuery(
         `CREATE OR REPLACE VIEW "${safeId}" AS SELECT * FROM ${readerFn(snapshot.uri, snapshot.format)}('${tokenUrl}')`,
       );
+      recordView(tableName, snapshot);
     } catch (err) {
       logger.warn(`view "${tableName}" (http-ds) failed`, err);
       failed.push(tableName);
@@ -240,6 +266,7 @@ async function registerView(
     await engine.runQuery(`CREATE OR REPLACE VIEW "${safeId}" AS SELECT * FROM ${readExpr}`, [
       preamble,
     ]);
+    recordView(tableName, snapshot);
   } catch (err) {
     logger.warn(`view "${tableName}" failed`, err);
     failed.push(tableName);

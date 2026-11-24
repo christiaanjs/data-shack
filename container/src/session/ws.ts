@@ -3,6 +3,7 @@
 // browser tab would (src/session/do.ts does not distinguish client types).
 import type WebSocket from "ws";
 import type { TokenProvider } from "../auth/tokenProvider.js";
+import { describeViewsUsedBy } from "../catalog/views.js";
 import type { DuckDBEngine } from "../duckdb/engine.js";
 import { createLogger } from "../logger.js";
 import { resolveStorageUris } from "../resolveQuery.js";
@@ -92,7 +93,7 @@ export function connectSession(config: {
 
   async function handleTransformJob(
     ws: WebSocket,
-    msg: { jobId: string; sql: string },
+    msg: { jobId: string; sql: string; outputUri?: string },
   ): Promise<void> {
     if (activeJobs.has(msg.jobId)) {
       logger.info(`job ${msg.jobId} already running on this socket — skipping duplicate dispatch`);
@@ -106,33 +107,52 @@ export function connectSession(config: {
     }
   }
 
-  async function runClaimedJob(ws: WebSocket, msg: { jobId: string; sql: string }): Promise<void> {
+  async function runClaimedJob(
+    ws: WebSocket,
+    msg: { jobId: string; sql: string; outputUri?: string },
+  ): Promise<void> {
     if (!(await claimJob(ws, msg.jobId))) {
       logger.info(`job ${msg.jobId} already claimed elsewhere — skipping`);
       return;
     }
 
+    const startedAt = Date.now();
     const runOnce = async () => {
       const { sql, preamble } = await resolveStorageUris(msg.sql, workerBase, getAuthHeaders);
-      await engine.runQuery(sql, preamble.length > 0 ? preamble : undefined);
+      const inputs = describeViewsUsedBy(msg.sql)
+        .map(
+          (v) =>
+            `${v.name}@${v.snapshotId} (registered ${Math.round((Date.now() - v.registeredAt) / 1000)}s ago)`,
+        )
+        .join(", ");
+      logger.info(
+        `job ${msg.jobId} running: inputs=[${inputs || "none"}] preamble=${preamble.length}`,
+      );
+      return engine.runQuery(sql, preamble.length > 0 ? preamble : undefined);
     };
+    const describe = (r: { columns: string[]; rows: unknown[][] }) =>
+      `columns=[${r.columns.join(",")}] firstRow=${JSON.stringify(r.rows[0] ?? null)}`;
 
     try {
+      let result: Awaited<ReturnType<typeof runOnce>>;
       try {
-        await runOnce();
+        result = await runOnce();
       } catch (err) {
         // A job dispatched right after a reconnect can race the catalog
         // resync — retry once after giving it a chance to settle.
         if (!isStaleCatalogError(err)) throw err;
+        logger.warn(`job ${msg.jobId} hit a stale-catalog error, retrying: ${String(err)}`);
         await new Promise((r) => setTimeout(r, 2000));
         await getCatalogReady();
-        await runOnce();
+        result = await runOnce();
       }
       ws.send(JSON.stringify({ type: "job_complete", jobId: msg.jobId }));
-      logger.info(`transform job ${msg.jobId} complete`);
+      logger.info(
+        `transform job ${msg.jobId} complete in ${Date.now() - startedAt}ms -> ${msg.outputUri ?? "?"} ${describe(result)}`,
+      );
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
-      logger.warn(`transform job ${msg.jobId} failed: ${error}`);
+      logger.warn(`transform job ${msg.jobId} failed after ${Date.now() - startedAt}ms: ${error}`);
       ws.send(JSON.stringify({ type: "job_error", jobId: msg.jobId, error }));
     }
   }
