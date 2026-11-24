@@ -76,6 +76,8 @@ while it's actually running.
   Cloudflare account, no Miniflare container emulation — see the next
   paragraph).
 
+**Staging has it on**: `[[env.staging.containers]]` is enabled in `wrangler.toml` and `deploy.yml` fails unless the staging environment has a `CONTAINER_OWNER_USER_ID` variable. For other environments, turn it on as follows.
+
 **Turning it on**: set `CONTAINER_OWNER_USER_ID` to the one user id (see `GET /me`) whose container may be woken — every other user's `SessionDO` ignores the binding, and with the var unset nobody's is woken, so the feature costs nothing for anyone but that user — and uncomment the `[[containers]]` block in `wrangler.toml`
 (and its `[env.staging.containers]` counterpart, if wanted there too) —
 commented out by default since adding it makes `wrangler deploy`/`wrangler

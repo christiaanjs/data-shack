@@ -50,13 +50,20 @@ jobs:
 
       - name: Deploy worker
         env:
+          CONTAINER_OWNER_USER_ID: ${{ vars.CONTAINER_OWNER_USER_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           if [[ "${{ inputs.environment }}" == "production" ]]; then
             npx wrangler deploy
           else
-            npx wrangler deploy --env staging
+            # Wake-on-query container is single-owner: set CONTAINER_OWNER_USER_ID
+            # (a user id from GET /me) as a variable on the staging environment.
+            if [ -z "$CONTAINER_OWNER_USER_ID" ]; then
+              echo "::error::Set the CONTAINER_OWNER_USER_ID variable on the staging environment"
+              exit 1
+            fi
+            npx wrangler deploy --env staging --var "CONTAINER_OWNER_USER_ID:$CONTAINER_OWNER_USER_ID"
           fi
 
       - name: Deploy frontend (Pages)

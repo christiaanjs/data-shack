@@ -101,15 +101,18 @@ class_name = "CatalogDO"
 name = "SESSION_DO"
 class_name = "SessionDO"
 
-# See the commented [[containers]] block above the root migrations — same
-# idea, scoped to staging. Wrangler environments don't inherit array-type
-# config from root (same reason durable_objects.bindings is duplicated
-# above), so this needs its own [[env.staging.containers]] entry too.
-# [[env.staging.containers]]
-# class_name = "SessionDO"
-# image = "./container/Dockerfile"
-# instance_type = "standard-1"
-# max_instances = 20
+# Wake-on-query container for staging (see the commented root [[containers]]
+# block above for what it is). Enabled here because staging is the self-hosted
+# deployment: only the user in CONTAINER_OWNER_USER_ID ever wakes it (deploy.yml
+# passes it from the GitHub environment variable of the same name). Wrangler
+# environments don't inherit array-type config from root, so it lives here.
+# Needs Docker and a Containers-entitled Workers Paid plan to deploy; local dev
+# and tests use the default environment and are unaffected.
+[[env.staging.containers]]
+class_name = "SessionDO"
+image = "./container/Dockerfile"
+instance_type = "standard-1"
+max_instances = 5
 
 [[env.staging.queues.producers]]
 binding = "LOAD_JOB_QUEUE"
